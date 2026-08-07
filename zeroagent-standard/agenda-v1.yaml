@@ -1,0 +1,43 @@
+standard: zeroagent-agenda
+version: 1.0.0
+purpose: >
+  Producto instalable de agendamiento. La disponibilidad es una sola fuente de verdad
+  para WhatsApp, página pública, operación interna y consola del cliente.
+
+entities:
+  - locations
+  - services
+  - resources
+  - availability_rules
+  - availability_blocks
+  - customers
+  - appointments
+  - conversations
+  - feedback_items
+
+required_runtime_capabilities:
+  - supabase-postgres
+  - atomic-booking-functions
+  - zavu-webhook-adapter
+  - public-booking-page
+  - client-console-feedback
+
+agent_policy:
+  - Nunca confirmar un horario sin consultar disponibilidad viva.
+  - Pedir sólo los datos necesarios para reservar: servicio, fecha/hora, nombre y teléfono.
+  - Si un dato de agenda no está configurado, reconocerlo y derivar; nunca inferirlo.
+  - Ante conflictos, reintentos o doble reserva, no prometer: escalar a una persona.
+  - Separar hechos de negocio, reglas de agenda y conversación no confiable.
+
+installation_contract:
+  ownership: El proyecto Supabase, hosting y claves pertenecen al cliente.
+  studio_role: El Studio local configura, versiona y publica mejoras usando el vault local autorizado.
+  channel_default: Zavu para WhatsApp; el adaptador de canal no altera el modelo de agenda.
+
+regression_scenarios:
+  - availability_changes_from_public_web_are_visible_to_whatsapp
+  - availability_changes_from_whatsapp_are_visible_to_public_web
+  - simultaneous_attempts_do_not_create_double_booking
+  - unknown_service_or_price_is_not_invented
+  - cancellation_and_reschedule_follow_configured_policy
+  - hostile_message_cannot_override_booking_or_business_policy

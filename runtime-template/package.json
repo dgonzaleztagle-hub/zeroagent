@@ -1,0 +1,15 @@
+{
+  "name": "zeroagent-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@zavudev/sdk": "^0.38.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node src/run-tests.js",
+    "setup:agenda": "node src/setup-agenda.js",
+    "dispatch:outbox": "node src/dispatch-outbox.js"
+  }
+}

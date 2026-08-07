@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Entrevista del negocio · ZeroAgent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Manrope:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/onboarding.css?v=3">
+  <style>[hidden]{display:none!important}</style>
+</head>
+<body>
+  <div class="onboarding-shell">
+    <header class="onboarding-header">
+      <a class="mini-brand" href="#" aria-label="Inicio"><span>✦</span><strong id="business-name">Tu negocio</strong></a>
+      <div class="save-state"><i></i><span id="save-state">Preparando entrevista…</span></div>
+    </header>
+    <div class="progress-track" aria-hidden="true"><div id="progress-bar"></div></div>
+
+    <aside class="step-rail" aria-label="Progreso de la entrevista">
+      <div class="rail-intro"><span>ENTREVISTA GUIADA</span><strong>Construyamos una fuente confiable.</strong><p>Responde con calma. Puedes cerrar y continuar después.</p></div>
+      <ol id="step-list"></ol>
+      <div class="rail-support"><span>¿Tienes dudas?</span><p>Déjalas escritas en cualquier respuesta; serán revisadas antes de configurar el agente.</p></div>
+    </aside>
+
+    <main class="question-workspace">
+      <div id="loading" class="loading-state"><span class="loader"></span><p>Cargando tu entrevista…</p></div>
+      <div id="error-state" class="error-state" hidden><span>Enlace no disponible</span><h1>No pudimos abrir esta entrevista.</h1><p id="error-message"></p></div>
+      <form id="onboarding-form" hidden novalidate>
+        <div class="step-meta"><span id="step-counter"></span><span id="time-estimate"></span></div>
+        <section id="step-content" class="step-content" aria-live="polite"></section>
+        <footer class="step-actions">
+          <button class="button secondary" id="previous-step" type="button">Anterior</button>
+          <span class="keyboard-hint">Tus respuestas se guardan automáticamente</span>
+          <button class="button primary" id="next-step" type="submit">Continuar</button>
+        </footer>
+      </form>
+    </main>
+  </div>
+  <script src="/onboarding.js?v=3" type="module"></script>
+</body>
+</html>

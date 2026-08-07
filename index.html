@@ -1,0 +1,904 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ZeroAgent Studio · Fábrica de agentes</title>
+  <!-- Google Fonts: Outfit & Plus Jakarta Sans -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- CSS Styles -->
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="studio-redesign.css">
+  <link rel="stylesheet" href="prospecting.css">
+</head>
+<body>
+  <div class="app-container">
+    
+    <!-- BARRA LATERAL (SIDEBAR) -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-logo">
+          <i data-lucide="bot" class="logo-icon"></i>
+        </div>
+        <div class="brand-text">
+          <h1>ZeroAgent</h1>
+          <span>Agent operations studio</span>
+        </div>
+      </div>
+      
+      <nav class="sidebar-menu" aria-label="Navegación principal">
+        <span class="menu-group-label">Portafolio</span>
+        <a href="#overview" class="menu-item active" data-view="overview">
+          <i data-lucide="briefcase-business"></i>
+          <span>Clientes</span>
+        </a>
+        <a href="#activity" class="menu-item" data-view="activity">
+          <i data-lucide="bell-ring"></i>
+          <span>Actividad</span><b class="nav-count" id="activity-nav-count">0</b>
+        </a>
+        <a href="#prospecting" class="menu-item" data-view="prospecting">
+          <i data-lucide="radar"></i>
+          <span>Prospección</span><b class="nav-count" id="prospecting-nav-count">0</b>
+        </a>
+        <span class="menu-group-label">Cliente activo</span>
+        <a href="#project" class="menu-item" data-view="project">
+          <i data-lucide="layout-template"></i>
+          <span>Resumen</span>
+        </a>
+        <a href="#sources" class="menu-item" data-view="sources">
+          <i data-lucide="clipboard-pen-line"></i>
+          <span>Diagnóstico</span>
+        </a>
+        <a href="#knowledge" class="menu-item" data-view="knowledge">
+          <i data-lucide="brain-circuit"></i>
+          <span>Conocimiento</span>
+        </a>
+        <a href="#editor" class="menu-item" data-view="editor">
+          <i data-lucide="sparkles"></i>
+          <span>Solución</span>
+        </a>
+        <a href="#agenda" class="menu-item" data-view="agenda">
+          <i data-lucide="calendar-range"></i>
+          <span>Agenda</span>
+        </a>
+        <a href="#simulator" class="menu-item" data-view="simulator">
+          <i data-lucide="badge-check"></i>
+          <span>Calidad</span>
+        </a>
+        <span class="menu-group-label">Entrega</span>
+        <a href="#ai-usage" class="menu-item" data-view="ai-usage">
+          <i data-lucide="activity"></i>
+          <span>Monitoreo</span>
+        </a>
+        <span class="menu-group-label">Studio</span>
+        <a href="#settings" class="menu-item" data-view="settings">
+          <i data-lucide="settings"></i>
+          <span>Configuración</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="active-profile">
+          <div class="profile-avatar">AD</div>
+          <div class="profile-info">
+          <span class="profile-name">Studio local</span>
+          <span class="profile-role"><span class="status-dot"></span> Datos bajo tu control</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ÁREA DE CONTENIDO PRINCIPAL -->
+    <main class="main-content">
+      
+      <!-- HEADER -->
+      <header class="main-header">
+        <div class="header-left">
+          <h2 id="view-title">Portafolio</h2>
+          <p id="view-subtitle" class="text-muted">Clientes, agentes y próximas acciones en un solo lugar</p>
+        </div>
+        <div class="header-right">
+          <!-- Selector de Cliente Activo -->
+          <div class="client-selector-container">
+              <label for="global-client-select"><i data-lucide="building-2" class="icon-sm"></i> Cliente activo</label>
+            <select id="global-client-select" class="custom-select">
+              <option value="" disabled selected>Selecciona un cliente...</option>
+            </select>
+          </div>
+          <button id="btn-new-client" class="btn btn-primary">
+            <i data-lucide="plus"></i>
+            <span>Nuevo cliente</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- VISTAS DINÁMICAS -->
+      <div class="views-wrapper">
+        
+        <!-- VISTA: OVERVIEW -->
+        <section id="view-overview" class="app-view active">
+          <!-- Tarjetas de Estadísticas Rápidas -->
+          <div class="stats-grid">
+            <div class="stat-card">
+              <div class="stat-icon icon-emerald"><i data-lucide="users"></i></div>
+              <div class="stat-data">
+                <span class="stat-value" id="stat-total-clients">0</span>
+                <span class="stat-label">Clientes / Prospectos</span>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon icon-blue"><i data-lucide="brain"></i></div>
+              <div class="stat-data">
+                <span class="stat-value" id="stat-trained-agents">0</span>
+                <span class="stat-label">Proyectos en curso</span>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon icon-purple"><i data-lucide="file-text"></i></div>
+              <div class="stat-data">
+                <span class="stat-value" id="stat-total-docs">0</span>
+                <span class="stat-label">Fuentes registradas</span>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon icon-orange"><i data-lucide="message-square"></i></div>
+              <div class="stat-data">
+                <span class="stat-value" id="stat-total-chats">0</span>
+                <span class="stat-label">Tareas pendientes IDE</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Listado de Clientes -->
+          <div class="section-container">
+            <div class="section-header">
+              <h3>Clientes y agentes</h3>
+              <p class="text-muted">Selecciona un proyecto para ver su próxima acción, revisar información o preparar una versión.</p>
+            </div>
+            <div class="clients-grid" id="clients-list-container">
+              <!-- Cargado dinámicamente mediante JS -->
+              <div class="no-data-placeholder">
+                <i data-lucide="users" class="placeholder-icon"></i>
+                <h4>No tienes clientes registrados</h4>
+                <p>Crea tu primer prospecto de cliente usando el botón "Nuevo Cliente" en la esquina superior derecha.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- VISTA: ACTIVIDAD GLOBAL -->
+        <section id="view-activity" class="app-view">
+          <div class="editorial-intro">
+            <span class="eyebrow">CENTRO DE ACTIVIDAD</span>
+            <h3>Lo que requiere tu atención, sin ruido.</h3>
+            <p>Onboarding, fuentes, correcciones, versiones e infraestructura de todos tus clientes.</p>
+          </div>
+          <div class="activity-layout">
+            <div class="activity-feed" id="global-activity-feed"></div>
+            <aside class="attention-summary" id="global-attention-summary"></aside>
+          </div>
+        </section>
+
+        <!-- VISTA: PROSPECCIÓN Y CRM -->
+        <section id="view-prospecting" class="app-view">
+          <div class="prospecting-head">
+            <div class="editorial-intro">
+              <span class="eyebrow">RADAR COMERCIAL</span>
+              <h3>Encuentra una buena razón para conversar.</h3>
+              <p>Busca negocios locales, conserva la evidencia y mueve cada oportunidad hasta convertirla en proyecto.</p>
+            </div>
+            <div class="prospecting-head-actions">
+              <button class="btn btn-primary" id="prospecting-add" type="button"><i data-lucide="plus"></i> Agregar negocio</button>
+              <button class="btn btn-outline" id="prospecting-export" type="button"><i data-lucide="download"></i> Exportar CSV</button>
+              <button class="btn btn-outline" id="prospecting-demo" type="button"><i data-lucide="sparkles"></i> Cargar escenario</button>
+            </div>
+          </div>
+
+          <div class="prospecting-stats" aria-label="Resumen comercial">
+            <div><span>Radar</span><strong id="prospecting-stat-total">0</strong><small>oportunidades</small></div>
+            <div><span>Prioridad</span><strong id="prospecting-stat-hot">0</strong><small>encaje alto</small></div>
+            <div><span>En conversación</span><strong id="prospecting-stat-contacted">0</strong><small>contactadas o respondidas</small></div>
+            <div><span>Próximo paso</span><strong id="prospecting-stat-qualified">0</strong><small>calificadas</small></div>
+          </div>
+
+          <div class="prospecting-workspace">
+            <aside class="prospecting-controls">
+              <div class="prospecting-control-head">
+                <span class="eyebrow">NUEVA BÚSQUEDA</span>
+                <h4>Define el terreno</h4>
+                <p>La vertical cambia las señales que usamos para priorizar.</p>
+              </div>
+              <form id="prospecting-search-form">
+                <div class="form-group">
+                  <label for="prospecting-vertical">Solución que queremos vender</label>
+                  <select id="prospecting-vertical"></select>
+                </div>
+                <div class="form-group">
+                  <label for="prospecting-location">Zona</label>
+                  <input id="prospecting-location" required placeholder="Ej. Ñuñoa, Santiago">
+                </div>
+                <div class="form-group">
+                  <label for="prospecting-coverage">Cobertura aproximada</label>
+                  <select id="prospecting-coverage">
+                    <option value="barrio">Barrio / sector</option>
+                    <option value="comuna" selected>Comuna</option>
+                    <option value="ciudad">Ciudad</option>
+                    <option value="region">Región</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label for="prospecting-terms">Rubros o términos</label>
+                  <textarea id="prospecting-terms" rows="4" required placeholder="Barberías, spa, clínicas..."></textarea>
+                </div>
+                <button class="btn btn-primary btn-full" type="submit"><i data-lucide="search"></i> Buscar negocios</button>
+                <p class="prospecting-provider" id="prospecting-provider-status"></p>
+              </form>
+            </aside>
+
+            <div class="prospecting-crm">
+              <div class="crm-toolbar">
+                <div class="crm-view-switch" role="tablist" aria-label="Vista de oportunidades">
+                  <button class="active" type="button" data-crm-view="today">Hoy</button>
+                  <button type="button" data-crm-view="focus">Foco</button>
+                  <button type="button" data-crm-view="pipeline">Pipeline</button>
+                </div>
+                <div class="crm-filters">
+                  <label class="sr-only" for="prospecting-filter-search">Buscar</label>
+                  <input id="prospecting-filter-search" type="search" placeholder="Buscar negocio o zona">
+                  <select id="prospecting-filter-status" aria-label="Filtrar por estado">
+                    <option value="all">Todos los estados</option>
+                    <option value="new">Nuevos</option>
+                    <option value="shortlisted">Seleccionados</option>
+                    <option value="contacted">Contactados</option>
+                    <option value="replied">Respondieron</option>
+                    <option value="qualified">Calificados</option>
+                    <option value="won">Convertidos</option>
+                    <option value="lost">No avanzaron</option>
+                    <option value="discarded">Descartados</option>
+                  </select>
+                </div>
+              </div>
+              <div id="prospecting-today-view" class="crm-today-view"></div>
+              <div id="prospecting-focus-view" class="crm-focus-view" hidden>
+                <div class="crm-list" id="prospecting-list"></div>
+                <aside class="crm-record" id="prospecting-record">
+                  <div class="crm-record-empty"><i data-lucide="mouse-pointer-click"></i><h4>Abre una oportunidad</h4><p>Aquí verás evidencia, contacto, mensaje sugerido y toda su historia.</p></div>
+                </aside>
+              </div>
+              <div id="prospecting-pipeline-view" class="crm-pipeline-view" hidden></div>
+            </div>
+          </div>
+
+          <div id="prospecting-add-modal" class="prospecting-modal" hidden>
+            <div class="prospecting-modal-backdrop" data-close-modal></div>
+            <form id="prospecting-add-form" class="prospecting-modal-card">
+              <header><h4>Agregar negocio al CRM</h4><button type="button" class="modal-close" data-close-modal aria-label="Cerrar"><i data-lucide="x"></i></button></header>
+              <p class="modal-hint">Para negocios que ya conoces y no vienen de una búsqueda. Entra al mismo CRM y a la bandeja Hoy.</p>
+              <div class="modal-grid">
+                <label class="form-group wide"><span>Nombre del negocio *</span><input id="add-name" required placeholder="Ej. Rishtedar"></label>
+                <label class="form-group"><span>Rubro</span><input id="add-category" placeholder="Restaurante indio"></label>
+                <label class="form-group"><span>Zona</span><input id="add-location" placeholder="Vitacura, Santiago"></label>
+                <label class="form-group"><span>Teléfono</span><input id="add-phone" placeholder="+56 9 ..."></label>
+                <label class="form-group"><span>WhatsApp</span><input id="add-whatsapp" placeholder="+56 9 ..."></label>
+                <label class="form-group"><span>Correo</span><input id="add-email" type="email" placeholder="contacto@..."></label>
+                <label class="form-group"><span>Sitio web</span><input id="add-website" placeholder="https://..."></label>
+                <label class="form-group wide"><span>Solución objetivo</span><select id="add-vertical"></select></label>
+              </div>
+              <footer><button type="button" class="btn btn-outline" data-close-modal>Cancelar</button><button type="submit" class="btn btn-primary">Agregar al CRM</button></footer>
+            </form>
+          </div>
+        </section>
+
+        <!-- VISTA: PROYECTO -->
+        <section id="view-project" class="app-view">
+          <div class="no-client-warning" id="project-no-client">
+            <i data-lucide="alert-circle"></i>
+            <h3>No hay cliente seleccionado</h3>
+            <p>Selecciona un cliente para registrar el estado y los próximos pasos de su agente.</p>
+          </div>
+          <div class="project-grid" id="project-content" style="display: none;">
+            <div class="card card-glass">
+              <div class="card-header">
+                <h3><i data-lucide="route"></i> Estado de construcción</h3>
+                <p class="text-muted">Ubica el proyecto en el proceso real, desde la recopilación hasta la instalación.</p>
+              </div>
+              <div class="card-body">
+                <form id="project-config-form">
+                  <div class="form-group">
+                    <label for="project-stage">Etapa actual</label>
+                    <select id="project-stage" class="custom-select">
+                      <option value="intake">Captación / diagnóstico</option>
+                      <option value="waiting_info">Esperando información</option>
+                      <option value="building">Construyendo agente</option>
+                      <option value="testing">En pruebas</option>
+                      <option value="ready_to_install">Listo para instalar</option>
+                      <option value="installed">Instalado</option>
+                      <option value="paused">Pausado</option>
+                    </select>
+                  </div>
+                  <div class="form-group">
+                    <label for="project-next-action">Próxima acción</label>
+                    <input type="text" id="project-next-action" placeholder="Ej. Solicitar planilla de sucursales y servicios.">
+                  </div>
+                  <div class="form-group">
+                    <label for="project-notes">Notas de trabajo</label>
+                    <textarea id="project-notes" rows="8" placeholder="Información relevante del diagnóstico, decisiones y pendientes."></textarea>
+                  </div>
+                  <button type="submit" class="btn btn-emerald btn-full">
+                    <i data-lucide="save"></i> Guardar proyecto
+                  </button>
+                </form>
+              </div>
+            </div>
+            <div class="card card-glass">
+              <div class="card-header">
+                <h3><i data-lucide="clipboard-check"></i> Preparación del agente</h3>
+                <p class="text-muted">Vista rápida de lo que existe antes de crear una versión instalable.</p>
+              </div>
+              <div class="card-body" id="project-readiness">
+                <!-- Cargado dinámicamente -->
+              </div>
+              <div class="card-body project-version-panel">
+                <div class="form-separator" style="margin-top: 0;"></div>
+                <h4 class="project-version-title"><i data-lucide="package-plus"></i> Crear paquete</h4>
+                <p class="text-sm text-muted mb-md">Genera una versión de borrador con la configuración y fuentes aprobadas actuales.</p>
+                <form id="project-version-form">
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label for="agent-version">Versión</label>
+                      <input type="text" id="agent-version" value="0.1.0" placeholder="0.1.0" required>
+                    </div>
+                    <div class="form-group">
+                      <label for="agent-version-summary">Resumen</label>
+                      <input type="text" id="agent-version-summary" placeholder="Ej. Primera versión de pruebas.">
+                    </div>
+                  </div>
+                  <button type="submit" class="btn btn-primary btn-full">
+                    <i data-lucide="package-check"></i> Crear versión de borrador
+                  </button>
+                </form>
+                <div class="project-versions-list" id="project-versions-list"></div>
+                <div class="form-separator"></div>
+                <h4 class="project-version-title"><i data-lucide="database-zap"></i> Vault local · Supabase del cliente</h4>
+                <p class="text-sm text-muted mb-md">La clave se cifra en este PC. SQLite sólo conserva el alias y una pista; nunca el secreto completo.</p>
+                <form id="infrastructure-form">
+                  <div class="form-group"><label for="infra-supabase-url">URL Supabase</label><input id="infra-supabase-url" type="text" placeholder="https://xxxxx.supabase.co"></div>
+                  <div class="form-group"><label for="infra-project-ref">Project ref</label><input id="infra-project-ref" type="text" placeholder="xxxxx"></div>
+                  <div class="form-group"><label for="infra-secret-key">Secret key (se cifra localmente)</label><input id="infra-secret-key" type="password" autocomplete="off" placeholder="sb_secret_... (dejar vacío para mantener)"></div>
+                  <p id="infra-vault-status" class="form-help-text">Sin credencial configurada.</p>
+                  <div class="flex-row gap-md"><button class="btn btn-primary" type="submit">Guardar vault</button><button id="infra-test-btn" class="btn btn-outline" type="button">Probar conexión</button><button id="infra-forget-btn" class="btn btn-danger-outline" type="button">Olvidar</button></div>
+                </form>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- VISTA: EDITOR (CONFIGURADOR DEL AGENTE) -->
+        <section id="view-editor" class="app-view">
+          <div class="no-client-warning" id="editor-no-client">
+            <i data-lucide="alert-circle"></i>
+            <h3>No hay cliente seleccionado</h3>
+            <p>Selecciona un cliente en la cabecera o en la lista de inicio para configurar su agente.</p>
+          </div>
+          <div class="editor-grid" id="editor-content" style="display: none;">
+            <!-- Columna Izquierda: Identidad -->
+            <div class="card card-glass">
+              <div class="card-header">
+                <h3><i data-lucide="user-cog"></i> Identidad y Personalidad</h3>
+                <p class="text-muted">Define cómo se presenta el agente de WhatsApp ante los usuarios.</p>
+              </div>
+              <div class="card-body">
+                <form id="agent-config-form">
+                  <div class="form-group">
+                    <label for="agent-name">Nombre del Agente</label>
+                    <input type="text" id="agent-name" placeholder="Ej. Tomás de Delicias R&S" required>
+                  </div>
+                  
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label for="agent-tone">Tono de Voz</label>
+                      <select id="agent-tone" class="custom-select">
+                        <option value="friendly">Cálido y Amistoso</option>
+                        <option value="professional">Formal y Profesional</option>
+                        <option value="casual">Casual e Informal</option>
+                        <option value="direct">Directo y Conciso</option>
+                        <option value="persuasive">Persuasivo / Ventas</option>
+                      </select>
+                      <div id="tone-template-preview" class="tone-template-preview" aria-live="polite"></div>
+                    </div>
+                    <div class="form-group">
+                      <label for="agent-avatar">Color de Avatar</label>
+                      <div class="color-picker-grid">
+                        <label class="color-option color-emerald"><input type="radio" name="avatar-color" value="emerald" checked><span></span></label>
+                        <label class="color-option color-blue"><input type="radio" name="avatar-color" value="blue"><span></span></label>
+                        <label class="color-option color-purple"><input type="radio" name="avatar-color" value="purple"><span></span></label>
+                        <label class="color-option color-orange"><input type="radio" name="avatar-color" value="orange"><span></span></label>
+                        <label class="color-option color-rose"><input type="radio" name="avatar-color" value="rose"><span></span></label>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="form-group">
+                    <label for="agent-role">Rol / Meta Principal</label>
+                    <input type="text" id="agent-role" placeholder="Ej. Resolver dudas de clientes y agendar pedidos de comida.">
+                  </div>
+
+                  <div class="form-group">
+                    <label for="agent-whatsapp">Número de WhatsApp (Simulado)</label>
+                    <input type="text" id="agent-whatsapp" placeholder="Ej. +56 9 1234 5678">
+                  </div>
+                  
+                  <button type="submit" class="btn btn-emerald btn-full mt-lg">
+                    <i data-lucide="save"></i> Guardar Identidad
+                  </button>
+                </form>
+              </div>
+            </div>
+
+            <!-- Columna Derecha: System Prompt Directivas -->
+            <div class="card card-glass">
+              <div class="card-header">
+                <h3><i data-lucide="shield-alert"></i> Instrucciones del Sistema (System Prompt)</h3>
+                <p class="text-muted">Estas directivas rigen de forma estricta todo el comportamiento del agente.</p>
+              </div>
+              <div class="card-body flex-column h-full">
+                <div class="form-group flex-grow">
+                  <label for="agent-system-prompt">Prompt del Sistema</label>
+                  <textarea id="agent-system-prompt" class="monospace-textarea" placeholder="Eres un asistente de WhatsApp atento y profesional...
+Reglas obligatorias:
+1. Responde de forma breve (máximo 2 párrafos).
+2. Usa emojis con moderación.
+3. No inventes precios ni productos que no estén en tus documentos de entrenamiento.
+4. Si no sabes la respuesta, ofrece transferir con un ejecutivo humano."></textarea>
+                </div>
+                
+                <div class="prompt-suggestions">
+                  <span class="suggestion-label"><i data-lucide="sparkles"></i> Plantillas rápidas:</span>
+                  <div class="suggestion-tags">
+                    <button class="btn-tag" data-template="ecommerce">Tienda / Ventas</button>
+                    <button class="btn-tag" data-template="booking">Agendamiento</button>
+                    <button class="btn-tag" data-template="faq">Preguntas Frecuentes</button>
+                  </div>
+                </div>
+
+                <div class="save-status-indicator mt-md" id="editor-save-status">
+                  <i data-lucide="check-circle" class="text-emerald"></i> <span>Configuración al día</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- VISTA: AGENDA V1 -->
+        <section id="view-agenda" class="app-view">
+          <div class="no-client-warning" id="agenda-no-client">
+            <i data-lucide="alert-circle"></i>
+            <h3>No hay cliente seleccionado</h3>
+            <p>Selecciona un cliente para convertir su agente en una solución de agendamiento instalable.</p>
+          </div>
+          <div class="agenda-grid" id="agenda-content" style="display: none;">
+            <div class="card card-glass">
+              <div class="card-header">
+                <h3><i data-lucide="calendar-check-2"></i> ZeroAgent Agenda v1</h3>
+                <p class="text-muted">La misma agenda alimentará WhatsApp, la página pública y el panel del cliente.</p>
+                <a class="btn btn-secondary btn-sm" href="/preview/agenda-cliente?demo=1" target="_blank" rel="noopener"><i data-lucide="monitor-play"></i> Ver ejemplo del panel cliente</a>
+              </div>
+              <div class="card-body">
+                <form id="agenda-config-form">
+                  <label class="agenda-toggle">
+                    <input id="agenda-enabled" type="checkbox">
+                    <span><strong>Incluir Agenda v1 en este agente</strong><small>Se agregará al siguiente paquete que crees.</small></span>
+                  </label>
+                  <div class="form-row mt-lg">
+                    <div class="form-group">
+                      <label for="agenda-mode">Tipo de operación</label>
+                      <select id="agenda-mode" class="custom-select"><option value="appointment">Citas por horario</option><option value="reservation">Reservas con capacidad</option></select>
+                    </div>
+                    <div class="form-group">
+                      <label for="agenda-confirmation">Confirmación</label>
+                      <select id="agenda-confirmation" class="custom-select"><option value="manual">Pendiente de confirmar</option><option value="automatic">Automática si hay cupo</option></select>
+                    </div>
+                  </div>
+                  <div class="form-row">
+                    <div class="form-group"><label for="agenda-timezone">Zona horaria</label><input id="agenda-timezone" type="text" value="America/Santiago"></div>
+                    <div class="form-group"><label for="agenda-reminder">Recordatorio (horas antes)</label><input id="agenda-reminder" type="number" min="0" max="168" value="24"></div>
+                  </div>
+                  <div class="form-row">
+                    <div class="form-group"><label for="agenda-slot">Intervalo de bloques (min.)</label><input id="agenda-slot" type="number" min="5" max="60" value="15"></div>
+                    <div class="form-group"><label for="agenda-notice">Aviso mínimo (horas)</label><input id="agenda-notice" type="number" min="0" max="168" value="2"></div>
+                  </div>
+                  <div class="form-group"><label for="agenda-policy">Política de cancelación / reprogramación</label><textarea id="agenda-policy" rows="3" placeholder="Ej. Se puede reprogramar hasta 2 horas antes, sujeto a disponibilidad."></textarea></div>
+                  <button type="submit" class="btn btn-emerald btn-full"><i data-lucide="save"></i> Guardar configuración de Agenda</button>
+                </form>
+              </div>
+            </div>
+            <div class="card card-glass">
+              <div class="card-header">
+                <h3><i data-lucide="blocks"></i> Catálogo operativo</h3>
+                <p class="text-muted">Una línea por elemento. Esto genera datos configurables, no texto libre para que el modelo lo adivine.</p>
+              </div>
+              <div class="card-body">
+                <form id="agenda-catalog-form">
+                  <div class="form-group"><label for="agenda-locations">Sedes</label><textarea id="agenda-locations" rows="3" placeholder="Casa Matriz | Av. Ejemplo 123 | Lunes a sábado 09:00–19:00"></textarea><span class="form-help-text">Formato: nombre | dirección | horario</span></div>
+                  <div class="form-group"><label for="agenda-services">Servicios</label><textarea id="agenda-services" rows="4" placeholder="Corte clásico | 45 | 18000&#10;Corte + barba | 75 | 28000"></textarea><span class="form-help-text">Formato: servicio | duración en minutos | precio CLP</span></div>
+                  <div class="form-group"><label for="agenda-resources">Profesionales / recursos</label><textarea id="agenda-resources" rows="3" placeholder="Camila | Estilista | Corte clásico, Corte + barba"></textarea><span class="form-help-text">Formato: nombre | especialidad | servicios que realiza</span></div>
+                  <div class="agenda-contract" id="agenda-contract-status"></div>
+                  <button type="submit" class="btn btn-primary btn-full"><i data-lucide="package-check"></i> Guardar catálogo para empaquetar</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- VISTA: KNOWLEDGE (ENTRENAMIENTO) -->
+        <section id="view-knowledge" class="app-view">
+          <div class="no-client-warning" id="knowledge-no-client">
+            <i data-lucide="alert-circle"></i>
+            <h3>No hay cliente seleccionado</h3>
+            <p>Selecciona un cliente en la cabecera o en la lista de inicio para cargar o ver su base de conocimiento.</p>
+          </div>
+          <div class="knowledge-grid" id="knowledge-content" style="display: none;">
+            <!-- Cargar / Agregar Documento -->
+            <div class="card card-glass">
+              <div class="card-header">
+                <h3><i data-lucide="file-plus"></i> Añadir Conocimiento</h3>
+                <p class="text-muted">Añade información de la empresa (menús, precios, catálogos, FAQs) para alimentar la memoria del agente.</p>
+              </div>
+              <div class="card-body">
+                <form id="knowledge-add-form">
+                  <div class="form-group">
+                    <label for="doc-title">Título del Documento / Sección</label>
+                    <input type="text" id="doc-title" placeholder="Ej. Menú de Precios Julio 2026" required>
+                  </div>
+                  
+                  <div class="form-group">
+                    <label for="doc-content">Contenido de Texto / Datos</label>
+                    <textarea id="doc-content" rows="12" placeholder="Pega aquí toda la información textual pertinente. Por ejemplo:
+- Empanadas de pino: $2.500
+- Bebidas 350ml: $1.200
+Horarios de entrega: Lunes a Sábado de 12:00 a 20:00 hrs.
+Zonas de reparto: Centro y Providencia." required></textarea>
+                  </div>
+
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label for="doc-category">Categoría</label>
+                      <select id="doc-category" class="custom-select">
+                        <option value="prices">Precios / Menú</option>
+                        <option value="faqs">Preguntas Frecuentes (FAQs)</option>
+                        <option value="policies">Políticas / Horarios / Envíos</option>
+                        <option value="about">Información General</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <button type="submit" class="btn btn-primary btn-full mt-lg">
+                    <i data-lucide="brain-circuit"></i> Indexar y Entrenar
+                  </button>
+                </form>
+              </div>
+            </div>
+
+            <!-- Listado de Documentos del Cliente -->
+            <div class="card card-glass flex-column">
+              <div class="card-header">
+                <h3><i data-lucide="shield-check"></i> Datos confirmados y pruebas</h3>
+                <p class="text-muted">Cada dato importante queda trazable y puede tener una pregunta de regresión para <span id="knowledge-client-name" class="font-bold text-emerald"></span>.</p>
+              </div>
+              <div class="card-body flex-grow overflow-y-auto">
+                <form id="knowledge-fact-form" class="knowledge-fact-form">
+                  <div class="form-row">
+                    <div class="form-group"><label for="fact-category">Tipo</label><input id="fact-category" placeholder="Ej. sucursal, precio, política" required></div>
+                    <div class="form-group"><label for="fact-subject">Asunto</label><input id="fact-subject" placeholder="Ej. Vitacura · estacionamiento" required></div>
+                  </div>
+                  <div class="form-group"><label for="fact-value">Dato confirmado</label><textarea id="fact-value" rows="3" placeholder="Ej. No tiene estacionamiento propio." required></textarea></div>
+                  <div class="form-group"><label for="fact-notes">Evidencia o nota interna</label><input id="fact-notes" placeholder="Ej. Confirmado por encargado, 15-07-2026"></div>
+                  <details class="knowledge-test-details">
+                    <summary>Agregar prueba para que no se repita el error</summary>
+                    <div class="form-group mt-md"><label for="fact-test-question">Pregunta que hará un cliente</label><input id="fact-test-question" placeholder="¿La sucursal de Vitacura tiene estacionamiento?"></div>
+                    <div class="form-group"><label for="fact-test-answer">Comportamiento esperado</label><textarea id="fact-test-answer" rows="2" placeholder="Indicar que no tiene estacionamiento propio; no inventar alternativas."></textarea></div>
+                  </details>
+                  <button type="submit" class="btn btn-emerald btn-full mt-md"><i data-lucide="shield-check"></i> Guardar dato confirmado</button>
+                </form>
+                <div id="knowledge-facts-list" class="knowledge-facts-list"></div>
+                <div class="gap-questions-panel">
+                  <div class="gap-questions-header"><strong>Vacíos por confirmar</strong><button id="btn-refresh-gap-questions" type="button" class="btn btn-outline btn-xs">Detectar</button></div>
+                  <p class="text-xs text-muted">Sugerencias locales basadas en el rubro y los datos confirmados. No modifican el agente.</p>
+                  <div id="gap-questions-list" class="gap-questions-list"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- VISTA: FUENTES ORIGINALES -->
+        <section id="view-sources" class="app-view">
+          <div class="no-client-warning" id="sources-no-client">
+            <i data-lucide="alert-circle"></i>
+            <h3>No hay cliente seleccionado</h3>
+            <p>Selecciona un cliente para guardar los archivos y fuentes que alimentarán a su agente.</p>
+          </div>
+          <div class="sources-grid" id="sources-content" style="display: none;">
+            <div class="card card-glass onboarding-command-card">
+              <div class="card-header">
+                <span class="eyebrow">ENTREVISTA GUIADA</span>
+                <h3><i data-lucide="messages-square"></i> Recopilar información del dueño</h3>
+                <p class="text-muted">Genera un enlace privado, revisa el avance y prepara una segunda ronda con los vacíos detectados.</p>
+              </div>
+              <div class="card-body">
+                <div id="onboarding-studio-status" class="onboarding-status-grid"></div>
+                <div class="onboarding-actions">
+                  <button type="button" id="btn-create-onboarding" class="btn btn-primary"><i data-lucide="link-2"></i> Crear enlace privado</button>
+                  <button type="button" id="btn-open-onboarding" class="btn btn-outline" disabled><i data-lucide="external-link"></i> Abrir cuestionario</button>
+                  <button type="button" id="btn-copy-onboarding" class="btn btn-outline" disabled><i data-lucide="copy"></i> Copiar enlace</button>
+                </div>
+                <p id="onboarding-studio-message" class="form-help-text" aria-live="polite"></p>
+              </div>
+            </div>
+            <div class="card card-glass">
+              <div class="card-header">
+                <h3><i data-lucide="file-up"></i> Registrar fuente</h3>
+                <p class="text-muted">El archivo original se conserva localmente y se deja pendiente para que el IDE proponga su interpretación.</p>
+              </div>
+              <div class="card-body">
+                <form id="source-add-form">
+                  <div class="form-group">
+                    <label for="source-title">Nombre de la fuente</label>
+                    <input type="text" id="source-title" placeholder="Ej. Lista de precios agosto 2026" required>
+                  </div>
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label for="source-type">Tipo</label>
+                      <select id="source-type" class="custom-select">
+                        <option value="spreadsheet">Excel / CSV</option>
+                        <option value="document">Documento</option>
+                        <option value="website">Sitio web o enlace</option>
+                        <option value="note">Nota o confirmación</option>
+                        <option value="other">Otro</option>
+                      </select>
+                    </div>
+                    <div class="form-group">
+                      <label for="source-file">Archivo original (opcional)</label>
+                      <input type="file" id="source-file" accept=".xlsx,.xls,.csv,.pdf,.doc,.docx,.txt">
+                    </div>
+                  </div>
+                  <div class="form-group">
+                    <label for="source-content">URL, texto o detalle de la confirmación</label>
+                    <textarea id="source-content" rows="5" placeholder="Pega un enlace, una nota o una confirmación recibida del cliente."></textarea>
+                  </div>
+                  <div class="form-group">
+                    <label for="source-notes">Notas internas</label>
+                    <textarea id="source-notes" rows="3" placeholder="Ej. Reemplaza lista de precios anterior; pendiente confirmar descuentos."></textarea>
+                  </div>
+                  <button type="submit" class="btn btn-primary btn-full">
+                    <i data-lucide="inbox"></i> Guardar y dejar pendiente para IDE
+                  </button>
+                </form>
+              </div>
+            </div>
+            <div class="card card-glass flex-column">
+              <div class="card-header">
+                <h3><i data-lucide="folder-clock"></i> Fuentes del proyecto</h3>
+                <p class="text-muted">Cada fuente conserva su estado y deja trazabilidad para las versiones del agente.</p>
+              </div>
+              <div class="card-body flex-grow overflow-y-auto" id="sources-list">
+                <!-- Cargado dinámicamente -->
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- VISTA: SIMULADOR DE WHATSAPP (PLAYGROUND) -->
+        <section id="view-simulator" class="app-view">
+          <div class="no-client-warning" id="simulator-no-client">
+            <i data-lucide="alert-circle"></i>
+            <h3>No hay cliente seleccionado</h3>
+            <p>Selecciona un cliente en la cabecera o en la lista de inicio para chatear con su agente.</p>
+          </div>
+          
+          <div class="simulator-layout" id="simulator-content" style="display: none;">
+            
+            <!-- PANEL DEL CHAT DE WHATSAPP -->
+            <div class="phone-mockup">
+              <div class="whatsapp-screen">
+                <!-- WhatsApp Header -->
+                <div class="whatsapp-header">
+                  <div class="wa-header-left">
+                    <button class="wa-back-btn"><i data-lucide="arrow-left"></i></button>
+                    <div class="wa-avatar" id="wa-agent-avatar">A</div>
+                    <div class="wa-user-info">
+                      <span class="wa-user-name" id="wa-agent-name">Agente</span>
+                      <span class="wa-user-status">En línea</span>
+                    </div>
+                  </div>
+                  <div class="wa-header-actions">
+                    <button class="wa-action-btn"><i data-lucide="phone"></i></button>
+                    <button class="wa-action-btn"><i data-lucide="video"></i></button>
+                    <button class="wa-action-btn"><i data-lucide="more-vertical"></i></button>
+                  </div>
+                </div>
+                
+                <!-- WhatsApp Body (Conversación) -->
+                <div class="whatsapp-body" id="whatsapp-messages-container">
+                  <!-- Mensaje de inicio del sistema -->
+                  <div class="wa-system-time">HOY</div>
+                  <div class="wa-encryption-notice">
+                    <i data-lucide="lock" class="icon-xs"></i> Cada respuesta ejecuta el mismo motor y paquete versionado que se instala en el cliente.
+                  </div>
+                  
+                  <!-- Se poblará dinámicamente -->
+                </div>
+                
+                <!-- WhatsApp Footer (Input de Texto) -->
+                <div class="whatsapp-footer">
+                  <button class="wa-emoji-btn"><i data-lucide="smile"></i></button>
+                  <form id="whatsapp-chat-form" class="wa-input-container">
+                    <input type="text" id="wa-user-input" placeholder="Escribe un mensaje de prueba..." autocomplete="off" required>
+                    <button type="submit" class="wa-send-btn" id="wa-btn-send">
+                      <i data-lucide="send"></i>
+                    </button>
+                  </form>
+                  <button class="wa-mic-btn"><i data-lucide="mic"></i></button>
+                </div>
+              </div>
+            </div>
+
+            <!-- PANEL LATERAL DE DEPURACIÓN (DEBUG PANEL) -->
+            <div class="debug-panel">
+              <div class="debug-header">
+                <h3><i data-lucide="terminal"></i> Panel de Depuración de IA</h3>
+                <button id="btn-clear-chat" class="btn btn-outline btn-xs">
+                  <i data-lucide="trash-2"></i> Limpiar Chat
+                </button>
+              </div>
+              
+              <div class="debug-body">
+                <div class="debug-section">
+                  <h4 class="debug-section-title"><i data-lucide="bot"></i> Prompt de Sistema Activo</h4>
+                  <div class="debug-box text-sm monospace" id="debug-system-prompt">
+                    Cargando directivas...
+                  </div>
+                </div>
+
+                <div class="debug-section">
+                  <h4 class="debug-section-title"><i data-lucide="database"></i> Contexto Recuperado (RAG)</h4>
+                  <p class="text-xs text-muted mb-xs">Fragmentos relevantes de la base de conocimientos que coinciden con el último mensaje:</p>
+                  <div class="debug-box text-sm" id="debug-retrieved-context">
+                    <span class="text-italic text-muted">Aún no se han enviado mensajes en esta sesión.</span>
+                  </div>
+                </div>
+
+                <div class="debug-section">
+                  <h4 class="debug-section-title"><i data-lucide="cpu"></i> Latencia y Tokens</h4>
+                  <div class="debug-stats-row">
+                    <div class="debug-stat-item">
+                      <span class="d-label">Modelo:</span>
+                      <span class="d-val text-emerald font-bold" id="debug-model-used">Motor runtime · esperando prueba</span>
+                    </div>
+                    <div class="debug-stat-item">
+                      <span class="d-label">Latencia:</span>
+                      <span class="d-val" id="debug-latency">0ms</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+          </div>
+        </section>
+
+        <!-- VISTA: CONSUMO IA -->
+        <section id="view-ai-usage" class="app-view">
+          <div id="ai-usage-no-client" class="no-client-warning"><i data-lucide="users"></i><p>Selecciona un cliente para configurar su presupuesto de IA.</p></div>
+          <div id="ai-usage-content" class="ai-usage-layout" style="display:none">
+            <div class="ai-usage-summary card card-glass">
+              <div class="card-header"><h3><i data-lucide="wallet-cards"></i> Saldo operativo</h3><p id="ai-usage-model" class="text-muted"></p></div>
+              <div class="card-body">
+                <div class="ai-metrics"><div><span>Disponible estimado</span><strong id="ai-available">—</strong></div><div><span>Consumido en ciclo</span><strong id="ai-spent">—</strong></div><div><span>Uso del ciclo</span><strong id="ai-percent">—</strong></div><div><span>Respuestas</span><strong id="ai-requests">—</strong></div></div>
+                <div class="ai-progress"><div id="ai-progress-bar"></div></div><p id="ai-alert-status" class="text-sm text-muted"></p>
+              </div>
+            </div>
+            <div class="card card-glass"><div class="card-header"><h3><i data-lucide="sliders-horizontal"></i> Onboarding y límites</h3><p>La API key se configura sólo en el entorno del agente; aquí se controla presupuesto y modelo.</p></div><div class="card-body">
+              <form id="ai-budget-form" class="form-grid-2"><div class="form-group"><label for="ai-provider">Proveedor</label><select id="ai-provider" class="custom-select"><option value="openai">OpenAI</option><option value="groq">Groq</option><option value="anthropic">Anthropic</option><option value="google">Google</option><option value="qwen">Qwen / Alibaba Cloud</option><option value="deepseek">DeepSeek</option><option value="mistral">Mistral</option><option value="custom">API compatible personalizada</option></select></div><div class="form-group"><label for="ai-model">Modelo exacto</label><input id="ai-model" list="ai-model-suggestions" placeholder="Ej. gpt-4o-mini" required><datalist id="ai-model-suggestions"><option value="gpt-4o-mini"><option value="llama-3.3-70b-versatile"><option value="claude-3-5-haiku-latest"><option value="gemini-2.0-flash"><option value="qwen-plus"><option value="deepseek-chat"></datalist></div><div class="form-group"><label for="ai-budget-clp">Saldo del ciclo (CLP)</label><input id="ai-budget-clp" type="number" min="0" step="1000" required></div><div class="form-group"><label for="ai-usd-clp">Dólar estimado CLP</label><input id="ai-usd-clp" type="number" min="1" step="1" required></div><button class="btn btn-primary" type="submit">Guardar monitoreo</button></form>
+              <div class="form-separator"></div><button id="ai-recharge-btn" class="btn btn-emerald" type="button"><i data-lucide="plus-circle"></i> Registrar recarga / nuevo ciclo</button><p class="form-help-text">No compra saldo en OpenAI: registra la recarga y reinicia la proyección sin borrar el historial.</p>
+            </div></div>
+          </div>
+        </section>
+
+        <!-- VISTA: CONFIGURACIÓN -->
+        <section id="view-settings" class="app-view">
+          <div class="card card-glass max-w-xl">
+            <div class="card-header">
+              <h3><i data-lucide="key-round"></i> Preferencias locales de Studio</h3>
+              <p class="text-muted">Revisa la separación de credenciales y administra los respaldos de esta herramienta local.</p>
+            </div>
+            <div class="card-body">
+              <form id="settings-form">
+                
+                <div class="settings-alert-box">
+                  <i data-lucide="shield-check" class="text-emerald icon-lg"></i>
+                  <div>
+                    <h4>Separación de credenciales</h4>
+                    <p class="text-sm">Studio es local. Las credenciales de Supabase se protegen en el vault cifrado y las claves del modelo o Zavu viven en el entorno instalable del cliente.</p>
+                  </div>
+                </div>
+
+                <div class="settings-alert-box mt-lg">
+                  <i data-lucide="cpu" class="text-emerald icon-lg"></i>
+                  <div>
+                    <h4>Motor único de pruebas</h4>
+                    <p class="text-sm">El Playground usa el runtime empaquetado. Proveedor, modelo y clave se configuran como variables del proceso local; ninguna API key se guarda en este navegador.</p>
+                  </div>
+                </div>
+
+                <div class="form-separator"></div>
+
+                <div class="form-group">
+                  <h3>Copia de Seguridad y Datos</h3>
+                  <p class="text-sm text-muted mb-md">Exporta o importa toda tu base de datos de clientes, configuraciones de agentes y documentos en un archivo JSON.</p>
+                  
+                  <div class="flex-row gap-md">
+                    <button type="button" id="btn-export-data" class="btn btn-outline">
+                      <i data-lucide="download"></i> Exportar JSON
+                    </button>
+                    <label class="btn btn-outline cursor-pointer" style="margin: 0;">
+                      <i data-lucide="upload"></i> Importar JSON
+                      <input type="file" id="btn-import-data" accept=".json" style="display: none;">
+                    </label>
+                    <button type="button" id="btn-reset-data" class="btn btn-danger-outline">
+                      <i data-lucide="rotate-ccw"></i> Restablecer Todo
+                    </button>
+                  </div>
+                </div>
+
+              </form>
+            </div>
+          </div>
+        </section>
+        
+      </div>
+    </main>
+  </div>
+
+  <!-- MODAL: CREAR NUEVO CLIENTE / PROSPECTO -->
+  <div class="modal-overlay" id="modal-new-client">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3><i data-lucide="user-plus"></i> Registrar Nuevo Cliente</h3>
+        <button class="modal-close-btn" id="modal-close-new-client"><i data-lucide="x"></i></button>
+      </div>
+      <div class="modal-body">
+        <form id="new-client-form">
+          <div class="form-group">
+            <label for="new-client-name">Nombre de la Empresa / Cliente</label>
+            <input type="text" id="new-client-name" placeholder="Ej. Delicias R&S" required>
+          </div>
+          <div class="form-group">
+            <label for="new-client-niche">Rubro o Nicho de Negocio</label>
+            <input type="text" id="new-client-niche" placeholder="Ej. Cafetería / Delivery de Comida Casera" required>
+          </div>
+          <div class="form-group">
+            <label for="new-client-desc">Breve Descripción</label>
+            <textarea id="new-client-desc" rows="3" placeholder="Ej. Negocio familiar que elabora y distribuye empanadas y repostería a domicilio."></textarea>
+          </div>
+          
+          <div class="modal-actions mt-lg">
+            <button type="button" class="btn btn-outline" id="modal-cancel-new-client">Cancelar</button>
+            <button type="submit" class="btn btn-primary">Registrar Cliente</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts Javascript -->
+  <script src="llm-helper.js" type="module"></script>
+  <script src="app.js" type="module"></script>
+  <script src="studio-redesign.js" type="module"></script>
+  <script src="prospecting.js" type="module"></script>
+</body>
+</html>

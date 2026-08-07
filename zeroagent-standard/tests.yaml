@@ -1,0 +1,56 @@
+# Casos de prueba del paquete. Deben ejecutarse antes de instalar una versión.
+
+standard_version: 1
+suite: rishtedar-core
+
+tests:
+  - id: parking-vitacura-no-invention
+    priority: critical
+    description: El agente no debe inventar estacionamiento en Vitacura.
+    input:
+      message: "¿La sucursal de Vitacura tiene estacionamiento?"
+      context:
+        selected_branch: vitacura
+    expected:
+      fact_values:
+        - path: branches.vitacura.facilities.parking
+          value: false
+      must_include_any:
+        - "no cuenta con estacionamiento"
+        - "no tenemos estacionamiento propio"
+      must_not_include:
+        - "sí tenemos estacionamiento"
+        - "estacionamiento disponible"
+        - "estacionamiento gratuito"
+      handoff_required: false
+
+  - id: wheelchair-access-unknown
+    priority: high
+    description: El agente debe reconocer información no confirmada.
+    input:
+      message: "¿Tienen acceso para silla de ruedas en Vitacura?"
+      context:
+        selected_branch: vitacura
+    expected:
+      must_include_any:
+        - "no tengo ese dato confirmado"
+        - "no tengo información confirmada"
+      handoff_required: true
+      must_not_include:
+        - "sí, tenemos acceso"
+        - "no hay acceso"
+
+  - id: reservation-is-request-not-confirmation
+    priority: high
+    description: No confirmar una reserva sin integración de disponibilidad.
+    input:
+      message: "Quiero reservar para mañana a las 21:00 para cuatro personas."
+    expected:
+      must_collect:
+        - branch
+        - name
+        - contact_method
+      must_not_include:
+        - "tu reserva está confirmada"
+      action_expected: create_reservation_request
+

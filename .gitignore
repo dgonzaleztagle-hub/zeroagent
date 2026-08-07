@@ -1,0 +1,27 @@
+# Secretos y entorno
+.env
+.env.*
+!.env.example
+
+# Base de datos local (Studio)
+database.sqlite
+database.sqlite-shm
+database.sqlite-wal
+
+# Dependencias
+node_modules/
+
+# Artefactos y datos locales
+storage/agent-builds/
+storage/backups/
+storage/sources/
+storage/onboarding/
+storage/vault/
+storage/vault-qa/
+storage/*.out
+storage/*.err
+.zeroagent/inbox/
+
+# Temporales
+*.log
+ov_check.json

@@ -1,0 +1,21 @@
+{
+  "name": "zeroagent-dashboard",
+  "version": "1.0.0",
+  "description": "Dashboard de configuración y entrenamiento para agentes de WhatsApp",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test:agenda-package": "node scripts/verify-agenda-package.mjs",
+    "test:knowledge-regressions": "node scripts/verify-knowledge-regressions.mjs",
+    "test:supabase-staging": "node scripts/verify-supabase-staging.mjs",
+    "test:agenda-integration": "node scripts/verify-agenda-integration.mjs"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7"
+  }
+}

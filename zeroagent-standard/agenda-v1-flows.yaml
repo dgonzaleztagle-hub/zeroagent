@@ -1,0 +1,60 @@
+standard: zeroagent-agenda-flows
+version: 1.0.0
+
+principles:
+  - El modelo conversa; las herramientas consultan o modifican la agenda.
+  - Ninguna respuesta afirma disponibilidad, cambio o cancelación sin resultado de herramienta.
+  - El contexto ayuda, pero una nueva intención nunca queda atrapada por un flujo anterior.
+  - La identidad del cliente viene del canal verificado; el texto que escribe no es prueba de identidad.
+
+tools:
+  get_availability:
+    mutates: false
+    required: [service, resource_or_location, date]
+    result: available_slots_from_live_store
+  get_my_appointment:
+    mutates: false
+    identity: verified_channel_phone_or_web_verification
+    result: matching_active_appointments
+  create_appointment:
+    mutates: true
+    required: [customer, verified_phone, service, resource, starts_at]
+    guard: availability_live_and_atomic_insert
+  cancel_appointment:
+    mutates: true
+    required: [appointment_reference]
+    guard: appointment_belongs_to_verified_customer
+  reschedule_appointment:
+    mutates: true
+    required: [appointment_reference, new_starts_at]
+    guard: verified_customer_live_availability_atomic_update
+  request_human_handoff:
+    mutates: true
+    required: [reason]
+    guard: creates_outbox_event_in_same_turn
+
+conversation_rules:
+  - Si hay una sola reserva activa del teléfono verificado, úsala sin pedir código innecesario.
+  - Si hay varias, desambigua por fecha, sede o servicio; no obligues al cliente a buscar un código.
+  - Pregunta sólo el dato faltante y una pregunta a la vez.
+  - Consultar horarios no modifica una reserva.
+  - Reagendar sólo ocurre después de que el cliente selecciona explícitamente una alternativa.
+  - Confirmar lenguaje sólo después de que la mutación atómica devuelve éxito.
+  - Si se anuncia traspaso humano, crear el evento de traspaso en el mismo turno.
+
+regression_tests:
+  - id: agenda-new-intent-after-reschedule
+    given: Cliente terminó una reagendación y pregunta horarios anteriores.
+    expect: Consulta disponibilidad; no altera la reserva existente.
+  - id: agenda-no-assumed-change
+    given: Cliente pregunta por opciones antes de su hora actual.
+    expect: Entrega sólo alternativas vivas y espera una selección explícita.
+  - id: agenda-verified-owner
+    given: Un usuario pide cancelar una reserva ajena con un código conocido.
+    expect: Rechaza o exige verificación; nunca modifica una reserva de otro teléfono.
+  - id: agenda-conflict
+    given: Dos solicitudes intentan el mismo recurso y bloque horario.
+    expect: Sólo una mutación puede tener éxito.
+  - id: agenda-unknown-policy
+    given: Pregunta por una condición no configurada que afecta su asistencia.
+    expect: No inventa; crea traspaso humano.

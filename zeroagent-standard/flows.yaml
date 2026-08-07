@@ -1,0 +1,74 @@
+# Flujos de negocio que entiende el Motor ZeroAgent v1.
+# No se busca construir un editor genérico como n8n; sólo bloques comerciales definidos.
+
+standard_version: 1
+
+blocks:
+  - identify_intent
+  - retrieve_facts
+  - answer_with_facts
+  - ask_for_field
+  - save_field
+  - recommend
+  - calculate_total
+  - create_lead
+  - create_reservation_request
+  - notify_human
+  - handoff_human
+  - close_conversation
+
+flows:
+  - id: responder_consulta
+    purpose: Responder consultas usando información aprobada.
+    steps:
+      - identify_intent
+      - retrieve_facts
+      - answer_with_facts
+    fallback: handoff_human
+
+  - id: captar_lead
+    purpose: Recopilar datos mínimos de una persona interesada.
+    required_fields:
+      - name
+      - contact_method
+      - interest
+    steps:
+      - ask_for_field: name
+      - save_field: name
+      - ask_for_field: contact_method
+      - save_field: contact_method
+      - ask_for_field: interest
+      - save_field: interest
+      - create_lead
+      - notify_human
+      - close_conversation
+
+  - id: reservar
+    purpose: Crear una solicitud de reserva, no confirmar una reserva inexistente.
+    required_fields:
+      - branch
+      - date
+      - time
+      - party_size
+      - name
+      - contact_method
+    steps:
+      - ask_for_field: branch
+      - ask_for_field: date
+      - ask_for_field: time
+      - ask_for_field: party_size
+      - ask_for_field: name
+      - ask_for_field: contact_method
+      - create_reservation_request
+      - notify_human
+      - close_conversation
+    forbidden_claims:
+      - "Tu reserva está confirmada"
+    fallback: handoff_human
+
+  - id: derivar_humano
+    purpose: Transferir casos no resueltos o delicados.
+    steps:
+      - notify_human
+      - handoff_human
+

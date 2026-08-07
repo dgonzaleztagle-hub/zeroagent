@@ -1,0 +1,6 @@
+const frame=document.querySelector('.browser-canvas iframe');
+const canvas=document.querySelector('.browser-canvas');
+function scaleDemo(){if(!frame||!canvas)return;const scale=canvas.clientWidth/1440;frame.style.transform=`scale(${scale})`;canvas.style.height=`${Math.round(900*scale)}px`}
+window.addEventListener('resize',scaleDemo);scaleDemo();
+document.querySelectorAll('details').forEach(item=>item.addEventListener('toggle',()=>{if(item.open)document.querySelectorAll('details').forEach(other=>{if(other!==item)other.open=false})}));
+document.querySelector('#contact-form')?.addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget,status=document.querySelector('#form-status'),button=form.querySelector('button');status.textContent='Enviando…';button.disabled=true;try{const response=await fetch('/api/commercial/leads',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(form)))});const data=await response.json();if(!response.ok)throw new Error(data.error||'No se pudo enviar.');form.reset();status.textContent='Listo. Recibimos tus datos y te contactaremos.'}catch(error){status.textContent=error.message}finally{button.disabled=false}});

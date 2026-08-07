@@ -1,0 +1,50 @@
+# Ejemplo de conocimiento estructurado.
+# Todo dato factual importante debe contener estado y fuente.
+
+standard_version: 1
+business_id: rishtedar
+knowledge_version: 0.1.0
+
+sources:
+  - id: source-branch-confirmation-2026-07-15
+    type: human_confirmation
+    title: Confirmación de sucursal Vitacura
+    received_at: 2026-07-15
+    verified_by: pending
+    status: approved
+
+branches:
+  - id: vitacura
+    name: Rishtedar Vitacura
+    address:
+      status: unknown
+    facilities:
+      parking:
+        value: false
+        status: confirmed
+        source_id: source-branch-confirmation-2026-07-15
+      wheelchair_access:
+        value: null
+        status: unknown
+        source_id: null
+      terrace:
+        value: null
+        status: unknown
+        source_id: null
+
+products: []
+
+policies:
+  - id: unknown-information
+    topic: informacion_no_confirmada
+    status: approved
+    response_rule: "Indicar que no existe información confirmada y ofrecer derivación."
+    source_id: source-branch-confirmation-2026-07-15
+
+faqs: []
+
+# Estados válidos de cualquier dato factual:
+# confirmed: se puede afirmar el valor.
+# unknown: no se puede afirmar ni negar.
+# obsolete: fue válido antes, pero no se debe usar.
+
