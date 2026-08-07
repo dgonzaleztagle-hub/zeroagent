@@ -36,6 +36,24 @@ export async function agendaSupabaseRequest(pathname, options = {}) {
   return body ? JSON.parse(body) : null;
 }
 
+// PostgREST trunca silenciosamente a max-rows (1000 en Supabase) sin devolver error — un cliente
+// real con más de 1000 citas o contactos (franciskom ya pasó los 1000 al importar su agenda) pierde
+// datos sin ningún aviso. Cualquier lista que pueda crecer sin techo real debe paginar con esto en
+// vez de agendaSupabaseRequest directo.
+export async function fetchAllAgendaRows(pathname) {
+  const pageSize = 1000;
+  let offset = 0;
+  let all = [];
+  while (true) {
+    const separator = pathname.includes('?') ? '&' : '?';
+    const page = await agendaSupabaseRequest(`${pathname}${separator}limit=${pageSize}&offset=${offset}`);
+    all = all.concat(page || []);
+    if (!page || page.length < pageSize) break;
+    offset += pageSize;
+  }
+  return all;
+}
+
 export async function agendaSupabaseUpload(storagePath, bytes, contentType = 'application/octet-stream') {
   const settings = supabaseSettings();
   if (!settings) throw new Error('Supabase no está configurado en este runtime.');
@@ -53,8 +71,26 @@ function cleanText(value, max = 180) {
   return String(value || '').trim().slice(0, max);
 }
 
-function asIso(value) {
-  const date = new Date(value);
+export function asIso(value, timeZone = 'America/Santiago') {
+  const raw = String(value ?? '').trim();
+  if (!raw) return null;
+  // Con offset explícito (Z o +HH:MM/-HH:MM), como ya envían reserva-móvil/reagendamiento
+  // desde el navegador: confiar en el parseo estándar, ya es un instante absoluto.
+  if (/[Zz]$|[+-]\d{2}:?\d{2}$/.test(raw)) {
+    const date = new Date(raw);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+  // Sin offset — el valor crudo de un <input type="datetime-local"> (reserva pública,
+  // reserva/bloqueo manual desde consola PC y móvil). new Date() lo interpretaría con la
+  // zona horaria del PROCESO, que en Vercel es UTC, no la del negocio: una reserva pedida a
+  // las 10:00 Chile quedaría guardada como 10:00 UTC (~06:00-07:00 Chile). Interpretar
+  // siempre como hora local del negocio.
+  const match = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/.exec(raw);
+  if (!match) {
+    const date = new Date(raw);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+  const date = zonedDateTimeToUtc(match[1], match[2], timeZone);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
@@ -70,6 +106,7 @@ function initialState(packageData) {
     updated_at: new Date().toISOString(),
     appointments: [],
     blocks: [],
+    feedback: [],
     catalog: {
       locations: config?.locations || [],
       services: config?.services || [],
@@ -143,18 +180,36 @@ function isWithinLocalAvailability(state, resource, startsAt, durationMinutes, t
     && String(rule.starts_at).slice(0, 5) <= startTime && String(rule.ends_at).slice(0, 5) >= endTime);
 }
 
+// Franjas donde el profesional PUEDE estar comprometido en otro lugar (ej. turno en un centro
+// médico donde no controla su propia agenda), pero no siempre — no son un bloqueo real, sino una
+// señal de "no confirmes solo, deriva a que la persona lo verifique". Distinto de availabilityRules
+// (cuándo SÍ está disponible) y de blocks (cuándo NO lo está, con certeza).
+export function findRiskWindow(packageData, resourceName, startsAtIso) {
+  const config = agendaConfig(packageData);
+  const windows = config?.risk_windows || [];
+  if (!windows.length) return null;
+  const timeZone = config?.timezone || 'America/Santiago';
+  const start = new Date(startsAtIso);
+  const day = localDayOfWeek(start, timeZone);
+  const parts = zonedParts(start, timeZone);
+  const time = `${parts.hour}:${parts.minute}`;
+  return windows.find(item => item.resource === resourceName && Number(item.day_of_week) === day
+    && String(item.starts_at).slice(0, 5) <= time && String(item.ends_at).slice(0, 5) > time) || null;
+}
+
 export async function getAgendaDashboard(packageData) {
   const config = agendaConfig(packageData);
   if (!config) return null;
   if (supabaseSettings()) {
-    const [locations, services, resources, links, appointments, availabilityRules, feedback] = await Promise.all([
+    const [locations, services, resources, links, appointments, availabilityRules, availabilityBlocks, feedback] = await Promise.all([
       agendaSupabaseRequest('/rest/v1/za_locations?active=eq.true&select=id,name,address,timezone'),
-      agendaSupabaseRequest('/rest/v1/za_services?active=eq.true&select=id,name,duration_minutes,price_clp'),
+      agendaSupabaseRequest('/rest/v1/za_services?active=eq.true&select=id,name,duration_minutes,price_clp,bookable,redirect_note'),
       agendaSupabaseRequest('/rest/v1/za_resources?active=eq.true&select=id,name,specialty,location_id'),
       agendaSupabaseRequest('/rest/v1/za_resource_services?select=resource_id,service_id'),
-      agendaSupabaseRequest('/rest/v1/za_appointments?select=id,reference,status,source,starts_at,ends_at,notes,za_customers(full_name,phone),za_services(name,duration_minutes),za_resources(name),za_locations(name)&order=starts_at.asc'),
+      fetchAllAgendaRows('/rest/v1/za_appointments?select=id,reference,status,source,starts_at,ends_at,notes,za_customers(full_name,phone,email),za_services(name,duration_minutes),za_resources(name),za_locations(name)&order=starts_at.asc'),
       agendaSupabaseRequest('/rest/v1/za_availability_rules?select=id,resource_id,day_of_week,starts_at,ends_at,active&order=day_of_week.asc,starts_at.asc'),
-      agendaSupabaseRequest('/rest/v1/za_feedback_items?select=id,rating,correction_text,status,created_at&order=created_at.desc&limit=30')
+      agendaSupabaseRequest('/rest/v1/za_availability_blocks?select=id,resource_id,starts_at,ends_at,reason&order=starts_at.asc'),
+      agendaSupabaseRequest('/rest/v1/za_feedback_items?select=id,rating,question,reply,correction_text,status,created_at&order=created_at.desc&limit=30')
     ]);
     const resourceCatalog = resources.map(resource => ({
       ...resource,
@@ -162,14 +217,17 @@ export async function getAgendaDashboard(packageData) {
     }));
     return {
       mode: 'customer_supabase',
+      business_name: packageData.business?.display_name || '',
+      description: packageData.business?.description || '',
+      channel_status: { zavu_connected: Boolean(process.env.ZAVUDEV_SENDER_ID && process.env.ZAVUDEV_WEBHOOK_SECRET) },
       config: { timezone: config.timezone, confirmation_mode: config.confirmation_mode, reminder_hours: config.reminder_hours, cancellation_policy: config.cancellation_policy, rules: config.rules },
       catalog: { locations, services, resources: resourceCatalog },
       appointments: appointments.map(item => ({
         id: item.id, reference: item.reference, status: item.status, source: item.source, starts_at: item.starts_at,
         duration_minutes: item.za_services?.duration_minutes, notes: item.notes, customer_name: item.za_customers?.full_name,
-        customer_phone: item.za_customers?.phone, service: item.za_services?.name, resource: item.za_resources?.name, location: item.za_locations?.name
+        customer_phone: item.za_customers?.phone, customer_email: item.za_customers?.email, service: item.za_services?.name, resource: item.za_resources?.name, location: item.za_locations?.name
       })),
-      blocks: [],
+      blocks: availabilityBlocks.map(block => ({ ...block, resource: resources.find(resource => resource.id === block.resource_id)?.name || 'Recurso eliminado' })),
       availabilityRules: availabilityRules.map(rule => ({ ...rule, resource: resources.find(resource => resource.id === rule.resource_id)?.name || 'Recurso eliminado' })),
       feedback
     };
@@ -177,6 +235,9 @@ export async function getAgendaDashboard(packageData) {
   const state = await loadAgendaState(packageData);
   return {
     mode: 'local_preview_state',
+    business_name: packageData.business?.display_name || '',
+    description: packageData.business?.description || '',
+    channel_status: { zavu_connected: Boolean(process.env.ZAVUDEV_SENDER_ID && process.env.ZAVUDEV_WEBHOOK_SECRET) },
     config: {
       timezone: config.timezone,
       confirmation_mode: config.confirmation_mode,
@@ -188,8 +249,41 @@ export async function getAgendaDashboard(packageData) {
     appointments: [...state.appointments].sort((a, b) => a.starts_at.localeCompare(b.starts_at)),
     blocks: state.blocks,
     availabilityRules: state.availabilityRules || [],
-    feedback: []
+    feedback: [...(state.feedback || [])]
   };
+}
+
+// Respaldo local del feedback cuando no hay Supabase: mismo archivo de estado que
+// appointments/availabilityRules, para que el dashboard del cliente pueda listarlo
+// y marcarlo resuelto sin depender de infraestructura externa.
+export async function appendAgendaFeedbackLocal(packageData, item) {
+  if (!agendaConfig(packageData) || agendaUsesSupabase()) return null;
+  const state = await loadAgendaState(packageData);
+  const entry = {
+    id: item.id || randomUUID(),
+    rating: item.rating,
+    question: cleanText(item.question, 800),
+    reply: cleanText(item.reply, 2000),
+    correction_text: cleanText(item.expected_answer, 2000),
+    status: 'new',
+    created_at: item.created_at || new Date().toISOString()
+  };
+  state.feedback = [entry, ...(state.feedback || [])].slice(0, 200);
+  await saveAgendaState(packageData, state);
+  return entry;
+}
+
+// El segmento nunca baja solo: el dueño lo puede bajar a mano, pero el sistema
+// sólo lo sube (frio → caliente → cliente) ante señales reales de avance.
+const SEGMENT_ORDER = { frio: 0, caliente: 1, cliente: 2 };
+async function bumpCustomerSegment(customerId, minSegment) {
+  if (!customerId || !supabaseSettings()) return;
+  try {
+    const rows = await agendaSupabaseRequest(`/rest/v1/za_customers?id=eq.${encodeURIComponent(customerId)}&select=id,segment`);
+    const current = rows?.[0]?.segment || 'frio';
+    if (SEGMENT_ORDER[current] >= SEGMENT_ORDER[minSegment]) return;
+    await agendaSupabaseRequest(`/rest/v1/za_customers?id=eq.${encodeURIComponent(customerId)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ segment: minSegment }) });
+  } catch (error) { console.warn('No se pudo actualizar el segmento del cliente:', error.message); }
 }
 
 export async function createAgendaAppointment(packageData, input, source = 'client_console') {
@@ -200,11 +294,23 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
   const serviceName = cleanText(input.service);
   const resourceName = cleanText(input.resource);
   const customerName = cleanText(input.customer_name);
-  const customerPhone = cleanText(input.customer_phone, 40);
-  const startsAt = asIso(input.starts_at);
+  // Normalizado a un único formato (E.164 Chile) sea cual sea el origen (WhatsApp ya normalizado
+  // en el ingreso del webhook, reserva pública en texto libre, consola) — antes cada camino guardaba
+  // el teléfono como llegaba y "9 1234 5678"/"+56 9 1234 5678"/"+56912345678" podían crear tres
+  // clientes distintos en vez de uno.
+  const customerPhone = normalizeChilePhone(cleanText(input.customer_phone, 40)) || cleanText(input.customer_phone, 40);
+  const customerEmail = cleanText(input.customer_email, 254);
+  const customerAge = Number.isInteger(Number(input.customer_age)) && Number(input.customer_age) > 0 ? Number(input.customer_age) : null;
+  const customerOccupation = cleanText(input.customer_occupation, 120);
+  const customerMedicalHistory = cleanText(input.customer_medical_history, 800);
+  const customerExtraSymptoms = cleanText(input.customer_extra_symptoms, 500);
+  const startsAt = asIso(input.starts_at, config.timezone || 'America/Santiago');
   const service = dashboard.catalog.services.find(item => item.name === serviceName);
   const resource = dashboard.catalog.resources.find(item => item.name === resourceName);
   if (!service || !resource) throw new Error('El servicio o profesional seleccionado no existe en este paquete.');
+  // Servicio no gestionado por este negocio (ej. atención en un centro de terceros): nunca se
+  // agenda por ningún canal, sin importar el origen (reserva pública, consola, WhatsApp).
+  if (service.bookable === false) throw new Error(service.redirect_note || `"${service.name}" no se agenda por este canal.`);
   if (!customerName || (config.rules?.require_customer_phone && !customerPhone) || !startsAt) {
     throw new Error('Para reservar se necesita nombre, teléfono, servicio, profesional y fecha/hora válida.');
   }
@@ -213,19 +319,30 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
   if (new Date(startsAt).getTime() - Date.now() < minimumNotice) throw new Error('El horario no cumple el aviso mínimo configurado.');
   const maximumAdvance = Number(config.rules?.maximum_advance_days || 730) * 86_400_000;
   if (new Date(startsAt).getTime() - Date.now() > maximumAdvance) throw new Error('El horario supera la anticipación máxima configurada.');
+  // La franja de riesgo aplica acá, no sólo en la tool del agente de WhatsApp: cualquier
+  // origen (reserva pública, consola, staff) puede crear un cruce que Francisco no controla
+  // del todo. Nunca auto-confirmamos ese horario, sin importar el confirmation_mode del negocio.
+  const riskWindow = findRiskWindow(packageData, resourceName, startsAt);
+  const effectiveConfirmationMode = riskWindow ? 'manual' : config.confirmation_mode;
+  const riskNote = riskWindow ? `[Franja de riesgo] ${riskWindow.reason || 'Posible compromiso del profesional en otro lugar a esta hora.'} Confirmar disponibilidad real antes de aceptar.` : '';
+  const notesWithRisk = [cleanText(input.notes, 800), riskNote].filter(Boolean).join(' — ').slice(0, 800);
   if (supabaseSettings()) {
     const location = dashboard.catalog.locations.find(item => item.name === cleanText(input.location));
     const result = await agendaSupabaseRequest('/rest/v1/rpc/za_request_appointment', {
       method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({
         p_customer_name: customerName, p_customer_phone: customerPhone, p_service_id: service.id, p_resource_id: resource.id,
         p_starts_at: startsAt, p_source: source, p_location_id: location?.id || resource.location_id || null,
-        p_notes: cleanText(input.notes, 800), p_confirmation_mode: config.confirmation_mode,
+        p_notes: notesWithRisk, p_confirmation_mode: effectiveConfirmationMode,
         p_minimum_notice_hours: Number(config.rules?.minimum_notice_hours || 0),
-        p_maximum_advance_days: Number(config.rules?.maximum_advance_days || 730)
+        p_maximum_advance_days: Number(config.rules?.maximum_advance_days || 730),
+        p_customer_email: customerEmail || null, p_customer_age: customerAge,
+        p_customer_occupation: customerOccupation || null, p_customer_medical_history: customerMedicalHistory || null,
+        p_customer_extra_symptoms: customerExtraSymptoms || null
       })
     });
     const appointment = Array.isArray(result) ? result[0] : result;
-    return { ...appointment, customer_name: customerName, customer_phone: customerPhone, service: serviceName, resource: resourceName, location: location?.name || '' };
+    await bumpCustomerSegment(appointment.customer_id, 'caliente');
+    return { ...appointment, customer_name: customerName, customer_phone: customerPhone, customer_email: customerEmail, service: serviceName, resource: resourceName, location: location?.name || '', risk_window: riskWindow || null };
   }
   const duration = Number(service.duration_minutes) || 30;
   const startTime = new Date(startsAt).getTime();
@@ -235,20 +352,30 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
   const conflict = state.appointments.find(item => item.resource === resourceName && !['cancelled', 'rejected'].includes(item.status)
     && overlaps(startTime, duration, new Date(item.starts_at).getTime(), Number(item.duration_minutes) || 30));
   if (conflict) throw new Error('Ese profesional ya tiene una reserva que se cruza con el horario solicitado.');
+  const endTime = startTime + duration * 60_000;
+  const blocked = (state.blocks || []).some(block => block.resource === resourceName
+    && startTime < new Date(block.ends_at).getTime() && new Date(block.starts_at).getTime() < endTime);
+  if (blocked) throw new Error('Ese horario está bloqueado para este profesional.');
   const appointment = {
     id: `apt_${randomUUID()}`,
     reference: `ZA-${randomUUID().slice(0, 8).toUpperCase()}`,
     created_at: new Date().toISOString(),
     source,
-    status: config.confirmation_mode === 'automatic' ? 'confirmed' : 'pending_confirmation',
+    status: effectiveConfirmationMode === 'automatic' ? 'confirmed' : 'pending_confirmation',
     customer_name: customerName,
     customer_phone: customerPhone,
+    customer_email: customerEmail,
+    customer_age: customerAge,
+    customer_occupation: customerOccupation,
+    customer_medical_history: customerMedicalHistory,
+    customer_extra_symptoms: customerExtraSymptoms,
     service: serviceName,
     resource: resourceName,
     location: cleanText(input.location) || state.catalog.locations[0]?.name || '',
     starts_at: startsAt,
     duration_minutes: duration,
-    notes: cleanText(input.notes, 800)
+    notes: notesWithRisk,
+    risk_window: riskWindow || null
   };
   state.appointments.push(appointment);
   await saveAgendaState(packageData, state);
@@ -266,7 +393,9 @@ export async function updateAgendaAppointment(packageData, id, status) {
         p_appointment_id: id, p_new_status: status, p_expected_status: current[0].status
       })
     });
-    return Array.isArray(result) ? result[0] : result;
+    const appointment = Array.isArray(result) ? result[0] : result;
+    if (['confirmed', 'completed'].includes(status)) await bumpCustomerSegment(appointment.customer_id, 'cliente');
+    return appointment;
   }
   const state = await loadAgendaState(packageData);
   if (!state) throw new Error('Agenda v1 no está habilitada en este paquete.');
@@ -333,7 +462,7 @@ export async function getAvailableSlots(packageData, { service, resource, date }
 export async function rescheduleAgendaAppointment(packageData, { id, new_starts_at }) {
   const config = agendaConfig(packageData);
   if (!config) throw new Error('Agenda v1 no está habilitada en este paquete.');
-  const startsAt = asIso(new_starts_at);
+  const startsAt = asIso(new_starts_at, config.timezone || 'America/Santiago');
   if (!startsAt) throw new Error('Fecha/hora nueva inválida.');
   if (supabaseSettings()) {
     const result = await agendaSupabaseRequest('/rest/v1/rpc/za_reschedule_appointment', {
@@ -387,12 +516,19 @@ export async function seedAgendaCatalog(packageData) {
   }
   for (const item of config.services || []) {
     if (!item?.name || services.has(item.name)) continue;
-    const rows = await agendaSupabaseRequest('/rest/v1/za_services', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ name: item.name, duration_minutes: Number(item.duration_minutes) || 30, price_clp: item.price_clp ?? null }) });
+    const rows = await agendaSupabaseRequest('/rest/v1/za_services', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ name: item.name, duration_minutes: Number(item.duration_minutes) || 30, price_clp: item.price_clp ?? null, bookable: item.bookable !== false, redirect_note: item.redirect_note || '' }) });
     services.set(item.name, rows[0]); createdServices++;
   }
   for (const item of config.resources || []) {
     if (!item?.name || resources.has(item.name)) continue;
-    const rows = await agendaSupabaseRequest('/rest/v1/za_resources', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ name: item.name, specialty: item.specialty || '', location_id: locations.values().next().value?.id || null }) });
+    // No adivinar sede: un profesional que atiende en varias sedes (o a domicilio) no tiene
+    // una sede fija, y forzarle la primera rompe la reserva en cualquier otra (la RPC la
+    // rechaza). Sólo se asigna sede fija si el recurso la declara explícitamente, o si el
+    // negocio entero tiene una sola sede (ahí sí es inequívoco).
+    const declaredLocation = item.location ? locations.get(item.location) : null;
+    const singleLocation = locations.size === 1 ? locations.values().next().value : null;
+    const resourceLocationId = declaredLocation?.id || singleLocation?.id || null;
+    const rows = await agendaSupabaseRequest('/rest/v1/za_resources', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ name: item.name, specialty: item.specialty || '', location_id: resourceLocationId }) });
     resources.set(item.name, rows[0]); createdResources++;
   }
   for (const item of config.resources || []) {
@@ -442,12 +578,212 @@ export async function deleteAgendaAvailabilityRule(packageData, ruleId) {
   return { ok: true };
 }
 
+// Bloqueos puntuales: a diferencia del horario semanal (siempre igual, semana a semana),
+// un bloqueo cubre un tramo real (ej. turno en un centro médico donde el profesional no
+// controla su propia agenda, o tiempo de traslado extra a domicilio) sin tocar el horario base.
+// Se listan junto al resto del dashboard (getAgendaDashboard), igual que availabilityRules.
+export async function createAgendaAvailabilityBlock(packageData, input = {}) {
+  const config = agendaConfig(packageData);
+  if (!config) throw new Error('Agenda v1 no está habilitada en este paquete.');
+  const dashboard = await getAgendaDashboard(packageData);
+  const resource = dashboard.catalog.resources.find(item => item.name === cleanText(input.resource));
+  const timeZone = config.timezone || 'America/Santiago';
+  const startsAt = asIso(input.starts_at, timeZone);
+  const endsAt = asIso(input.ends_at, timeZone);
+  const reason = cleanText(input.reason, 200);
+  if (!resource || !startsAt || !endsAt || new Date(endsAt).getTime() <= new Date(startsAt).getTime()) {
+    throw new Error('Indica profesional y un rango de fecha/hora válido para el bloqueo.');
+  }
+  if (!agendaUsesSupabase()) {
+    const state = await loadAgendaState(packageData);
+    const block = { id: `block_${randomUUID()}`, resource: resource.name, starts_at: startsAt, ends_at: endsAt, reason };
+    state.blocks = [...(state.blocks || []), block];
+    await saveAgendaState(packageData, state);
+    return block;
+  }
+  const result = await agendaSupabaseRequest('/rest/v1/za_availability_blocks', {
+    method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ resource_id: resource.id, starts_at: startsAt, ends_at: endsAt, reason })
+  });
+  return { ...result[0], resource: resource.name };
+}
+
+export async function deleteAgendaAvailabilityBlock(packageData, blockId) {
+  if (!agendaUsesSupabase()) {
+    const state = await loadAgendaState(packageData);
+    const before = (state.blocks || []).length;
+    state.blocks = (state.blocks || []).filter(block => block.id !== blockId);
+    if (state.blocks.length === before) throw new Error('Bloqueo no encontrado.');
+    await saveAgendaState(packageData, state);
+    return { ok: true };
+  }
+  await agendaSupabaseRequest(`/rest/v1/za_availability_blocks?id=eq.${encodeURIComponent(blockId)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } });
+  return { ok: true };
+}
+
 export async function updateAgendaFeedback(packageData, feedbackId, status) {
   if (!['new', 'reviewing', 'resolved', 'dismissed'].includes(status)) throw new Error('Estado de feedback inválido.');
-  if (!agendaUsesSupabase()) throw new Error('El feedback productivo requiere Supabase configurado.');
+  if (!agendaUsesSupabase()) {
+    const state = await loadAgendaState(packageData);
+    const item = (state.feedback || []).find(entry => entry.id === feedbackId);
+    if (!item) throw new Error('Feedback no encontrado.');
+    item.status = status;
+    if (status === 'resolved') item.resolved_at = new Date().toISOString();
+    await saveAgendaState(packageData, state);
+    return item;
+  }
   const rows = await agendaSupabaseRequest(`/rest/v1/za_feedback_items?id=eq.${encodeURIComponent(feedbackId)}`, {
     method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ status, ...(status === 'resolved' ? { resolved_at: new Date().toISOString() } : {}) })
   });
   if (!rows?.[0]) throw new Error('Feedback no encontrado.');
+  return rows[0];
+}
+
+// ── CRM ligero: control interno de contactos ──
+// Sin Supabase no existe una tabla de clientes separada (cada cita local guarda el
+// nombre/teléfono directo), así que se agrupa por teléfono como "cliente virtual".
+export async function listCustomers(packageData) {
+  if (!agendaConfig(packageData)) throw new Error('Agenda v1 no está habilitada en este paquete.');
+  if (agendaUsesSupabase()) {
+    const [customers, appointments] = await Promise.all([
+      fetchAllAgendaRows('/rest/v1/za_customers?select=id,full_name,phone,email,segment,created_at&order=full_name.asc'),
+      fetchAllAgendaRows('/rest/v1/za_appointments?select=id,customer_id,starts_at,status&order=starts_at.desc')
+    ]);
+    return (customers || []).map(customer => {
+      const own = (appointments || []).filter(item => item.customer_id === customer.id);
+      return { ...customer, appointment_count: own.length, last_visit: own[0]?.starts_at || null };
+    });
+  }
+  const state = await loadAgendaState(packageData);
+  const byPhone = new Map();
+  for (const appointment of state.appointments) {
+    const key = appointment.customer_phone;
+    if (!key) continue;
+    if (!byPhone.has(key)) byPhone.set(key, { id: key, full_name: appointment.customer_name, phone: key, email: null, segment: 'caliente', created_at: appointment.created_at, appointments: [] });
+    byPhone.get(key).appointments.push(appointment);
+  }
+  return [...byPhone.values()].map(customer => {
+    const sorted = [...customer.appointments].sort((a, b) => b.starts_at.localeCompare(a.starts_at));
+    const { appointments, ...rest } = customer;
+    return { ...rest, appointment_count: appointments.length, last_visit: sorted[0]?.starts_at || null };
+  });
+}
+
+export async function getCustomerDetail(packageData, customerId) {
+  if (!agendaConfig(packageData)) throw new Error('Agenda v1 no está habilitada en este paquete.');
+  if (agendaUsesSupabase()) {
+    const [customerRows, appointments] = await Promise.all([
+      agendaSupabaseRequest(`/rest/v1/za_customers?id=eq.${encodeURIComponent(customerId)}&select=*`),
+      agendaSupabaseRequest(`/rest/v1/za_appointments?customer_id=eq.${encodeURIComponent(customerId)}&select=id,reference,status,starts_at,notes,za_services(name),za_resources(name)&order=starts_at.desc`)
+    ]);
+    const customer = customerRows?.[0];
+    if (!customer) throw new Error('Cliente no encontrado.');
+    return {
+      customer,
+      appointments: (appointments || []).map(item => ({ id: item.id, reference: item.reference, status: item.status, starts_at: item.starts_at, notes: item.notes, service: item.za_services?.name, resource: item.za_resources?.name }))
+    };
+  }
+  const state = await loadAgendaState(packageData);
+  const own = state.appointments.filter(item => item.customer_phone === customerId);
+  if (!own.length) throw new Error('Cliente no encontrado.');
+  const sorted = [...own].sort((a, b) => b.starts_at.localeCompare(a.starts_at));
+  return {
+    customer: { id: customerId, full_name: own[0].customer_name, phone: own[0].customer_phone, email: null, segment: 'caliente' },
+    appointments: sorted.map(item => ({ id: item.id, reference: item.reference, status: item.status, starts_at: item.starts_at, notes: item.notes, service: item.service, resource: item.resource }))
+  };
+}
+
+export async function updateCustomerSegment(packageData, customerId, segment) {
+  if (!['frio', 'caliente', 'cliente'].includes(segment)) throw new Error('Segmento inválido.');
+  if (!agendaUsesSupabase()) return { id: customerId, segment };
+  const rows = await agendaSupabaseRequest(`/rest/v1/za_customers?id=eq.${encodeURIComponent(customerId)}`, {
+    method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ segment })
+  });
+  if (!rows?.[0]) throw new Error('Cliente no encontrado.');
+  return rows[0];
+}
+
+// Actualiza la ficha (correo/edad/ocupación/antecedentes/síntomas) de un cliente que YA existe,
+// identificado por teléfono verificado — para cuando esos datos llegan en un turno posterior a la
+// reserva (create_appointment sólo los guarda si vienen en esa misma llamada). Sin esto, un
+// cliente que responde "tengo 34 años, trabajo en X" DESPUÉS de agendar no tenía dónde quedar
+// guardado: no existía ninguna herramienta capaz de tocar su ficha fuera del momento de reservar.
+export async function updateCustomerProfile(packageData, phone, fields = {}) {
+  if (!agendaUsesSupabase()) return { id: phone, ...fields };
+  const patch = {};
+  if (fields.email) patch.email = String(fields.email).trim();
+  if (Number.isInteger(Number(fields.age)) && Number(fields.age) > 0) patch.age = Number(fields.age);
+  if (fields.occupation) patch.occupation = String(fields.occupation).trim().slice(0, 120);
+  if (fields.medical_history) patch.medical_history = String(fields.medical_history).trim().slice(0, 800);
+  if (fields.extra_symptoms) patch.extra_symptoms = String(fields.extra_symptoms).trim().slice(0, 500);
+  if (!Object.keys(patch).length) throw new Error('No hay datos nuevos que guardar.');
+  const normalizedPhone = normalizeChilePhone(phone) || String(phone).trim();
+  const rows = await agendaSupabaseRequest(`/rest/v1/za_customers?phone=eq.${encodeURIComponent(normalizedPhone)}`, {
+    method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(patch)
+  });
+  if (!rows?.[0]) throw new Error('Cliente no encontrado — todavía no tiene ninguna reserva registrada.');
+  return rows[0];
+}
+
+export function normalizeChilePhone(value) {
+  let digits = String(value || '').replace(/[^\d+]/g, '');
+  if (!digits) return '';
+  digits = digits[0] + digits.slice(1).replace(/\+/g, '');
+  if (digits.startsWith('+')) return digits;
+  digits = digits.replace(/^0+/, '');
+  if (!digits) return '';
+  if (digits.startsWith('56')) return `+${digits}`;
+  if (digits.length === 9 && digits.startsWith('9')) return `+56${digits}`;
+  if (digits.length === 8) return `+56${digits}`;
+  return `+${digits}`;
+}
+
+// Importa una lista de contactos ya parseada (ver contacts-import.js) al CRM. No depende del
+// formato de origen (vCard, CSV, futuro Google Contacts) — solo espera {full_name, phone, email?}.
+// No pisa el email ya guardado de un cliente existente (p.ej. capturado en una reserva real) si el
+// contacto importado no trae uno.
+const SEGMENT_RANK = { frio: 0, caliente: 1, cliente: 2 };
+
+export async function importAgendaCustomers(packageData, contacts) {
+  if (!agendaConfig(packageData)) throw new Error('Agenda v1 no está habilitada en este paquete.');
+  if (!agendaUsesSupabase()) throw new Error('Importar contactos requiere Supabase configurado en este runtime.');
+  const result = { created: 0, updated: 0, skipped: [] };
+  for (const raw of contacts) {
+    const full_name = cleanText(raw.full_name, 200);
+    const phone = normalizeChilePhone(raw.phone);
+    const email = raw.email ? cleanText(raw.email, 200).toLowerCase() : null;
+    const segment = SEGMENT_RANK[raw.segment] != null ? raw.segment : 'frio';
+    if (!full_name || !phone) { result.skipped.push({ full_name: raw.full_name || '', phone: raw.phone || '', reason: 'Falta nombre o teléfono válido' }); continue; }
+    const existing = await agendaSupabaseRequest(`/rest/v1/za_customers?phone=eq.${encodeURIComponent(phone)}&select=id,email,segment`);
+    if (existing?.[0]) {
+      const patch = { full_name };
+      if (email && !existing[0].email) patch.email = email;
+      // Nunca degradar: un import solo sube el segmento (frio→caliente→cliente), nunca lo baja
+      // — si ya reservó o confirmó algo real, ese hecho pesa más que la etiqueta del contacto importado.
+      if (SEGMENT_RANK[segment] > (SEGMENT_RANK[existing[0].segment] ?? 0)) patch.segment = segment;
+      await agendaSupabaseRequest(`/rest/v1/za_customers?id=eq.${encodeURIComponent(existing[0].id)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(patch) });
+      result.updated++;
+    } else {
+      await agendaSupabaseRequest('/rest/v1/za_customers', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ full_name, phone, email, segment }) });
+      result.created++;
+    }
+  }
+  return result;
+}
+
+export async function updateAppointmentNotes(packageData, appointmentId, notes) {
+  const cleaned = cleanText(notes, 800);
+  if (!agendaUsesSupabase()) {
+    const state = await loadAgendaState(packageData);
+    const appointment = state.appointments.find(item => item.id === appointmentId);
+    if (!appointment) throw new Error('Reserva no encontrada.');
+    appointment.notes = cleaned;
+    appointment.updated_at = new Date().toISOString();
+    await saveAgendaState(packageData, state);
+    return appointment;
+  }
+  const rows = await agendaSupabaseRequest(`/rest/v1/za_appointments?id=eq.${encodeURIComponent(appointmentId)}`, {
+    method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ notes: cleaned })
+  });
+  if (!rows?.[0]) throw new Error('Reserva no encontrada.');
   return rows[0];
 }

@@ -10,7 +10,8 @@
     "test:agenda-package": "node scripts/verify-agenda-package.mjs",
     "test:knowledge-regressions": "node scripts/verify-knowledge-regressions.mjs",
     "test:supabase-staging": "node scripts/verify-supabase-staging.mjs",
-    "test:agenda-integration": "node scripts/verify-agenda-integration.mjs"
+    "test:agenda-integration": "node scripts/verify-agenda-integration.mjs",
+    "test:timezone-parsing": "node scripts/verify-timezone-parsing.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",
