@@ -1,0 +1,9 @@
+{
+  "name": "zeroagent-landing",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Landing comercial de ZeroAgent — sitio estático + una función serverless para captura de leads.",
+  "engines": {
+    "node": ">=20"
+  }
+}

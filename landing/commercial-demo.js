@@ -8,7 +8,7 @@ document.querySelector('#contact-form')?.addEventListener('submit', async event 
   status.textContent = 'Enviando…';
   button.disabled = true;
   try {
-    const response = await fetch('/api/commercial/leads', {
+    const response = await fetch('/api/leads', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify(Object.fromEntries(new FormData(form)))
     });
