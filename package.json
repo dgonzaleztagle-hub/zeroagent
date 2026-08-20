@@ -11,7 +11,13 @@
     "test:knowledge-regressions": "node scripts/verify-knowledge-regressions.mjs",
     "test:supabase-staging": "node scripts/verify-supabase-staging.mjs",
     "test:agenda-integration": "node scripts/verify-agenda-integration.mjs",
-    "test:timezone-parsing": "node scripts/verify-timezone-parsing.mjs"
+    "test:timezone-parsing": "node scripts/verify-timezone-parsing.mjs",
+    "test:mutation-claims": "node scripts/verify-mutation-claims.mjs",
+    "test:regression-matcher": "node scripts/verify-regression-matcher.mjs",
+    "test:customer-records": "node scripts/verify-customer-records.mjs",
+    "test:studio-fresh-install": "node scripts/verify-studio-fresh-install.mjs",
+    "test:local-preview-security": "node scripts/verify-local-preview-security.mjs",
+    "test:build-artifact": "node scripts/verify-build-artifact.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",

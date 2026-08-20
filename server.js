@@ -6,9 +6,14 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 import { readFileSync } from 'node:fs';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { createLocalVault } from './vault.js';
-import { answerWithGroq as answerWithRuntimeEngine } from './runtime-template/src/engine.js';
+import { answer as answerDeterministically, answerWithGroq as answerWithRuntimeEngine } from './runtime-template/src/engine.js';
+import { getAgendaToolDefinitions } from './runtime-template/src/agenda-tools.js';
+import { matchExpectedBehavior } from './runtime-template/src/regression-match.js';
+import { getVerticalPack, listVerticalPacks, verticalAgendaDefaults } from './vertical-packs.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -28,14 +33,96 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
     }
   } catch { /* sin .env: se usan las variables del entorno del sistema */ }
 })();
+// Migración SQLite -> Supabase (ver C:\Users\dgonz\.claude\plans\parallel-chasing-bee.md).
+// Fase 3 (reescritura completa por área, 10 áreas + 11 endpoints extra encontrados en el chequeo
+// sistemático) está completa y verificada con HTTP real contra el Supabase propio de Studio,
+// incluida la suite de regresión completa (scripts/verify-studio-fresh-install.mjs) y un ciclo real
+// de backup/reset/restore. Fase 4 (correr en producción un período real antes de borrar el
+// fallback) arranca acá: default pasa a 'postgres' — 'sqlite' queda solo como salida de emergencia
+// explícita (STUDIO_DB_BACKEND=sqlite) mientras dura ese período. El código SQLite, esta bandera y
+// las dependencias sqlite/sqlite3 se borran recién después, no en la misma sesión que el cutover.
+const studioDbBackend = process.env.STUDIO_DB_BACKEND === 'sqlite' ? 'sqlite' : 'postgres';
+
+function studioSupabaseSettings() {
+  const url = String(process.env.STUDIO_SUPABASE_URL || '').replace(/\/$/, '');
+  const key = process.env.STUDIO_SUPABASE_SERVICE_ROLE_KEY || '';
+  return url && key ? { url, key } : null;
+}
+
+// Mismo patrón que agendaSupabaseRequest en runtime-template/src/agenda.js — fetch a mano contra
+// PostgREST, sin @supabase/supabase-js ni pg (convención ya establecida en todo el repo).
+async function studioSupabaseRequest(pathname, options = {}) {
+  const settings = studioSupabaseSettings();
+  if (!settings) throw new Error('Supabase de Studio no está configurado (STUDIO_SUPABASE_URL/STUDIO_SUPABASE_SERVICE_ROLE_KEY).');
+  const response = await fetch(`${settings.url}${pathname}`, {
+    ...options,
+    headers: { apikey: settings.key, authorization: `Bearer ${settings.key}`, 'content-type': 'application/json', ...(options.headers || {}) }
+  });
+  const body = await response.text();
+  if (!response.ok) throw new Error(body || `Supabase (Studio) respondió ${response.status}`);
+  return body ? JSON.parse(body) : null;
+}
+
+// Paginación defensiva: PostgREST trunca en silencio a 1000 filas por página sin devolver error.
+async function studioSupabaseRequestAll(pathname) {
+  const pageSize = 1000;
+  let offset = 0;
+  let all = [];
+  while (true) {
+    const separator = pathname.includes('?') ? '&' : '?';
+    const page = await studioSupabaseRequest(`${pathname}${separator}limit=${pageSize}&offset=${offset}`);
+    all = all.concat(page || []);
+    if (!page || page.length < pageSize) break;
+    offset += pageSize;
+  }
+  return all;
+}
+
+// Traduce el body de error de PostgREST (texto plano en studioSupabaseRequest) al mismo tipo de
+// mensaje "amigable" que ya devuelve la ruta equivalente en SQLite, para que server.js no tenga
+// que ramificar su manejo de errores por backend en cada endpoint.
+function isStudioUniqueViolation(error) {
+  return /"code":"23505"/.test(String(error?.message || ''));
+}
+
+// Lectura de una sola fila de client_infrastructure por client_id — usado en varios endpoints que
+// solo necesitan leer supabase_url/credenciales antes de hablarle al Supabase REMOTO del cliente
+// (no al de Studio). `columns` es la misma lista separada por comas que se usaría en un SELECT SQL.
+// INSERT de prospecting_searches — mismo patrón en /search, /demo y /prospects/manual.
+async function studioInsertProspectingSearch({ id, vertical, location, terms, coverage, resultCount, source, createdAt }) {
+  if (studioDbBackend === 'postgres') {
+    await studioSupabaseRequest('/rest/v1/prospecting_searches', {
+      method: 'POST', headers: { prefer: 'return=minimal' },
+      body: JSON.stringify({ id, vertical, location, terms, coverage, result_count: resultCount, source, created_at: createdAt })
+    });
+  } else {
+    await db.run('INSERT INTO prospecting_searches (id, vertical, location, terms, coverage, result_count, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, vertical, location, terms, coverage, resultCount, source, createdAt]);
+  }
+}
+
+async function studioInfraRow(clientId, columns) {
+  if (studioDbBackend === 'postgres') {
+    const rows = await studioSupabaseRequest(`/rest/v1/client_infrastructure?client_id=eq.${encodeURIComponent(clientId)}&select=${columns.replace(/\s+/g, '')}`);
+    return rows?.[0] || null;
+  }
+  return db.get(`SELECT ${columns} FROM client_infrastructure WHERE client_id = ?`, [clientId]);
+}
+
 const storageRoot = path.join(__dirname, 'storage', 'sources');
 const ideInboxRoot = path.join(__dirname, '.zeroagent', 'inbox');
 const backupRoot = path.join(__dirname, 'storage', 'backups');
 const runtimeTemplateRoot = path.join(__dirname, 'runtime-template');
-const runtimeBuildRoot = path.join(__dirname, 'storage', 'agent-builds');
+const runtimeBuildRoot = process.env.ZEROAGENT_BUILD_ROOT
+  ? path.resolve(process.env.ZEROAGENT_BUILD_ROOT)
+  : path.join(__dirname, 'storage', 'agent-builds');
+const clientLandingRoot = process.env.ZEROAGENT_CLIENT_LANDING_ROOT
+  ? path.resolve(process.env.ZEROAGENT_CLIENT_LANDING_ROOT)
+  : path.join(__dirname, 'storage', 'client-landings');
 const vaultRoot = path.join(__dirname, 'storage', 'vault');
 const onboardingRoot = path.join(__dirname, 'storage', 'onboarding');
 const localVault = createLocalVault(vaultRoot);
+const execFileAsync = promisify(execFile);
 const runtimeVersion = 'zeroagent-runtime-node-v4-preview-groq-metrics';
 
 const toneProfiles = {
@@ -238,18 +325,61 @@ function normalizeAgendaConfig(input = {}) {
     const parsed = Number(value);
     return Number.isFinite(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
   };
+  const optionalId = value => cleanText(value, 100).replace(/[^a-zA-Z0-9._:-]/g, '') || undefined;
+  const names = value => (Array.isArray(value) ? value : String(value || '').split(','))
+    .map(item => cleanText(item, 180)).filter(Boolean).slice(0, 100);
+  const locations = asList(input.locations).map(item => ({
+    ...(optionalId(item.id) ? { id: optionalId(item.id) } : {}),
+    name: cleanText(item.name, 180),
+    address: cleanText(item.address, 400),
+    hours: cleanText(item.hours, 400),
+    kind: ['premise', 'service_area', 'remote'].includes(item.kind) ? item.kind : 'premise',
+    timezone: cleanText(item.timezone, 80) || undefined,
+    area_note: cleanText(item.area_note, 800),
+    active: item.active !== false
+  })).filter(item => item.name);
+  const services = asList(input.services).map(item => {
+    const deliveryMode = ['onsite', 'mobile', 'remote', 'external'].includes(item.delivery_mode) ? item.delivery_mode : 'onsite';
+    const parsedPrice = item.price_clp === '' || item.price_clp == null ? null : Number(item.price_clp);
+    return {
+      ...(optionalId(item.id) ? { id: optionalId(item.id) } : {}),
+      name: cleanText(item.name, 180),
+      duration_minutes: number(item.duration_minutes, 30, 5, 1440),
+      price_clp: Number.isFinite(parsedPrice) && parsedPrice >= 0 ? Math.round(parsedPrice) : null,
+      price_type: ['fixed', 'from', 'quote'].includes(item.price_type) ? item.price_type : 'fixed',
+      price_note: cleanText(item.price_note, 800),
+      delivery_mode: deliveryMode,
+      locations: names(item.locations || item.location_names || item.location_ids),
+      requires_customer_address: deliveryMode === 'mobile' ? item.requires_customer_address !== false : Boolean(item.requires_customer_address),
+      travel_buffer_minutes: number(item.travel_buffer_minutes, 0, 0, 240),
+      service_area_note: cleanText(item.service_area_note, 800),
+      bookable: item.bookable !== false && deliveryMode !== 'external',
+      redirect_note: cleanText(item.redirect_note, 800),
+      active: item.active !== false
+    };
+  }).filter(item => item.name);
+  const resources = asList(input.resources).map(item => ({
+    ...(optionalId(item.id) ? { id: optionalId(item.id) } : {}),
+    name: cleanText(item.name, 180),
+    specialty: cleanText(item.specialty, 300),
+    services: names(item.services),
+    locations: names(item.locations),
+    location: cleanText(item.location, 180) || undefined,
+    active: item.active !== false
+  })).filter(item => item.name);
   const rules = input.rules && typeof input.rules === 'object' ? input.rules : {};
   return {
     enabled: Boolean(input.enabled),
-    pack_version: '1.0.0',
+    pack_version: /^\d+\.\d+\.\d+$/.test(String(input.pack_version || '')) ? String(input.pack_version) : agendaV1Defaults.pack_version,
     booking_mode: ['appointment', 'reservation'].includes(input.booking_mode) ? input.booking_mode : 'appointment',
     timezone: typeof input.timezone === 'string' && input.timezone.trim() ? input.timezone.trim() : 'America/Santiago',
     confirmation_mode: ['automatic', 'manual'].includes(input.confirmation_mode) ? input.confirmation_mode : 'manual',
     reminder_hours: number(input.reminder_hours, 24, 0, 168),
     cancellation_policy: typeof input.cancellation_policy === 'string' ? input.cancellation_policy.trim().slice(0, 1000) : agendaV1Defaults.cancellation_policy,
-    locations: asList(input.locations),
-    services: asList(input.services),
-    resources: asList(input.resources),
+    locations,
+    services,
+    resources,
+    risk_windows: asList(input.risk_windows),
     rules: {
       slot_interval_minutes: number(rules.slot_interval_minutes, 15, 5, 60),
       minimum_notice_hours: number(rules.minimum_notice_hours, 2, 0, 168),
@@ -276,14 +406,31 @@ function estimateUsageUsd(model, inputTokens = 0, outputTokens = 0) {
 }
 
 async function getAiBudgetOverview(clientId) {
-  const config = await db.get('SELECT * FROM ai_budget_configs WHERE client_id = ?', [clientId]);
+  let config;
+  if (studioDbBackend === 'postgres') {
+    const rows = await studioSupabaseRequest(`/rest/v1/ai_budget_configs?client_id=eq.${encodeURIComponent(clientId)}`);
+    config = rows?.[0] || null;
+  } else {
+    config = await db.get('SELECT * FROM ai_budget_configs WHERE client_id = ?', [clientId]);
+  }
   const current = config || {
     client_id: clientId, provider: 'openai', model: 'gpt-4o-mini', cycle_budget_clp: 20000,
     usd_clp: 922, alert_50: 1, alert_75: 1, alert_90: 1, cycle_started_at: new Date().toISOString(), paused: 0
   };
-  const spent = await db.get(`SELECT COALESCE(SUM(estimated_cost_usd), 0) AS usd, COALESCE(SUM(input_tokens), 0) AS input_tokens,
-    COALESCE(SUM(output_tokens), 0) AS output_tokens, COUNT(*) AS requests
-    FROM ai_usage_records WHERE client_id = ? AND occurred_at >= ?`, [clientId, current.cycle_started_at]);
+  let spent;
+  if (studioDbBackend === 'postgres') {
+    const usage = await studioSupabaseRequestAll(`/rest/v1/ai_usage_records?client_id=eq.${encodeURIComponent(clientId)}&occurred_at=gte.${encodeURIComponent(current.cycle_started_at)}&select=estimated_cost_usd,input_tokens,output_tokens`);
+    spent = {
+      usd: usage.reduce((sum, row) => sum + Number(row.estimated_cost_usd || 0), 0),
+      input_tokens: usage.reduce((sum, row) => sum + Number(row.input_tokens || 0), 0),
+      output_tokens: usage.reduce((sum, row) => sum + Number(row.output_tokens || 0), 0),
+      requests: usage.length
+    };
+  } else {
+    spent = await db.get(`SELECT COALESCE(SUM(estimated_cost_usd), 0) AS usd, COALESCE(SUM(input_tokens), 0) AS input_tokens,
+      COALESCE(SUM(output_tokens), 0) AS output_tokens, COUNT(*) AS requests
+      FROM ai_usage_records WHERE client_id = ? AND occurred_at >= ?`, [clientId, current.cycle_started_at]);
+  }
   const spentClp = Number(spent.usd) * Number(current.usd_clp);
   const budget = Number(current.cycle_budget_clp);
   const percent = budget > 0 ? (spentClp / budget) * 100 : 0;
@@ -292,7 +439,7 @@ async function getAiBudgetOverview(clientId) {
 }
 
 const app = express();
-const PORT = 8080;
+const PORT = Number(process.env.ZEROAGENT_PORT || 8080);
 const studioOrigins = new Set(['http://localhost:8080', 'http://127.0.0.1:8080']);
 
 app.use(cors({ origin: [...studioOrigins] }));
@@ -321,6 +468,12 @@ app.get('/demo/onboarding', (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.sendFile(path.join(__dirname, 'onboarding.html'));
 });
+// Landing mobile-first para el demo del quiropráctico (agendador vertical).
+// Vive en el Studio como material de venta, igual que commercial-demo.html.
+app.get('/demo/movil', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.sendFile(path.join(__dirname, 'landing-quiro-movil.html'));
+});
 // El enlace que se genera desde el Studio es una entrevista real, no la demo
 // comercial. Debe quedar disponible en el mismo origen que sus APIs locales.
 app.get('/onboarding.html', (req, res) => {
@@ -334,7 +487,14 @@ app.post('/api/commercial/leads', async (req, res) => {
   if (!name || !business || !contact || name.length > 120 || business.length > 160 || contact.length > 200) {
     return res.status(400).json({ error: 'Completa los tres datos para poder contactarte.' });
   }
-  await db.run('INSERT INTO commercial_leads (id, name, business, contact, source, created_at) VALUES (?, ?, ?, ?, ?, ?)', [randomUUID(), name, business, contact, 'booking_demo', new Date().toISOString()]);
+  if (studioDbBackend === 'postgres') {
+    await studioSupabaseRequest('/rest/v1/commercial_leads', {
+      method: 'POST', headers: { prefer: 'return=minimal' },
+      body: JSON.stringify({ id: randomUUID(), name, business, contact, source: 'booking_demo', created_at: new Date().toISOString() })
+    });
+  } else {
+    await db.run('INSERT INTO commercial_leads (id, name, business, contact, source, created_at) VALUES (?, ?, ?, ?, ?, ?)', [randomUUID(), name, business, contact, 'booking_demo', new Date().toISOString()]);
+  }
   res.status(201).json({ ok: true });
 });
 
@@ -347,7 +507,7 @@ app.get('/preview/agenda-cliente', (req, res) => {
 });
 app.get('/playground', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.sendFile(path.join(runtimeTemplateRoot, 'public', 'index.html'));
+  res.sendFile(path.join(runtimeTemplateRoot, 'public', 'playground.html'));
 });
 app.get('/client-console.css', (req, res) => res.sendFile(path.join(runtimeTemplateRoot, 'public', 'client-console.css')));
 app.get('/client-console-layout.css', (req, res) => res.sendFile(path.join(runtimeTemplateRoot, 'public', 'client-console-layout.css')));
@@ -358,8 +518,9 @@ app.get('/client-console-v2.js', (req, res) => res.sendFile(path.join(runtimeTem
 const studioPublicFiles = new Set([
   'style.css', 'studio-redesign.css', 'prospecting.css',
   'app.js', 'llm-helper.js', 'studio-redesign.js', 'prospecting.js',
-  'commercial-demo.css', 'commercial-demo-forms.css', 'commercial-demo-onboarding.css', 'commercial-demo.js',
-  'onboarding.css', 'onboarding.js'
+  'commercial-demo.css', 'commercial-demo.js',
+  'onboarding.css', 'onboarding.js',
+  'landing-quiro-movil.css', 'landing-quiro-movil.js'
 ]);
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 app.get('/:publicFile', (req, res, next) => {
@@ -381,34 +542,111 @@ async function ensureColumn(table, column, definition) {
 }
 
 async function clientExists(clientId) {
+  if (studioDbBackend === 'postgres') {
+    const rows = await studioSupabaseRequest(`/rest/v1/clients?id=eq.${encodeURIComponent(clientId)}&select=id&limit=1`);
+    return Boolean(rows?.length);
+  }
   return Boolean(await db.get('SELECT id FROM clients WHERE id = ?', [clientId]));
 }
 
 async function writeAudit(action, entityType, entityId, details = {}) {
+  if (studioDbBackend === 'postgres') {
+    await studioSupabaseRequest('/rest/v1/audit_events', {
+      method: 'POST',
+      headers: { prefer: 'return=minimal' },
+      body: JSON.stringify({ action, entity_type: entityType, entity_id: entityId, details_json: details, created_at: new Date().toISOString() })
+    });
+    return;
+  }
   await db.run(`
     INSERT INTO audit_events (action, entity_type, entity_id, details_json, created_at)
     VALUES (?, ?, ?, ?, ?)
   `, [action, entityType, entityId, JSON.stringify(details), new Date().toISOString()]);
 }
 
+// Mismo orden que restoreOrder de /api/settings/import y que
+// scripts/migrate-sqlite-to-supabase.mjs — dependencia FK, padres antes que hijos.
+const studioAllTables = [
+  'clients', 'audit_events', 'source_files', 'intake_jobs', 'agent_versions',
+  'documents', 'knowledge_items', 'agent_tests', 'chats', 'conversation_feedback',
+  'ai_budget_configs', 'ai_usage_records', 'ai_budget_events', 'client_infrastructure',
+  'agenda_configs', 'onboarding_sessions', 'onboarding_responses', 'onboarding_files',
+  'commercial_leads', 'prospecting_searches', 'prospects', 'prospect_activities'
+];
+
 async function createDataSnapshot(reason) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const tables = [
-    'clients', 'audit_events', 'source_files', 'intake_jobs', 'agent_versions',
-    'documents', 'knowledge_items', 'agent_tests', 'chats', 'conversation_feedback',
-    'ai_budget_configs', 'ai_usage_records', 'ai_budget_events', 'client_infrastructure',
-    'agenda_configs', 'onboarding_sessions', 'onboarding_responses', 'onboarding_files',
-    'commercial_leads', 'prospecting_searches', 'prospects', 'prospect_activities'
-  ];
   const snapshot = {
     snapshot_version: 2,
     created_at: new Date().toISOString(),
     reason,
-    tables: Object.fromEntries(await Promise.all(tables.map(async table => [table, await db.all(`SELECT * FROM ${table}`)])))
+    tables: studioDbBackend === 'postgres'
+      ? Object.fromEntries(await Promise.all(studioAllTables.map(async table => [table, await studioSupabaseRequestAll(`/rest/v1/${table}?select=*`)])))
+      : Object.fromEntries(await Promise.all(studioAllTables.map(async table => [table, await db.all(`SELECT * FROM ${table}`)])))
   };
   const filePath = path.join(backupRoot, `${stamp}-${safeFileName(reason)}.json`);
   await fs.writeFile(filePath, JSON.stringify(snapshot, null, 2), 'utf8');
   return filePath;
+}
+
+const landingAssetExtensions = new Set(['.html', '.css', '.js', '.png', '.jpg', '.jpeg', '.svg', '.webp', '.ico', '.woff', '.woff2']);
+
+async function copyClientLandingOverlay(clientId, outputPublicDir) {
+  const sourceRoot = path.join(clientLandingRoot, safeFileName(clientId));
+  try {
+    if (!(await fs.stat(sourceRoot)).isDirectory()) return [];
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+
+  const copied = [];
+  const visit = async (directory, relativeDirectory = '') => {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      if (entry.name.startsWith('.') || entry.name.startsWith('_') || entry.isSymbolicLink()) continue;
+      const relative = path.join(relativeDirectory, entry.name);
+      const source = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(source, relative);
+        continue;
+      }
+      if (!entry.isFile() || !landingAssetExtensions.has(path.extname(entry.name).toLowerCase())) continue;
+      const destination = path.join(outputPublicDir, relative);
+      await fs.mkdir(path.dirname(destination), { recursive: true });
+      await fs.copyFile(source, destination);
+      copied.push(relative.split(path.sep).join('/'));
+    }
+  };
+  await visit(sourceRoot);
+  return copied.sort();
+}
+
+async function createBuildManifest(outputDir) {
+  const files = [];
+  const visit = async (directory, relativeDirectory = '') => {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      const relative = path.join(relativeDirectory, entry.name);
+      if (relative === 'BUILD-MANIFEST.json') continue;
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) await visit(absolute, relative);
+      else if (entry.isFile()) {
+        const data = await fs.readFile(absolute);
+        files.push({
+          path: relative.split(path.sep).join('/'),
+          bytes: data.length,
+          sha256: createHash('sha256').update(data).digest('hex')
+        });
+      }
+    }
+  };
+  await visit(outputDir);
+  files.sort((a, b) => a.path.localeCompare(b.path));
+  return {
+    schema_version: 1,
+    algorithm: 'sha256',
+    files,
+    artifact_sha256: createHash('sha256').update(files.map(file => `${file.path}:${file.sha256}`).join('\n')).digest('hex')
+  };
 }
 
 async function buildClientRuntime(clientId, version, packageData, target) {
@@ -416,16 +654,38 @@ async function buildClientRuntime(clientId, version, packageData, target) {
   const buildId = `${safeFileName(version)}-build-${Date.now()}`;
   const outputDir = path.join(runtimeBuildRoot, safeFileName(clientId), buildId);
   await fs.mkdir(outputDir, { recursive: true });
-  await fs.cp(runtimeTemplateRoot, outputDir, { recursive: true });
+  // runtime-template/ tiene .env.<cliente> de TODOS los clientes (uso local del operador para
+  // preview) — nunca deben copiarse al build de otro cliente. BUILD.json ya promete
+  // "credentials: not included"; excluir cualquier .env* (salvo .env.example) hace eso cierto.
+  await fs.cp(runtimeTemplateRoot, outputDir, {
+    recursive: true,
+    filter: source => {
+      const base = path.basename(source);
+      const topLevel = path.relative(runtimeTemplateRoot, source).split(path.sep)[0];
+      if (topLevel === 'node_modules' || topLevel === '.vercel') return false;
+      return !base.startsWith('.env') || base === '.env.example';
+    }
+  });
   await Promise.all([
     fs.copyFile(path.join(__dirname, 'onboarding.html'), path.join(outputDir, 'public', 'onboarding.html')),
     fs.copyFile(path.join(__dirname, 'onboarding.css'), path.join(outputDir, 'public', 'onboarding.css')),
     fs.copyFile(path.join(__dirname, 'onboarding.js'), path.join(outputDir, 'public', 'onboarding.js'))
   ]);
+  const landingOverlay = await copyClientLandingOverlay(clientId, path.join(outputDir, 'public'));
+  const incrementalMigrations = (await fs.readdir(path.join(runtimeTemplateRoot, 'supabase', 'migrations')))
+    .filter(file => file.endsWith('.sql')).sort().map(file => `supabase/migrations/${file}`);
+  const agendaMigrations = [
+    'supabase/agenda-v1.sql',
+    ...incrementalMigrations,
+    'supabase/agenda-v1-extras.sql',
+    'supabase/agenda-v1-direct-data.sql',
+    'supabase/agenda-v1-ai-account.sql',
+    'supabase/agenda-v1-customer-records.sql'
+  ];
   await fs.writeFile(path.join(outputDir, 'agent-package.json'), JSON.stringify(packageData, null, 2), 'utf8');
   await fs.writeFile(path.join(outputDir, 'BUILD.json'), JSON.stringify({
     built_at: new Date().toISOString(), client_id: clientId, package_version: version,
-      runtime: runtimeVersion, target, credentials: 'not included'
+      runtime: runtimeVersion, target, credentials: 'not included', landing_overlay: landingOverlay
   }, null, 2), 'utf8');
   await fs.writeFile(path.join(outputDir, 'INSTALLATION.json'), JSON.stringify({
     schema_version: 1,
@@ -437,13 +697,20 @@ async function buildClientRuntime(clientId, version, packageData, target) {
     deployment_stages: ['preview_local', 'staging', 'production'],
     required_environment: [
       'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY',
-      'LLM_PROVIDER', 'LLM_API_KEY', 'LLM_MODEL', 'LLM_BASE_URL',
       'ZAVUDEV_API_KEY', 'ZAVUDEV_SENDER_ID', 'ZAVUDEV_WEBHOOK_SECRET',
       'ONBOARDING_ACCESS_TOKEN', 'DASHBOARD_ACCESS_KEY', 'PREVIEW_ACCESS_KEY'
     ],
+    ai_configuration: {
+      choose_one: {
+        customer_byok: ['AI_CREDENTIALS_ENCRYPTION_KEY'],
+        operator_environment_legacy: ['LLM_PROVIDER', 'LLM_API_KEY', 'LLM_MODEL', 'LLM_BASE_URL?']
+      },
+      settings_table: 'customer_supabase.za_ai_settings',
+      usage_table: 'customer_supabase.za_ai_usage_events'
+    },
     agenda: packageData.solutions?.agenda ? {
       enabled: true,
-      migration: 'supabase/agenda-v1.sql',
+      migration: agendaMigrations,
       client_console: '/agenda',
       public_booking: '/reservar',
       private_onboarding: '/onboarding?token=<ONBOARDING_ACCESS_TOKEN>',
@@ -455,34 +722,74 @@ async function buildClientRuntime(clientId, version, packageData, target) {
       'verify Zavu webhook signature and outbound reply', 'approve production version'
     ]
   }, null, 2), 'utf8');
+  let verification;
+  try {
+    const result = await execFileAsync(process.execPath, ['src/run-tests.js'], {
+      cwd: outputDir, timeout: 30_000, maxBuffer: 1024 * 1024, windowsHide: true
+    });
+    verification = { passed: true, checked_at: new Date().toISOString(), command: 'node src/run-tests.js', output: result.stdout.trim() };
+  } catch (error) {
+    verification = {
+      passed: false,
+      checked_at: new Date().toISOString(),
+      command: 'node src/run-tests.js',
+      output: String(error.stdout || '').trim(),
+      error: String(error.stderr || error.message || '').trim().slice(0, 8000)
+    };
+  }
+  await fs.writeFile(path.join(outputDir, 'BUILD-VERIFICATION.json'), JSON.stringify(verification, null, 2), 'utf8');
+  const manifest = await createBuildManifest(outputDir);
+  await fs.writeFile(path.join(outputDir, 'BUILD-MANIFEST.json'), JSON.stringify(manifest, null, 2), 'utf8');
+  if (!verification.passed) throw new Error(`El artefacto se generó pero su suite interna falló. Revisa ${path.join(outputDir, 'BUILD-VERIFICATION.json')}.`);
   return outputDir;
 }
 
 async function getInstallationPreflight(clientId, target = 'preview') {
-  const client = await db.get('SELECT * FROM clients WHERE id = ?', [clientId]);
-  if (!client) return null;
-  const [facts, documents, tests, approvedSources, pendingJobs] = await Promise.all([
-    db.get("SELECT COUNT(*) AS count FROM knowledge_items WHERE client_id = ? AND status = 'approved'", [clientId]),
-    db.get('SELECT COUNT(*) AS count FROM documents WHERE client_id = ?', [clientId]),
-    db.get("SELECT COUNT(*) AS count FROM agent_tests WHERE client_id = ? AND status = 'active'", [clientId]),
-    db.get("SELECT COUNT(*) AS count FROM source_files WHERE client_id = ? AND status = 'approved'", [clientId]),
-    db.get("SELECT COUNT(*) AS count FROM intake_jobs WHERE client_id = ? AND status IN ('pending_ide', 'under_review')", [clientId])
-  ]);
-  const agendaRecord = await db.get('SELECT config_json FROM agenda_configs WHERE client_id = ?', [clientId]);
-  const infrastructure = await db.get('SELECT supabase_url, connection_status, last_checked_at FROM client_infrastructure WHERE client_id = ?', [clientId]);
+  let client, facts, documents, tests, approvedSources, pendingJobs, agendaRecord, infrastructure;
+  if (studioDbBackend === 'postgres') {
+    client = (await studioSupabaseRequest(`/rest/v1/clients?id=eq.${encodeURIComponent(clientId)}`))?.[0];
+    if (!client) return null;
+    const countOf = async (path) => ({ count: (await studioSupabaseRequest(path, { headers: { prefer: 'count=exact' } }))?.length || 0 });
+    [facts, documents, tests, approvedSources, pendingJobs] = await Promise.all([
+      countOf(`/rest/v1/knowledge_items?client_id=eq.${encodeURIComponent(clientId)}&status=eq.approved&select=id`),
+      countOf(`/rest/v1/documents?client_id=eq.${encodeURIComponent(clientId)}&select=id`),
+      countOf(`/rest/v1/agent_tests?client_id=eq.${encodeURIComponent(clientId)}&status=eq.active&select=id`),
+      countOf(`/rest/v1/source_files?client_id=eq.${encodeURIComponent(clientId)}&status=eq.approved&select=id`),
+      countOf(`/rest/v1/intake_jobs?client_id=eq.${encodeURIComponent(clientId)}&status=in.(pending_ide,under_review)&select=id`)
+    ]);
+    agendaRecord = (await studioSupabaseRequest(`/rest/v1/agenda_configs?client_id=eq.${encodeURIComponent(clientId)}&select=config_json`))?.[0];
+    infrastructure = await studioInfraRow(clientId, 'supabase_url,connection_status,last_checked_at');
+  } else {
+    client = await db.get('SELECT * FROM clients WHERE id = ?', [clientId]);
+    if (!client) return null;
+    [facts, documents, tests, approvedSources, pendingJobs] = await Promise.all([
+      db.get("SELECT COUNT(*) AS count FROM knowledge_items WHERE client_id = ? AND status = 'approved'", [clientId]),
+      db.get('SELECT COUNT(*) AS count FROM documents WHERE client_id = ?', [clientId]),
+      db.get("SELECT COUNT(*) AS count FROM agent_tests WHERE client_id = ? AND status = 'active'", [clientId]),
+      db.get("SELECT COUNT(*) AS count FROM source_files WHERE client_id = ? AND status = 'approved'", [clientId]),
+      db.get("SELECT COUNT(*) AS count FROM intake_jobs WHERE client_id = ? AND status IN ('pending_ide', 'under_review')", [clientId])
+    ]);
+    agendaRecord = await db.get('SELECT config_json FROM agenda_configs WHERE client_id = ?', [clientId]);
+    infrastructure = await db.get('SELECT supabase_url, connection_status, last_checked_at FROM client_infrastructure WHERE client_id = ?', [clientId]);
+  }
   let agenda = { ...agendaV1Defaults };
   if (agendaRecord?.config_json) {
-    try { agenda = normalizeAgendaConfig(JSON.parse(agendaRecord.config_json)); } catch { /* base segura */ }
+    try {
+      const parsedConfig = studioDbBackend === 'postgres' ? agendaRecord.config_json : JSON.parse(agendaRecord.config_json);
+      agenda = normalizeAgendaConfig(parsedConfig);
+    } catch { /* base segura */ }
   }
   const blockers = [];
   const warnings = [];
   if (!client.agent_name || !client.agent_role || !client.agent_system_prompt) blockers.push('Falta completar la identidad y directivas del agente.');
   if (!facts.count && !documents.count) blockers.push('Falta al menos un dato confirmado o documento de conocimiento.');
   if (!tests.count) blockers.push('Falta al menos una prueba de regresión activa.');
-  if (!approvedSources.count) {
-    if (target === 'production') blockers.push('Producción requiere al menos una fuente original aprobada y trazable.');
-    else warnings.push('No hay fuente original aprobada; los datos manuales deben quedar respaldados por una fuente.');
-  }
+  // Antes bloqueaba producción sin una fuente original — pero hay clientes reales (franciskom)
+  // donde todo el conocimiento se curó a mano en conversación con el dueño, sin documentos que
+  // subir. Exigir un documento que no existe sólo empuja a fabricar uno falso para pasar el
+  // gate. Queda como advertencia siempre, nunca como bloqueo — la trazabilidad real vive en
+  // knowledge_items.notes (quién lo confirmó y cuándo), no en un archivo.
+  if (!approvedSources.count) warnings.push('No hay fuente original aprobada; los datos manuales deben quedar respaldados por una fuente o por notas de trazabilidad en cada hecho confirmado.');
   if (pendingJobs.count) {
     if (target === 'production') blockers.push(`Producción está bloqueada por ${pendingJobs.count} tarea(s) pendiente(s) o en revisión.`);
     else warnings.push(`Hay ${pendingJobs.count} tarea(s) pendiente(s) o en revisión.`);
@@ -492,6 +799,13 @@ async function getInstallationPreflight(clientId, target = 'preview') {
     if (!agenda.resources.length) blockers.push('Agenda v1 está activa pero no tiene profesionales o recursos configurados.');
     if (!agenda.locations.length) warnings.push('Agenda v1 no tiene sede; el paquete usará una agenda sin ubicación explícita.');
     if (!agenda.rules?.slot_interval_minutes) blockers.push('Agenda v1 no tiene intervalo de bloques válido.');
+    const locationNames = new Set(agenda.locations.map(item => item.name.toLocaleLowerCase('es')));
+    for (const service of agenda.services) {
+      const missingLocations = (service.locations || []).filter(name => !locationNames.has(name.toLocaleLowerCase('es')));
+      if (missingLocations.length) blockers.push(`El servicio "${service.name}" referencia sedes inexistentes: ${missingLocations.join(', ')}.`);
+      if (service.delivery_mode === 'mobile' && !service.service_area_note) warnings.push(`El servicio a domicilio "${service.name}" no describe su zona o recargo.`);
+      if (service.delivery_mode === 'external' && !service.redirect_note) warnings.push(`El servicio externo "${service.name}" no indica cómo continuar fuera de la agenda.`);
+    }
     warnings.push('Antes de producción, ejecuta supabase/agenda-v1.sql en el Supabase del cliente y completa los horarios semanales desde el dashboard cliente.');
     if (target !== 'preview') {
       if (!infrastructure?.supabase_url || !(await localVault.exists(clientId))) blockers.push('Agenda v1 en staging/producción requiere Supabase del cliente configurado en el vault local.');
@@ -542,9 +856,25 @@ function buildGapQuestions(niche = '', knowledgeItems = []) {
   return questions;
 }
 
+// El almacenamiento de archivos (fuentes, vault, builds, onboarding) sigue siendo local en disco
+// con AMBOS backends de base de datos — no es parte de esta migración (ver plan, sección "fuera
+// de alcance"). Se separa de initDatabase() para poder crear estos directorios sin depender de
+// que el backend sea SQLite.
+async function ensureStorageDirectories() {
+  await fs.mkdir(storageRoot, { recursive: true });
+  await fs.mkdir(ideInboxRoot, { recursive: true });
+  await fs.mkdir(backupRoot, { recursive: true });
+  await fs.mkdir(runtimeBuildRoot, { recursive: true });
+  await fs.mkdir(vaultRoot, { recursive: true });
+  await fs.mkdir(onboardingRoot, { recursive: true });
+}
+
 async function initDatabase() {
+  const databasePath = process.env.ZEROAGENT_DB_PATH
+    ? path.resolve(process.env.ZEROAGENT_DB_PATH)
+    : path.join(__dirname, 'database.sqlite');
   db = await open({
-    filename: path.join(__dirname, 'database.sqlite'),
+    filename: databasePath,
     driver: sqlite3.Database
   });
 
@@ -552,12 +882,6 @@ async function initDatabase() {
   await db.run('PRAGMA foreign_keys = ON;');
   await db.run('PRAGMA journal_mode = WAL;');
   await db.run('PRAGMA busy_timeout = 5000;');
-  await fs.mkdir(storageRoot, { recursive: true });
-  await fs.mkdir(ideInboxRoot, { recursive: true });
-  await fs.mkdir(backupRoot, { recursive: true });
-  await fs.mkdir(runtimeBuildRoot, { recursive: true });
-  await fs.mkdir(vaultRoot, { recursive: true });
-  await fs.mkdir(onboardingRoot, { recursive: true });
 
   // Crear Tabla de Clientes
   await db.exec(`
@@ -590,6 +914,7 @@ async function initDatabase() {
   await ensureColumn('clients', 'project_stage', "TEXT NOT NULL DEFAULT 'intake'");
   await ensureColumn('clients', 'project_notes', "TEXT NOT NULL DEFAULT ''");
   await ensureColumn('clients', 'next_action', "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn('clients', 'vertical_key', "TEXT NOT NULL DEFAULT 'custom'");
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS source_files (
@@ -747,6 +1072,14 @@ async function initDatabase() {
     );
   `);
 
+  // Migraciones incrementales deben ejecutarse después de crear la tabla: una instalación
+  // nueva no tiene client_infrastructure todavía, mientras una existente puede carecer de
+  // estas columnas incorporadas en versiones posteriores.
+  await ensureColumn('client_infrastructure', 'vercel_project_url', "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn('client_infrastructure', 'migration_applied', 'INTEGER NOT NULL DEFAULT 0');
+  await ensureColumn('client_infrastructure', 'catalog_seeded', 'INTEGER NOT NULL DEFAULT 0');
+  await ensureColumn('client_infrastructure', 'env_vars_set', 'INTEGER NOT NULL DEFAULT 0');
+
   await db.exec(`
     CREATE TABLE IF NOT EXISTS agenda_configs (
       client_id TEXT PRIMARY KEY,
@@ -878,104 +1211,143 @@ async function initDatabase() {
 }
 
 // Seeding de datos iniciales si la base de datos está vacía
-async function seedDatabase() {
-  const clientsCount = await db.get('SELECT COUNT(*) as count FROM clients');
-  if (clientsCount.count === 0) {
-    console.log('Sembrando base de datos inicial con clientes demo...');
-
-    // Cliente 1: Delicias R&S
-    await db.run(`
-      INSERT INTO clients (id, name, niche, desc, agent_name, agent_tone, agent_avatar_color, agent_role, agent_whatsapp, agent_system_prompt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [
-      'delicias-rys', 'Delicias R&S', 'Repostería & Comida Casera',
-      'Negocio local que elabora y distribuye empanadas gourmet, pasteles y menús diarios a domicilio.',
-      'Tomás de Delicias R&S', 'friendly', 'emerald',
-      'Atención al cliente y toma de pedidos de empanadas y almuerzos.', '+56 9 8877 6655',
-      `Eres "Tomás", el asistente de WhatsApp de "Delicias R&S". 
+const delicasSystemPrompt = `Eres "Tomás", el asistente de WhatsApp de "Delicias R&S".
 Tu labor es ser muy simpático, cálido y responder a las consultas de los clientes con entusiasmo.
 Reglas:
 1. Sé breve y usa emojis (como 🥐, 🥧, 😊).
 2. Ofrece las empanadas de pino y queso que son la especialidad de la casa.
 3. Si el cliente quiere agendar, pídele su nombre, dirección y su pedido exacto.
-4. Consulta tus documentos de entrenamiento para ver precios y horarios actualizados. ¡No inventes datos!`
-    ]);
-
-    await db.run(`
-      INSERT INTO documents (id, client_id, title, category, content)
-      VALUES (?, ?, ?, ?, ?)
-    `, [
-      'doc-1', 'delicias-rys', 'Menú de Empanadas & Almuerzos', 'prices',
-      `Nuestras Empanadas:
+4. Consulta tus documentos de entrenamiento para ver precios y horarios actualizados. ¡No inventes datos!`;
+const delicasMenu = `Nuestras Empanadas:
 - Empanada de Pino Horno (Vacuno): $2.500 c/u.
 - Empanada de Queso Frita: $1.800 c/u.
 - Empanada de Pollo Mandarina (Especialidad): $2.800 c/u.
 
 Menú del Día (Almuerzo):
 - Entrada + Plato de Fondo (Casero) + Postre: $4.500.
-* El menú varía diariamente. Consúltalo a partir de las 11:30 AM.`
-    ]);
-
-    await db.run(`
-      INSERT INTO documents (id, client_id, title, category, content)
-      VALUES (?, ?, ?, ?, ?)
-    `, [
-      'doc-2', 'delicias-rys', 'Políticas de Delivery y Despacho', 'policies',
-      `Zonas de Despacho y Precios:
+* El menú varía diariamente. Consúltalo a partir de las 11:30 AM.`;
+const delicasPolicies = `Zonas de Despacho y Precios:
 - Comuna de Santiago Centro: Despacho gratis por compras superiores a $10.000. Si es menos, costo fijo de $1.500.
 - Comunas aledañas (Providencia, Ñuñoa): Costo fijo de despacho $2.500.
 
 Horarios de Reparto:
 - Lunes a Sábado: 12:30 PM a 4:30 PM y de 7:00 PM a 10:00 PM.
-- Domingos: Cerrado.`
-    ]);
-
-    await db.run(`
-      INSERT INTO chats (client_id, sender, text, time)
-      VALUES (?, ?, ?, ?)
-    `, [
-      'delicias-rys', 'agent',
-      '¡Hola! Bienvenido a Delicias R&S. 🥧 Soy Tomás, tu asistente virtual. ¿Te gustaría ordenar algunas empanadas hoy o saber nuestro menú del día?',
-      '12:00'
-    ]);
-
-    // Cliente 2: Valprocess
-    await db.run(`
-      INSERT INTO clients (id, name, niche, desc, agent_name, agent_tone, agent_avatar_color, agent_role, agent_whatsapp, agent_system_prompt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [
-      'valprocess', 'Valprocess', 'Consultoría de Procesos Industriales',
-      'Empresa de ingeniería dedicada a optimizar flujos de trabajo, automatización de maquinarias y control de calidad.',
-      'Ingeniero Asistente Valprocess', 'professional', 'blue',
-      'Atención técnica a clientes industriales y agendamiento de reuniones de consultoría.', '+56 2 2455 9900',
-      `Actúa como el Ingeniero Asistente Virtual de Valprocess.
+- Domingos: Cerrado.`;
+const valprocessSystemPrompt = `Actúa como el Ingeniero Asistente Virtual de Valprocess.
 Tu tono debe ser sumamente profesional, técnico, educado y corporativo.
 Reglas:
 1. Responde de manera formal y precisa, utilizando terminología adecuada de ingeniería.
 2. Evita el uso de emojis excepto en casos muy puntuales.
-3. El objetivo es recopilar el nombre de la empresa del cliente, su problema técnico principal, y agendar una llamada de diagnóstico de 15 minutos con nuestros ingenieros consultores.`
-    ]);
-
-    await db.run(`
-      INSERT INTO documents (id, client_id, title, category, content)
-      VALUES (?, ?, ?, ?, ?)
-    `, [
-      'val-doc-1', 'valprocess', 'Servicios de Automatización y Consultoría', 'about',
-      `Nuestros Servicios Principales:
+3. El objetivo es recopilar el nombre de la empresa del cliente, su problema técnico principal, y agendar una llamada de diagnóstico de 15 minutos con nuestros ingenieros consultores.`;
+const valprocessServices = `Nuestros Servicios Principales:
 1. Auditoría de Procesos: Análisis completo de la línea de producción (Valor: Desde UF 50).
 2. Automatización SCADA/PLC: Diseño e implementación de sistemas de control industrial.
-3. Capacitación de Personal: Cursos de seguridad industrial y eficiencia operativa.`
-    ]);
+3. Capacitación de Personal: Cursos de seguridad industrial y eficiencia operativa.`;
 
-    await db.run(`
-      INSERT INTO chats (client_id, sender, text, time)
-      VALUES (?, ?, ?, ?)
-    `, [
-      'valprocess', 'agent',
-      'Estimado cliente, gracias por contactar a Valprocess. ¿En qué área de automatización o consultoría industrial requiere asistencia técnica hoy?',
-      '10:30'
-    ]);
+async function seedDatabase() {
+  const hasClients = studioDbBackend === 'postgres'
+    ? Boolean((await studioSupabaseRequest('/rest/v1/clients?select=id&limit=1'))?.length)
+    : (await db.get('SELECT COUNT(*) as count FROM clients')).count > 0;
+  if (hasClients) return;
+  console.log('Sembrando base de datos inicial con clientes demo...');
+
+  if (studioDbBackend === 'postgres') {
+    await studioSupabaseRequest('/rest/v1/clients', {
+      method: 'POST', headers: { prefer: 'return=minimal' },
+      body: JSON.stringify({ id: 'delicias-rys', name: 'Delicias R&S', niche: 'Repostería & Comida Casera',
+        desc: 'Negocio local que elabora y distribuye empanadas gourmet, pasteles y menús diarios a domicilio.',
+        agent_name: 'Tomás de Delicias R&S', agent_tone: 'friendly', agent_avatar_color: 'emerald',
+        agent_role: 'Atención al cliente y toma de pedidos de empanadas y almuerzos.', agent_whatsapp: '+56 9 8877 6655',
+        agent_system_prompt: delicasSystemPrompt })
+    });
+    await studioSupabaseRequest('/rest/v1/documents', {
+      method: 'POST', headers: { prefer: 'return=minimal' },
+      body: JSON.stringify({ id: 'doc-1', client_id: 'delicias-rys', title: 'Menú de Empanadas & Almuerzos', category: 'prices', content: delicasMenu })
+    });
+    await studioSupabaseRequest('/rest/v1/documents', {
+      method: 'POST', headers: { prefer: 'return=minimal' },
+      body: JSON.stringify({ id: 'doc-2', client_id: 'delicias-rys', title: 'Políticas de Delivery y Despacho', category: 'policies', content: delicasPolicies })
+    });
+    await studioSupabaseRequest('/rest/v1/chats', {
+      method: 'POST', headers: { prefer: 'return=minimal' },
+      body: JSON.stringify({ client_id: 'delicias-rys', sender: 'agent', text: '¡Hola! Bienvenido a Delicias R&S. 🥧 Soy Tomás, tu asistente virtual. ¿Te gustaría ordenar algunas empanadas hoy o saber nuestro menú del día?', time: '12:00' })
+    });
+
+    await studioSupabaseRequest('/rest/v1/clients', {
+      method: 'POST', headers: { prefer: 'return=minimal' },
+      body: JSON.stringify({ id: 'valprocess', name: 'Valprocess', niche: 'Consultoría de Procesos Industriales',
+        desc: 'Empresa de ingeniería dedicada a optimizar flujos de trabajo, automatización de maquinarias y control de calidad.',
+        agent_name: 'Ingeniero Asistente Valprocess', agent_tone: 'professional', agent_avatar_color: 'blue',
+        agent_role: 'Atención técnica a clientes industriales y agendamiento de reuniones de consultoría.', agent_whatsapp: '+56 2 2455 9900',
+        agent_system_prompt: valprocessSystemPrompt })
+    });
+    await studioSupabaseRequest('/rest/v1/documents', {
+      method: 'POST', headers: { prefer: 'return=minimal' },
+      body: JSON.stringify({ id: 'val-doc-1', client_id: 'valprocess', title: 'Servicios de Automatización y Consultoría', category: 'about', content: valprocessServices })
+    });
+    await studioSupabaseRequest('/rest/v1/chats', {
+      method: 'POST', headers: { prefer: 'return=minimal' },
+      body: JSON.stringify({ client_id: 'valprocess', sender: 'agent', text: 'Estimado cliente, gracias por contactar a Valprocess. ¿En qué área de automatización o consultoría industrial requiere asistencia técnica hoy?', time: '10:30' })
+    });
+    return;
   }
+
+  // Cliente 1: Delicias R&S
+  await db.run(`
+    INSERT INTO clients (id, name, niche, desc, agent_name, agent_tone, agent_avatar_color, agent_role, agent_whatsapp, agent_system_prompt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    'delicias-rys', 'Delicias R&S', 'Repostería & Comida Casera',
+    'Negocio local que elabora y distribuye empanadas gourmet, pasteles y menús diarios a domicilio.',
+    'Tomás de Delicias R&S', 'friendly', 'emerald',
+    'Atención al cliente y toma de pedidos de empanadas y almuerzos.', '+56 9 8877 6655',
+    delicasSystemPrompt
+  ]);
+
+  await db.run(`
+    INSERT INTO documents (id, client_id, title, category, content)
+    VALUES (?, ?, ?, ?, ?)
+  `, ['doc-1', 'delicias-rys', 'Menú de Empanadas & Almuerzos', 'prices', delicasMenu]);
+
+  await db.run(`
+    INSERT INTO documents (id, client_id, title, category, content)
+    VALUES (?, ?, ?, ?, ?)
+  `, ['doc-2', 'delicias-rys', 'Políticas de Delivery y Despacho', 'policies', delicasPolicies]);
+
+  await db.run(`
+    INSERT INTO chats (client_id, sender, text, time)
+    VALUES (?, ?, ?, ?)
+  `, [
+    'delicias-rys', 'agent',
+    '¡Hola! Bienvenido a Delicias R&S. 🥧 Soy Tomás, tu asistente virtual. ¿Te gustaría ordenar algunas empanadas hoy o saber nuestro menú del día?',
+    '12:00'
+  ]);
+
+  // Cliente 2: Valprocess
+  await db.run(`
+    INSERT INTO clients (id, name, niche, desc, agent_name, agent_tone, agent_avatar_color, agent_role, agent_whatsapp, agent_system_prompt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    'valprocess', 'Valprocess', 'Consultoría de Procesos Industriales',
+    'Empresa de ingeniería dedicada a optimizar flujos de trabajo, automatización de maquinarias y control de calidad.',
+    'Ingeniero Asistente Valprocess', 'professional', 'blue',
+    'Atención técnica a clientes industriales y agendamiento de reuniones de consultoría.', '+56 2 2455 9900',
+    valprocessSystemPrompt
+  ]);
+
+  await db.run(`
+    INSERT INTO documents (id, client_id, title, category, content)
+    VALUES (?, ?, ?, ?, ?)
+  `, ['val-doc-1', 'valprocess', 'Servicios de Automatización y Consultoría', 'about', valprocessServices]);
+
+  await db.run(`
+    INSERT INTO chats (client_id, sender, text, time)
+    VALUES (?, ?, ?, ?)
+  `, [
+    'valprocess', 'agent',
+    'Estimado cliente, gracias por contactar a Valprocess. ¿En qué área de automatización o consultoría industrial requiere asistencia técnica hoy?',
+    '10:30'
+  ]);
 }
 
 // ==========================================
@@ -996,12 +1368,29 @@ async function upsertProspect(candidate, searchId, vertical, location) {
   candidate.whatsapp = whatsapp || null;
   candidate.instagram = instagram || null;
   candidate.facebook = facebook || null;
+  const evaluation = scoreProspect(candidate, vertical);
+
+  if (studioDbBackend === 'postgres') {
+    const result = await studioSupabaseRequest('/rest/v1/rpc/studio_upsert_prospect', {
+      method: 'POST',
+      body: JSON.stringify({
+        p_search_id: searchId, p_vertical: vertical, p_category: cleanText(candidate.category, 160), p_location: location,
+        p_address: cleanText(candidate.address, 300), p_website: cleanText(candidate.website, 500), p_domain: domain,
+        p_phone: cleanText(candidate.phone, 80), p_phone_key: phoneKey, p_email: email, p_whatsapp: whatsapp, p_instagram: instagram, p_facebook: facebook,
+        p_source: candidate.source, p_source_url: cleanText(candidate.sourceUrl, 500), p_rating: candidate.rating || null, p_review_count: Number(candidate.reviewCount) || 0,
+        p_name: cleanText(candidate.name, 180) || 'Negocio sin nombre', p_name_key: nameKey, p_score: evaluation.score, p_fit: evaluation.fit,
+        p_signals: evaluation.signals, p_suggested_message: evaluation.suggestedMessage
+      })
+    });
+    const row = result?.[0] || {};
+    return { id: row.id, created: row.created, email: Boolean(email), whatsapp: Boolean(whatsapp) };
+  }
+
   let existing = null;
   if (domain) existing = await db.get('SELECT id FROM prospects WHERE domain = ? LIMIT 1', [domain]);
   if (!existing && phoneKey) existing = await db.get('SELECT id FROM prospects WHERE phone_key = ? LIMIT 1', [phoneKey]);
   if (!existing) existing = await db.get('SELECT id FROM prospects WHERE lower(name) = ? AND lower(location) = lower(?) LIMIT 1', [nameKey, location]);
 
-  const evaluation = scoreProspect(candidate, vertical);
   const now = new Date().toISOString();
   if (existing) {
     await db.run(`UPDATE prospects SET search_id = ?, vertical = ?, category = ?, location = ?, address = ?, website = ?, domain = ?,
@@ -1033,26 +1422,54 @@ app.get('/api/prospecting/verticals', (req, res) => {
   res.json(Object.entries(prospectingVerticals).map(([id, item]) => ({ id, label: item.label, defaultTerms: item.defaultTerms })));
 });
 
+const prospectStatusOrder = { qualified: 0, replied: 1, contacted: 2, shortlisted: 3 };
+function sortProspectsLikeOverview(rows) {
+  return [...rows].sort((a, b) => {
+    const orderDiff = (prospectStatusOrder[a.status] ?? 4) - (prospectStatusOrder[b.status] ?? 4);
+    if (orderDiff !== 0) return orderDiff;
+    if (b.score !== a.score) return b.score - a.score;
+    return b.updated_at < a.updated_at ? -1 : b.updated_at > a.updated_at ? 1 : 0;
+  });
+}
+
 app.get('/api/prospecting/overview', async (req, res) => {
   try {
     const vertical = cleanText(req.query.vertical, 40);
     const status = cleanText(req.query.status, 40);
     const search = cleanText(req.query.search, 120).toLowerCase();
-    const clauses = [];
-    const params = [];
-    if (vertical && vertical !== 'all') { clauses.push('p.vertical = ?'); params.push(vertical); }
-    if (status && status !== 'all') { clauses.push('p.status = ?'); params.push(status); }
-    if (search) { clauses.push('(lower(p.name) LIKE ? OR lower(p.category) LIKE ? OR lower(p.location) LIKE ?)'); params.push(`%${search}%`, `%${search}%`, `%${search}%`); }
-    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-    const prospects = await db.all(`SELECT p.* FROM prospects p ${where} ORDER BY
-      CASE p.status WHEN 'qualified' THEN 0 WHEN 'replied' THEN 1 WHEN 'contacted' THEN 2 WHEN 'shortlisted' THEN 3 ELSE 4 END,
-      p.score DESC, p.updated_at DESC LIMIT 300`, params);
-    const activities = prospects.length ? await db.all(`SELECT * FROM prospect_activities WHERE prospect_id IN (${prospects.map(() => '?').join(',')}) ORDER BY created_at DESC`, prospects.map(item => item.id)) : [];
-    const statsRows = await db.all('SELECT status, COUNT(*) AS count FROM prospects GROUP BY status');
+    let prospects, activities, statsRows;
+    if (studioDbBackend === 'postgres') {
+      const filters = [];
+      if (vertical && vertical !== 'all') filters.push(`vertical=eq.${encodeURIComponent(vertical)}`);
+      if (status && status !== 'all') filters.push(`status=eq.${encodeURIComponent(status)}`);
+      if (search) filters.push(`or=(name.ilike.*${encodeURIComponent(search)}*,category.ilike.*${encodeURIComponent(search)}*,location.ilike.*${encodeURIComponent(search)}*)`);
+      // PostgREST no soporta un ORDER BY CASE arbitrario — se trae hasta 1000 filas (tope real de
+      // esta pantalla es 300 tras ordenar) y se ordena en JS con la misma prioridad que el CASE.
+      const query = filters.length ? `&${filters.join('&')}` : '';
+      const rows = await studioSupabaseRequestAll(`/rest/v1/prospects?select=*${query}`);
+      prospects = sortProspectsLikeOverview(rows).slice(0, 300);
+      activities = prospects.length ? await studioSupabaseRequestAll(`/rest/v1/prospect_activities?prospect_id=in.(${prospects.map(item => item.id).join(',')})&order=created_at.desc`) : [];
+      const allStatuses = await studioSupabaseRequestAll('/rest/v1/prospects?select=status');
+      const counts = {};
+      for (const row of allStatuses) counts[row.status] = (counts[row.status] || 0) + 1;
+      statsRows = Object.entries(counts).map(([statusKey, count]) => ({ status: statusKey, count }));
+    } else {
+      const clauses = [];
+      const params = [];
+      if (vertical && vertical !== 'all') { clauses.push('p.vertical = ?'); params.push(vertical); }
+      if (status && status !== 'all') { clauses.push('p.status = ?'); params.push(status); }
+      if (search) { clauses.push('(lower(p.name) LIKE ? OR lower(p.category) LIKE ? OR lower(p.location) LIKE ?)'); params.push(`%${search}%`, `%${search}%`, `%${search}%`); }
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+      prospects = await db.all(`SELECT p.* FROM prospects p ${where} ORDER BY
+        CASE p.status WHEN 'qualified' THEN 0 WHEN 'replied' THEN 1 WHEN 'contacted' THEN 2 WHEN 'shortlisted' THEN 3 ELSE 4 END,
+        p.score DESC, p.updated_at DESC LIMIT 300`, params);
+      activities = prospects.length ? await db.all(`SELECT * FROM prospect_activities WHERE prospect_id IN (${prospects.map(() => '?').join(',')}) ORDER BY created_at DESC`, prospects.map(item => item.id)) : [];
+      statsRows = await db.all('SELECT status, COUNT(*) AS count FROM prospects GROUP BY status');
+    }
     const stats = Object.fromEntries(statsRows.map(row => [row.status, row.count]));
     res.json({
-      prospects: prospects.map(item => ({ ...item, signals: JSON.parse(item.signals_json || '[]'), activities: activities.filter(activity => activity.prospect_id === item.id) })),
-      stats: { total: statsRows.reduce((sum, row) => sum + row.count, 0), ...stats },
+      prospects: prospects.map(item => ({ ...item, signals: studioDbBackend === 'postgres' ? (item.signals_json || []) : JSON.parse(item.signals_json || '[]'), activities: activities.filter(activity => activity.prospect_id === item.id) })),
+      stats: { total: statsRows.reduce((sum, row) => sum + Number(row.count), 0), ...stats },
       configured: Boolean(process.env.SERPER_API_KEY)
     });
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -1085,8 +1502,7 @@ app.post('/api/prospecting/search', async (req, res) => {
     if (!response.ok) throw new Error(`Serper respondió ${response.status}.`);
     const payload = await response.json();
     const places = Array.isArray(payload.places) ? payload.places : [];
-    await db.run('INSERT INTO prospecting_searches (id, vertical, location, terms, coverage, result_count, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [searchId, vertical, location, terms, coverage, places.length, 'serper_places', createdAt]);
+    await studioInsertProspectingSearch({ id: searchId, vertical, location, terms, coverage, resultCount: places.length, source: 'serper_places', createdAt });
     // Enriquecimiento en paralelo (máx 4 sitios a la vez) para extraer correo/WhatsApp/redes
     // sin disparar la latencia total de la búsqueda.
     const contacts = await mapWithConcurrency(places, 4, place => scrapeBusinessContacts(place.website));
@@ -1112,12 +1528,13 @@ app.post('/api/prospecting/search', async (req, res) => {
 
 app.post('/api/prospecting/demo', async (req, res) => {
   try {
-    const existing = await db.get("SELECT COUNT(*) AS count FROM prospects WHERE source = 'demo'");
-    if (!existing.count) {
+    const existingCount = studioDbBackend === 'postgres'
+      ? (await studioSupabaseRequest("/rest/v1/prospects?source=eq.demo&select=id", { headers: { prefer: 'count=exact' } }))?.length || 0
+      : (await db.get("SELECT COUNT(*) AS count FROM prospects WHERE source = 'demo'")).count;
+    if (!existingCount) {
       const searchId = randomUUID();
       const now = new Date().toISOString();
-      await db.run('INSERT INTO prospecting_searches (id, vertical, location, terms, coverage, result_count, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [searchId, 'agenda', 'Ñuñoa y Providencia', 'negocios con atención por hora', 'comuna', 5, 'demo', now]);
+      await studioInsertProspectingSearch({ id: searchId, vertical: 'agenda', location: 'Ñuñoa y Providencia', terms: 'negocios con atención por hora', coverage: 'comuna', resultCount: 5, source: 'demo', createdAt: now });
       const demo = [
         { name:'Marea Studio', category:'Centro de estética', address:'Av. Irarrázaval 2840, Ñuñoa', website:'https://mareastudio.example', phone:'+56 9 6111 2084', rating:4.8, reviewCount:186, emails:['hola@mareastudio.cl'], whatsapp:'56961112084', instagram:'mareastudio' },
         { name:'Clínica Veterinaria Parque', category:'Veterinaria', address:'Los Leones 1210, Providencia', website:'', phone:'+56 9 7442 9100', rating:4.6, reviewCount:94 },
@@ -1143,20 +1560,39 @@ const contactChannels = {
 // y hace avanzar el prospecto en el pipeline sin trabajo manual extra.
 app.post('/api/prospecting/prospects/:id/contact', async (req, res) => {
   try {
-    const prospect = await db.get('SELECT * FROM prospects WHERE id = ?', [req.params.id]);
+    const prospect = studioDbBackend === 'postgres'
+      ? (await studioSupabaseRequest(`/rest/v1/prospects?id=eq.${encodeURIComponent(req.params.id)}`))?.[0]
+      : await db.get('SELECT * FROM prospects WHERE id = ?', [req.params.id]);
     if (!prospect) return res.status(404).json({ error: 'Prospecto no encontrado.' });
     const channel = contactChannels[req.body?.channel] ? req.body.channel : 'whatsapp';
     const note = cleanText(req.body?.note || '', 300);
     const now = new Date().toISOString();
     // Contactar mueve el prospecto a la etapa de trabajo si aún estaba en el radar.
     const nextStatus = ['new', 'shortlisted'].includes(prospect.status) ? 'contacted' : prospect.status;
-    await db.run('UPDATE prospects SET status = ?, last_contacted_at = ?, last_contact_channel = ?, updated_at = ? WHERE id = ?',
-      [nextStatus, now, channel, now, prospect.id]);
     const summary = `Contacto por ${contactChannels[channel]}${note ? `: ${note}` : ''}`;
-    await db.run('INSERT INTO prospect_activities (id, prospect_id, kind, summary, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-      [randomUUID(), prospect.id, 'contacted', summary, JSON.stringify({ channel }), now]);
-    if (nextStatus !== prospect.status) await db.run('INSERT INTO prospect_activities (id, prospect_id, kind, summary, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-      [randomUUID(), prospect.id, 'status_changed', `Estado: ${prospect.status} → ${nextStatus}`, '{}', now]);
+    if (studioDbBackend === 'postgres') {
+      await studioSupabaseRequest(`/rest/v1/prospects?id=eq.${encodeURIComponent(prospect.id)}`, {
+        method: 'PATCH', headers: { prefer: 'return=minimal' },
+        body: JSON.stringify({ status: nextStatus, last_contacted_at: now, last_contact_channel: channel, updated_at: now })
+      });
+      await studioSupabaseRequest('/rest/v1/prospect_activities', {
+        method: 'POST', headers: { prefer: 'return=minimal' },
+        body: JSON.stringify({ id: randomUUID(), prospect_id: prospect.id, kind: 'contacted', summary, metadata_json: { channel }, created_at: now })
+      });
+      if (nextStatus !== prospect.status) {
+        await studioSupabaseRequest('/rest/v1/prospect_activities', {
+          method: 'POST', headers: { prefer: 'return=minimal' },
+          body: JSON.stringify({ id: randomUUID(), prospect_id: prospect.id, kind: 'status_changed', summary: `Estado: ${prospect.status} → ${nextStatus}`, metadata_json: {}, created_at: now })
+        });
+      }
+    } else {
+      await db.run('UPDATE prospects SET status = ?, last_contacted_at = ?, last_contact_channel = ?, updated_at = ? WHERE id = ?',
+        [nextStatus, now, channel, now, prospect.id]);
+      await db.run('INSERT INTO prospect_activities (id, prospect_id, kind, summary, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [randomUUID(), prospect.id, 'contacted', summary, JSON.stringify({ channel }), now]);
+      if (nextStatus !== prospect.status) await db.run('INSERT INTO prospect_activities (id, prospect_id, kind, summary, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [randomUUID(), prospect.id, 'status_changed', `Estado: ${prospect.status} → ${nextStatus}`, '{}', now]);
+    }
     res.json({ ok: true, status: nextStatus, last_contacted_at: now, channel });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -1167,13 +1603,23 @@ app.get('/api/prospecting/export', async (req, res) => {
     const status = cleanText(req.query.status, 40);
     const search = cleanText(req.query.search, 120).toLowerCase();
     const onlyContactable = req.query.onlyContactable === '1';
-    const clauses = [];
-    const params = [];
-    if (status && status !== 'all') { clauses.push('status = ?'); params.push(status); }
-    if (search) { clauses.push('(lower(name) LIKE ? OR lower(category) LIKE ? OR lower(location) LIKE ?)'); params.push(`%${search}%`, `%${search}%`, `%${search}%`); }
-    if (onlyContactable) clauses.push("(email != '' OR whatsapp != '' OR phone != '')");
-    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-    const rows = await db.all(`SELECT * FROM prospects ${where} ORDER BY score DESC, updated_at DESC`, params);
+    let rows;
+    if (studioDbBackend === 'postgres') {
+      const filters = [];
+      if (status && status !== 'all') filters.push(`status=eq.${encodeURIComponent(status)}`);
+      if (search) filters.push(`or=(name.ilike.*${encodeURIComponent(search)}*,category.ilike.*${encodeURIComponent(search)}*,location.ilike.*${encodeURIComponent(search)}*)`);
+      if (onlyContactable) filters.push('or=(email.neq."",whatsapp.neq."",phone.neq."")');
+      const query = filters.length ? `&${filters.join('&')}` : '';
+      rows = await studioSupabaseRequestAll(`/rest/v1/prospects?select=*${query}&order=score.desc,updated_at.desc`);
+    } else {
+      const clauses = [];
+      const params = [];
+      if (status && status !== 'all') { clauses.push('status = ?'); params.push(status); }
+      if (search) { clauses.push('(lower(name) LIKE ? OR lower(category) LIKE ? OR lower(location) LIKE ?)'); params.push(`%${search}%`, `%${search}%`, `%${search}%`); }
+      if (onlyContactable) clauses.push("(email != '' OR whatsapp != '' OR phone != '')");
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+      rows = await db.all(`SELECT * FROM prospects ${where} ORDER BY score DESC, updated_at DESC`, params);
+    }
     const columns = ['name', 'category', 'location', 'address', 'phone', 'whatsapp', 'email', 'instagram', 'facebook', 'website', 'score', 'fit', 'status', 'last_contacted_at', 'last_contact_channel', 'next_action_at'];
     const headers = ['Negocio', 'Rubro', 'Zona', 'Dirección', 'Teléfono', 'WhatsApp', 'Correo', 'Instagram', 'Facebook', 'Sitio', 'Score', 'Encaje', 'Estado', 'Último contacto', 'Canal último contacto', 'Próximo seguimiento'];
     const escapeCsv = value => {
@@ -1192,15 +1638,31 @@ app.get('/api/prospecting/export', async (req, res) => {
 
 app.patch('/api/prospecting/prospects/:id', async (req, res) => {
   try {
-    const prospect = await db.get('SELECT * FROM prospects WHERE id = ?', [req.params.id]);
+    const prospect = studioDbBackend === 'postgres'
+      ? (await studioSupabaseRequest(`/rest/v1/prospects?id=eq.${encodeURIComponent(req.params.id)}`))?.[0]
+      : await db.get('SELECT * FROM prospects WHERE id = ?', [req.params.id]);
     if (!prospect) return res.status(404).json({ error: 'Prospecto no encontrado.' });
     const allowedStatuses = ['new', 'shortlisted', 'contacted', 'replied', 'qualified', 'won', 'lost', 'discarded'];
     const status = allowedStatuses.includes(req.body?.status) ? req.body.status : prospect.status;
     const notes = req.body?.notes === undefined ? prospect.notes : cleanText(req.body.notes, 3000);
     const nextAction = req.body?.next_action_at === undefined ? prospect.next_action_at : (req.body.next_action_at || null);
-    await db.run('UPDATE prospects SET status = ?, notes = ?, next_action_at = ?, updated_at = ? WHERE id = ?', [status, notes, nextAction, new Date().toISOString(), prospect.id]);
-    if (status !== prospect.status) await db.run('INSERT INTO prospect_activities (id, prospect_id, kind, summary, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-      [randomUUID(), prospect.id, 'status_changed', `Estado: ${prospect.status} → ${status}`, '{}', new Date().toISOString()]);
+    const now = new Date().toISOString();
+    if (studioDbBackend === 'postgres') {
+      await studioSupabaseRequest(`/rest/v1/prospects?id=eq.${encodeURIComponent(prospect.id)}`, {
+        method: 'PATCH', headers: { prefer: 'return=minimal' },
+        body: JSON.stringify({ status, notes, next_action_at: nextAction, updated_at: now })
+      });
+      if (status !== prospect.status) {
+        await studioSupabaseRequest('/rest/v1/prospect_activities', {
+          method: 'POST', headers: { prefer: 'return=minimal' },
+          body: JSON.stringify({ id: randomUUID(), prospect_id: prospect.id, kind: 'status_changed', summary: `Estado: ${prospect.status} → ${status}`, metadata_json: {}, created_at: now })
+        });
+      }
+    } else {
+      await db.run('UPDATE prospects SET status = ?, notes = ?, next_action_at = ?, updated_at = ? WHERE id = ?', [status, notes, nextAction, now, prospect.id]);
+      if (status !== prospect.status) await db.run('INSERT INTO prospect_activities (id, prospect_id, kind, summary, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [randomUUID(), prospect.id, 'status_changed', `Estado: ${prospect.status} → ${status}`, '{}', now]);
+    }
     res.json({ ok: true });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -1214,8 +1676,7 @@ app.post('/api/prospecting/prospects/manual', async (req, res) => {
     const location = cleanText(req.body?.location, 120) || 'Manual';
     const now = new Date().toISOString();
     const searchId = randomUUID();
-    await db.run('INSERT INTO prospecting_searches (id, vertical, location, terms, coverage, result_count, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [searchId, vertical, location, name, 'comuna', 1, 'manual', now]);
+    await studioInsertProspectingSearch({ id: searchId, vertical, location, terms: name, coverage: 'comuna', resultCount: 1, source: 'manual', createdAt: now });
     const result = await upsertProspect({
       name, category: cleanText(req.body?.category, 160), description: '', address: cleanText(req.body?.address, 300),
       website: cleanText(req.body?.website, 500), phone: cleanText(req.body?.phone, 80),
@@ -1228,6 +1689,23 @@ app.post('/api/prospecting/prospects/manual', async (req, res) => {
 });
 
 app.post('/api/prospecting/prospects/:id/convert', async (req, res) => {
+  if (studioDbBackend === 'postgres') {
+    try {
+      const vertical_labels = Object.fromEntries(Object.entries(prospectingVerticals).map(([key, item]) => [key, item.label]));
+      const clientId = await studioSupabaseRequest('/rest/v1/rpc/studio_convert_prospect_to_client', {
+        method: 'POST', body: JSON.stringify({ p_prospect_id: req.params.id, p_vertical_labels: vertical_labels })
+      });
+      await writeAudit('convert_prospect', 'prospect', req.params.id, { client_id: clientId });
+      res.status(201).json({ ok: true, client_id: clientId });
+    } catch (error) {
+      const msg = error.message;
+      const notFound = /Prospecto no encontrado/.test(msg);
+      const already = /ya tiene un proyecto/.test(msg);
+      const friendly = /"message":"([^"]+)"/.exec(msg)?.[1];
+      res.status(notFound ? 404 : already ? 409 : 500).json({ error: friendly || msg });
+    }
+    return;
+  }
   try {
     const prospect = await db.get('SELECT * FROM prospects WHERE id = ?', [req.params.id]);
     if (!prospect) return res.status(404).json({ error: 'Prospecto no encontrado.' });
@@ -1253,42 +1731,68 @@ app.post('/api/prospecting/prospects/:id/convert', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+app.get('/api/vertical-packs', (req, res) => {
+  res.json({ packs: listVerticalPacks() });
+});
+
 // 1. Obtener listado de clientes
 app.get('/api/clients', async (req, res) => {
   try {
-    const clients = await db.all('SELECT * FROM clients');
-    // Mapeamos los datos de base de datos a la estructura esperada por el frontend
+    const clients = studioDbBackend === 'postgres' ? await studioSupabaseRequestAll('/rest/v1/clients?select=*') : await db.all('SELECT * FROM clients');
+    // Mapeamos los datos de base de datos a la estructura esperada por el frontend. Mismo patrón
+    // de N+1 (una tanda de queries por cliente) en ambos backends a propósito — el plan de
+    // migración decidió no optimizarlo mientras se migra la base, para no mezclar dos cambios de
+    // riesgo distinto en el mismo paso. Si duele en latencia real, se ataca aparte.
     const formattedClients = await Promise.all(clients.map(async (client) => {
-      const docs = await db.all('SELECT id, title, category, content FROM documents WHERE client_id = ?', [client.id]);
-      const chats = await db.all('SELECT id, sender, text, time FROM chats WHERE client_id = ? ORDER BY id ASC', [client.id]);
-      const feedback = await db.all('SELECT chat_id, rating, correction_text, source_id, created_at FROM conversation_feedback WHERE client_id = ?', [client.id]);
-      const sources = await db.all(`
-        SELECT id, title, source_type, original_name, storage_path, mime_type, size_bytes,
-               notes, status, version_number, replaces_source_id, created_at, reviewed_at
-        FROM source_files WHERE client_id = ? ORDER BY created_at DESC
-      `, [client.id]);
-      const intakeJobs = await db.all(`
-        SELECT id, source_id, kind, status, instructions, workspace_path, proposal_json, error_message, created_at, completed_at
-        FROM intake_jobs WHERE client_id = ? ORDER BY created_at DESC
-      `, [client.id]);
-      const versions = await db.all(`
-        SELECT id, version, status, summary, created_at, approved_at
-        FROM agent_versions WHERE client_id = ? ORDER BY created_at DESC
-      `, [client.id]);
-      const knowledgeItems = await db.all(`
-        SELECT id, source_id, category, subject, value, status, notes, confirmed_at
-        FROM knowledge_items WHERE client_id = ? ORDER BY confirmed_at DESC
-      `, [client.id]);
-      const tests = await db.all(`
-        SELECT id, knowledge_item_id, question, expected_behavior, status, last_result, created_at
-        FROM agent_tests WHERE client_id = ? ORDER BY created_at DESC
-      `, [client.id]);
-      const agendaRecord = await db.get('SELECT config_json, updated_at FROM agenda_configs WHERE client_id = ?', [client.id]);
-      const onboarding = await db.get(`SELECT id, status, current_step, expires_at, created_at, updated_at, submitted_at, approved_at
-        FROM onboarding_sessions WHERE client_id = ? ORDER BY created_at DESC LIMIT 1`, [client.id]);
+      let docs, chats, feedback, sources, intakeJobs, versions, knowledgeItems, tests, agendaRecord, onboarding, infrastructure;
+      if (studioDbBackend === 'postgres') {
+        docs = await studioSupabaseRequestAll(`/rest/v1/documents?client_id=eq.${encodeURIComponent(client.id)}&select=id,title,category,content`);
+        chats = await studioSupabaseRequestAll(`/rest/v1/chats?client_id=eq.${encodeURIComponent(client.id)}&select=id,sender,text,time&order=id.asc`);
+        feedback = await studioSupabaseRequestAll(`/rest/v1/conversation_feedback?client_id=eq.${encodeURIComponent(client.id)}&select=chat_id,rating,correction_text,source_id,created_at`);
+        sources = await studioSupabaseRequestAll(`/rest/v1/source_files?client_id=eq.${encodeURIComponent(client.id)}&select=id,title,source_type,original_name,storage_path,mime_type,size_bytes,notes,status,version_number,replaces_source_id,created_at,reviewed_at&order=created_at.desc`);
+        intakeJobs = await studioSupabaseRequestAll(`/rest/v1/intake_jobs?client_id=eq.${encodeURIComponent(client.id)}&select=id,source_id,kind,status,instructions,workspace_path,proposal_json,error_message,created_at,completed_at&order=created_at.desc`);
+        versions = await studioSupabaseRequestAll(`/rest/v1/agent_versions?client_id=eq.${encodeURIComponent(client.id)}&select=id,version,status,summary,created_at,approved_at&order=created_at.desc`);
+        knowledgeItems = await studioSupabaseRequestAll(`/rest/v1/knowledge_items?client_id=eq.${encodeURIComponent(client.id)}&select=id,source_id,category,subject,value,status,notes,confirmed_at&order=confirmed_at.desc`);
+        tests = await studioSupabaseRequestAll(`/rest/v1/agent_tests?client_id=eq.${encodeURIComponent(client.id)}&select=id,knowledge_item_id,question,expected_behavior,status,last_result,created_at&order=created_at.desc`);
+        agendaRecord = (await studioSupabaseRequest(`/rest/v1/agenda_configs?client_id=eq.${encodeURIComponent(client.id)}&select=config_json,updated_at`))?.[0];
+        onboarding = (await studioSupabaseRequest(`/rest/v1/onboarding_sessions?client_id=eq.${encodeURIComponent(client.id)}&select=id,status,current_step,expires_at,created_at,updated_at,submitted_at,approved_at&order=created_at.desc&limit=1`))?.[0];
+        infrastructure = (await studioSupabaseRequest(`/rest/v1/client_infrastructure?client_id=eq.${encodeURIComponent(client.id)}&select=connection_status,vercel_project_url,migration_applied,catalog_seeded,env_vars_set`))?.[0];
+      } else {
+        docs = await db.all('SELECT id, title, category, content FROM documents WHERE client_id = ?', [client.id]);
+        chats = await db.all('SELECT id, sender, text, time FROM chats WHERE client_id = ? ORDER BY id ASC', [client.id]);
+        feedback = await db.all('SELECT chat_id, rating, correction_text, source_id, created_at FROM conversation_feedback WHERE client_id = ?', [client.id]);
+        sources = await db.all(`
+          SELECT id, title, source_type, original_name, storage_path, mime_type, size_bytes,
+                 notes, status, version_number, replaces_source_id, created_at, reviewed_at
+          FROM source_files WHERE client_id = ? ORDER BY created_at DESC
+        `, [client.id]);
+        intakeJobs = await db.all(`
+          SELECT id, source_id, kind, status, instructions, workspace_path, proposal_json, error_message, created_at, completed_at
+          FROM intake_jobs WHERE client_id = ? ORDER BY created_at DESC
+        `, [client.id]);
+        versions = await db.all(`
+          SELECT id, version, status, summary, created_at, approved_at
+          FROM agent_versions WHERE client_id = ? ORDER BY created_at DESC
+        `, [client.id]);
+        knowledgeItems = await db.all(`
+          SELECT id, source_id, category, subject, value, status, notes, confirmed_at
+          FROM knowledge_items WHERE client_id = ? ORDER BY confirmed_at DESC
+        `, [client.id]);
+        tests = await db.all(`
+          SELECT id, knowledge_item_id, question, expected_behavior, status, last_result, created_at
+          FROM agent_tests WHERE client_id = ? ORDER BY created_at DESC
+        `, [client.id]);
+        agendaRecord = await db.get('SELECT config_json, updated_at FROM agenda_configs WHERE client_id = ?', [client.id]);
+        onboarding = await db.get(`SELECT id, status, current_step, expires_at, created_at, updated_at, submitted_at, approved_at
+          FROM onboarding_sessions WHERE client_id = ? ORDER BY created_at DESC LIMIT 1`, [client.id]);
+        infrastructure = await db.get('SELECT connection_status, vercel_project_url, migration_applied, catalog_seeded, env_vars_set FROM client_infrastructure WHERE client_id = ?', [client.id]);
+      }
       let agenda = { ...agendaV1Defaults };
       if (agendaRecord?.config_json) {
-        try { agenda = normalizeAgendaConfig(JSON.parse(agendaRecord.config_json)); } catch { /* configuración antigua inválida: usar base segura */ }
+        try {
+          const parsedConfig = studioDbBackend === 'postgres' ? agendaRecord.config_json : JSON.parse(agendaRecord.config_json);
+          agenda = normalizeAgendaConfig(parsedConfig);
+        } catch { /* configuración antigua inválida: usar base segura */ }
       }
 
       return {
@@ -1296,6 +1800,7 @@ app.get('/api/clients', async (req, res) => {
         name: client.name,
         niche: client.niche,
         desc: client.desc,
+        vertical: getVerticalPack(client.vertical_key),
         project: {
           stage: client.project_stage || 'intake',
           notes: client.project_notes || '',
@@ -1315,13 +1820,20 @@ app.get('/api/clients', async (req, res) => {
         sources,
         intakeJobs: intakeJobs.map(job => ({
           ...job,
-          proposal: job.proposal_json ? JSON.parse(job.proposal_json) : null
+          proposal: job.proposal_json ? (studioDbBackend === 'postgres' ? job.proposal_json : JSON.parse(job.proposal_json)) : null
         })),
         versions,
         knowledgeItems,
         tests,
         agenda: { ...agenda, updatedAt: agendaRecord?.updated_at || null },
-        onboarding: onboarding || null
+        onboarding: onboarding || null,
+        infrastructure: {
+          connected: infrastructure?.connection_status === 'connected',
+          vercelProjectUrl: infrastructure?.vercel_project_url || '',
+          migrationApplied: Boolean(infrastructure?.migration_applied),
+          catalogSeeded: Boolean(infrastructure?.catalog_seeded),
+          envVarsSet: Boolean(infrastructure?.env_vars_set)
+        }
       };
     }));
 
@@ -1350,6 +1862,16 @@ function publicOnboardingSession(session, client, responses = [], files = []) {
 
 // Entrevista local para demos y clientes aún sin infraestructura. El paquete final
 // incluye la misma interfaz contra el Supabase propio del cliente.
+// Helpers de lectura/escritura de onboarding_sessions/responses/files por backend — reusados por
+// las 6 rutas de esta área (misma idea que studioInfraRow: un helper, no repetir la rama en cada sitio).
+async function studioFindOnboardingSessionByToken(token) {
+  if (studioDbBackend === 'postgres') {
+    const rows = await studioSupabaseRequest(`/rest/v1/onboarding_sessions?token=eq.${encodeURIComponent(token)}`);
+    return rows?.[0] || null;
+  }
+  return db.get('SELECT * FROM onboarding_sessions WHERE token = ?', [token]);
+}
+
 app.post('/api/clients/:id/onboarding', async (req, res) => {
   try {
     if (!(await clientExists(req.params.id))) return res.status(404).json({ error: 'Cliente no encontrado.' });
@@ -1357,9 +1879,22 @@ app.post('/api/clients/:id/onboarding', async (req, res) => {
     const expires = new Date(now.getTime() + 14 * 86400000);
     const id = `onboarding-${randomUUID()}`;
     const token = randomUUID().replaceAll('-', '') + randomUUID().replaceAll('-', '');
-    await db.run(`UPDATE onboarding_sessions SET status = 'revoked', updated_at = ? WHERE client_id = ? AND status NOT IN ('submitted','approved','revoked')`, [now.toISOString(), req.params.id]);
-    await db.run(`INSERT INTO onboarding_sessions (id, client_id, token, status, current_step, expires_at, created_at, updated_at)
-      VALUES (?, ?, ?, 'sent', 0, ?, ?, ?)`, [id, req.params.id, token, expires.toISOString(), now.toISOString(), now.toISOString()]);
+    if (studioDbBackend === 'postgres') {
+      const priorSessions = await studioSupabaseRequestAll(`/rest/v1/onboarding_sessions?client_id=eq.${encodeURIComponent(req.params.id)}&status=not.in.(submitted,approved,revoked)&select=id`);
+      for (const prior of priorSessions) {
+        await studioSupabaseRequest(`/rest/v1/onboarding_sessions?id=eq.${encodeURIComponent(prior.id)}`, {
+          method: 'PATCH', headers: { prefer: 'return=minimal' }, body: JSON.stringify({ status: 'revoked', updated_at: now.toISOString() })
+        });
+      }
+      await studioSupabaseRequest('/rest/v1/onboarding_sessions', {
+        method: 'POST', headers: { prefer: 'return=minimal' },
+        body: JSON.stringify({ id, client_id: req.params.id, token, status: 'sent', current_step: 0, expires_at: expires.toISOString(), created_at: now.toISOString(), updated_at: now.toISOString() })
+      });
+    } else {
+      await db.run(`UPDATE onboarding_sessions SET status = 'revoked', updated_at = ? WHERE client_id = ? AND status NOT IN ('submitted','approved','revoked')`, [now.toISOString(), req.params.id]);
+      await db.run(`INSERT INTO onboarding_sessions (id, client_id, token, status, current_step, expires_at, created_at, updated_at)
+        VALUES (?, ?, ?, 'sent', 0, ?, ?, ?)`, [id, req.params.id, token, expires.toISOString(), now.toISOString(), now.toISOString()]);
+    }
     await writeAudit('onboarding_created', 'client', req.params.id, { sessionId: id, expiresAt: expires.toISOString() });
     res.status(201).json({ id, token, url: `/onboarding.html?token=${token}`, status: 'sent', expiresAt: expires.toISOString() });
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -1367,24 +1902,56 @@ app.post('/api/clients/:id/onboarding', async (req, res) => {
 
 app.get('/api/clients/:id/onboarding', async (req, res) => {
   try {
-    const session = await db.get(`SELECT id, token, status, current_step, expires_at, created_at, updated_at, submitted_at, approved_at
-      FROM onboarding_sessions WHERE client_id = ? ORDER BY created_at DESC LIMIT 1`, [req.params.id]);
+    let session, answersCount, filesCount;
+    if (studioDbBackend === 'postgres') {
+      const rows = await studioSupabaseRequest(`/rest/v1/onboarding_sessions?client_id=eq.${encodeURIComponent(req.params.id)}&select=id,token,status,current_step,expires_at,created_at,updated_at,submitted_at,approved_at&order=created_at.desc&limit=1`);
+      session = rows?.[0] || null;
+      if (session) {
+        const [answers, files] = await Promise.all([
+          studioSupabaseRequest(`/rest/v1/onboarding_responses?session_id=eq.${encodeURIComponent(session.id)}&select=session_id`, { headers: { prefer: 'count=exact' } }),
+          studioSupabaseRequest(`/rest/v1/onboarding_files?session_id=eq.${encodeURIComponent(session.id)}&select=id`, { headers: { prefer: 'count=exact' } })
+        ]);
+        answersCount = answers?.length || 0;
+        filesCount = files?.length || 0;
+      }
+    } else {
+      session = await db.get(`SELECT id, token, status, current_step, expires_at, created_at, updated_at, submitted_at, approved_at
+        FROM onboarding_sessions WHERE client_id = ? ORDER BY created_at DESC LIMIT 1`, [req.params.id]);
+      if (session) {
+        answersCount = (await db.get('SELECT COUNT(*) AS count FROM onboarding_responses WHERE session_id = ?', [session.id])).count;
+        filesCount = (await db.get('SELECT COUNT(*) AS count FROM onboarding_files WHERE session_id = ?', [session.id])).count;
+      }
+    }
     if (!session) return res.json({ status: 'not_created' });
-    const answers = await db.get('SELECT COUNT(*) AS count FROM onboarding_responses WHERE session_id = ?', [session.id]);
-    const files = await db.get('SELECT COUNT(*) AS count FROM onboarding_files WHERE session_id = ?', [session.id]);
-    res.json({ ...session, url: `/onboarding.html?token=${session.token}`, answers: answers.count, files: files.count });
+    res.json({ ...session, url: `/onboarding.html?token=${session.token}`, answers: answersCount, files: filesCount });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/onboarding/:token', async (req, res) => {
   try {
-    const session = await db.get('SELECT * FROM onboarding_sessions WHERE token = ?', [req.params.token]);
+    const session = await studioFindOnboardingSessionByToken(req.params.token);
     if (!session) return res.status(404).json({ error: 'El enlace no existe o fue revocado.' });
     if (session.status === 'revoked' || new Date(session.expires_at) < new Date()) return res.status(410).json({ error: 'El enlace venció. Solicita uno nuevo.' });
-    const client = await db.get('SELECT id, name, niche, desc FROM clients WHERE id = ?', [session.client_id]);
-    const responses = await db.all('SELECT step_key, data_json FROM onboarding_responses WHERE session_id = ?', [session.id]);
-    const files = await db.all('SELECT id, original_name, mime_type, size_bytes, created_at FROM onboarding_files WHERE session_id = ? ORDER BY created_at DESC', [session.id]);
-    if (session.status === 'sent') await db.run("UPDATE onboarding_sessions SET status = 'opened', updated_at = ? WHERE id = ?", [new Date().toISOString(), session.id]);
+    let client, responses, files;
+    if (studioDbBackend === 'postgres') {
+      const clientRows = await studioSupabaseRequest(`/rest/v1/clients?id=eq.${encodeURIComponent(session.client_id)}&select=id,name,niche,"desc"`);
+      client = clientRows?.[0];
+      responses = await studioSupabaseRequestAll(`/rest/v1/onboarding_responses?session_id=eq.${encodeURIComponent(session.id)}&select=step_key,data_json`);
+      files = await studioSupabaseRequestAll(`/rest/v1/onboarding_files?session_id=eq.${encodeURIComponent(session.id)}&select=id,original_name,mime_type,size_bytes,created_at&order=created_at.desc`);
+      if (session.status === 'sent') {
+        await studioSupabaseRequest(`/rest/v1/onboarding_sessions?id=eq.${encodeURIComponent(session.id)}`, {
+          method: 'PATCH', headers: { prefer: 'return=minimal' }, body: JSON.stringify({ status: 'opened', updated_at: new Date().toISOString() })
+        });
+      }
+      // jsonb ya llega parseado — publicOnboardingSession espera poder JSON.parse cada data_json,
+      // así que se re-serializa a texto acá para reusar la misma función sin bifurcarla también.
+      responses = responses.map(row => ({ ...row, data_json: JSON.stringify(row.data_json ?? {}) }));
+    } else {
+      client = await db.get('SELECT id, name, niche, desc FROM clients WHERE id = ?', [session.client_id]);
+      responses = await db.all('SELECT step_key, data_json FROM onboarding_responses WHERE session_id = ?', [session.id]);
+      files = await db.all('SELECT id, original_name, mime_type, size_bytes, created_at FROM onboarding_files WHERE session_id = ? ORDER BY created_at DESC', [session.id]);
+      if (session.status === 'sent') await db.run("UPDATE onboarding_sessions SET status = 'opened', updated_at = ? WHERE id = ?", [new Date().toISOString(), session.id]);
+    }
     res.json(publicOnboardingSession({ ...session, status: session.status === 'sent' ? 'opened' : session.status }, client, responses, files));
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -1394,19 +1961,29 @@ app.put('/api/onboarding/:token/response', async (req, res) => {
   const step = Math.max(0, Math.min(12, Number(req.body?.step) || 0));
   if (!stepKey || !req.body?.data || typeof req.body.data !== 'object') return res.status(400).json({ error: 'Respuesta inválida.' });
   try {
-    const session = await db.get('SELECT * FROM onboarding_sessions WHERE token = ?', [req.params.token]);
+    const session = await studioFindOnboardingSessionByToken(req.params.token);
     if (!session || ['revoked','submitted','approved'].includes(session.status) || new Date(session.expires_at) < new Date()) return res.status(410).json({ error: 'La entrevista ya no admite cambios.' });
     const now = new Date().toISOString();
-    await db.run(`INSERT INTO onboarding_responses (session_id, step_key, data_json, updated_at) VALUES (?, ?, ?, ?)
-      ON CONFLICT(session_id, step_key) DO UPDATE SET data_json=excluded.data_json, updated_at=excluded.updated_at`, [session.id, stepKey, JSON.stringify(req.body.data), now]);
-    await db.run("UPDATE onboarding_sessions SET status='partial', current_step=?, updated_at=? WHERE id=?", [step, now, session.id]);
+    if (studioDbBackend === 'postgres') {
+      await studioSupabaseRequest('/rest/v1/onboarding_responses?on_conflict=session_id,step_key', {
+        method: 'POST', headers: { prefer: 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify({ session_id: session.id, step_key: stepKey, data_json: req.body.data, updated_at: now })
+      });
+      await studioSupabaseRequest(`/rest/v1/onboarding_sessions?id=eq.${encodeURIComponent(session.id)}`, {
+        method: 'PATCH', headers: { prefer: 'return=minimal' }, body: JSON.stringify({ status: 'partial', current_step: step, updated_at: now })
+      });
+    } else {
+      await db.run(`INSERT INTO onboarding_responses (session_id, step_key, data_json, updated_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(session_id, step_key) DO UPDATE SET data_json=excluded.data_json, updated_at=excluded.updated_at`, [session.id, stepKey, JSON.stringify(req.body.data), now]);
+      await db.run("UPDATE onboarding_sessions SET status='partial', current_step=?, updated_at=? WHERE id=?", [step, now, session.id]);
+    }
     res.json({ ok: true, savedAt: now, currentStep: step });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/api/onboarding/:token/files', express.raw({ type: '*/*', limit: '15mb' }), async (req, res) => {
   try {
-    const session = await db.get('SELECT * FROM onboarding_sessions WHERE token = ?', [req.params.token]);
+    const session = await studioFindOnboardingSessionByToken(req.params.token);
     if (!session || ['revoked','submitted','approved'].includes(session.status)) return res.status(410).json({ error: 'La entrevista ya no admite archivos.' });
     const originalName = path.basename(decodeURIComponent(String(req.headers['x-file-name'] || 'documento'))).slice(0, 180);
     if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'El archivo está vacío.' });
@@ -1416,19 +1993,39 @@ app.post('/api/onboarding/:token/files', express.raw({ type: '*/*', limit: '15mb
     const storedName = `${id}-${safeFileName(originalName)}`;
     await fs.writeFile(path.join(directory, storedName), req.body);
     const now = new Date().toISOString();
-    await db.run(`INSERT INTO onboarding_files (id, session_id, original_name, storage_path, mime_type, size_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [id, session.id, originalName, path.relative(__dirname, path.join(directory, storedName)), String(req.headers['content-type'] || 'application/octet-stream'), req.body.length, now]);
+    const mimeType = String(req.headers['content-type'] || 'application/octet-stream');
+    const storagePath = path.relative(__dirname, path.join(directory, storedName));
+    if (studioDbBackend === 'postgres') {
+      await studioSupabaseRequest('/rest/v1/onboarding_files', {
+        method: 'POST', headers: { prefer: 'return=minimal' },
+        body: JSON.stringify({ id, session_id: session.id, original_name: originalName, storage_path: storagePath, mime_type: mimeType, size_bytes: req.body.length, created_at: now })
+      });
+    } else {
+      await db.run(`INSERT INTO onboarding_files (id, session_id, original_name, storage_path, mime_type, size_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [id, session.id, originalName, storagePath, mimeType, req.body.length, now]);
+    }
     res.status(201).json({ id, name: originalName, size: req.body.length });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/api/onboarding/:token/submit', async (req, res) => {
   try {
-    const session = await db.get('SELECT * FROM onboarding_sessions WHERE token = ?', [req.params.token]);
+    const session = await studioFindOnboardingSessionByToken(req.params.token);
     if (!session || session.status === 'revoked') return res.status(410).json({ error: 'La entrevista no está disponible.' });
+    const now = new Date().toISOString();
+    if (studioDbBackend === 'postgres') {
+      const responses = await studioSupabaseRequest(`/rest/v1/onboarding_responses?session_id=eq.${encodeURIComponent(session.id)}&select=session_id`, { headers: { prefer: 'count=exact' } });
+      const count = responses?.length || 0;
+      if (count < 6) return res.status(422).json({ error: 'Completa las secciones principales antes de enviar.' });
+      await studioSupabaseRequest(`/rest/v1/onboarding_sessions?id=eq.${encodeURIComponent(session.id)}`, {
+        method: 'PATCH', headers: { prefer: 'return=minimal' }, body: JSON.stringify({ status: 'submitted', current_step: 12, submitted_at: now, updated_at: now })
+      });
+      await writeAudit('onboarding_submitted', 'client', session.client_id, { sessionId: session.id, sections: count });
+      res.json({ ok: true, submittedAt: now });
+      return;
+    }
     const count = await db.get('SELECT COUNT(*) AS count FROM onboarding_responses WHERE session_id = ?', [session.id]);
     if (count.count < 6) return res.status(422).json({ error: 'Completa las secciones principales antes de enviar.' });
-    const now = new Date().toISOString();
     await db.run("UPDATE onboarding_sessions SET status='submitted', current_step=12, submitted_at=?, updated_at=? WHERE id=?", [now, now, session.id]);
     await writeAudit('onboarding_submitted', 'client', session.client_id, { sessionId: session.id, sections: count.count });
     res.json({ ok: true, submittedAt: now });
@@ -1444,12 +2041,29 @@ app.put('/api/intake-jobs/:jobId/proposal', async (req, res) => {
   if (!proposal || typeof proposal !== 'object' || !proposal.summary) {
     return res.status(400).json({ error: 'La propuesta debe incluir al menos un resumen.' });
   }
-
+  const completedAt = new Date().toISOString();
+  if (studioDbBackend === 'postgres') {
+    try {
+      const rows = await studioSupabaseRequest(`/rest/v1/intake_jobs?id=eq.${encodeURIComponent(jobId)}&select=client_id,source_id`);
+      const job = rows?.[0];
+      if (!job) return res.status(404).json({ error: 'Tarea no encontrada.' });
+      await studioSupabaseRequest(`/rest/v1/intake_jobs?id=eq.${encodeURIComponent(jobId)}`, {
+        method: 'PATCH', headers: { prefer: 'return=minimal' },
+        body: JSON.stringify({ status: 'under_review', proposal_json: proposal, completed_at: completedAt, error_message: '' })
+      });
+      await studioSupabaseRequest(`/rest/v1/source_files?id=eq.${encodeURIComponent(job.source_id)}&client_id=eq.${encodeURIComponent(job.client_id)}`, {
+        method: 'PATCH', headers: { prefer: 'return=minimal' }, body: JSON.stringify({ status: 'under_review' })
+      });
+      res.json({ message: 'Propuesta registrada para revisión humana.' });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+    return;
+  }
   try {
     const job = await db.get('SELECT client_id, source_id FROM intake_jobs WHERE id = ?', [jobId]);
     if (!job) return res.status(404).json({ error: 'Tarea no encontrada.' });
 
-    const completedAt = new Date().toISOString();
     await db.run(`
       UPDATE intake_jobs
       SET status = 'under_review', proposal_json = ?, completed_at = ?, error_message = ''
@@ -1469,6 +2083,27 @@ app.put('/api/intake-jobs/:jobId/proposal', async (req, res) => {
 // Acepta el contrato knowledge_proposal.facts y test_proposals del IDE.
 app.post('/api/intake-jobs/:jobId/apply', async (req, res) => {
   const { jobId } = req.params;
+  if (studioDbBackend === 'postgres') {
+    try {
+      const result = await studioSupabaseRequest('/rest/v1/rpc/studio_apply_intake_proposal', {
+        method: 'POST', body: JSON.stringify({ p_job_id: jobId })
+      });
+      const { facts_created: factsCreated, tests_created: testsCreated } = result?.[0] || {};
+      const rows = await studioSupabaseRequest(`/rest/v1/intake_jobs?id=eq.${encodeURIComponent(jobId)}&select=client_id,source_id`);
+      const job = rows?.[0];
+      if (job) await writeAudit('proposal_applied', 'intake_job', jobId, { clientId: job.client_id, sourceId: job.source_id, facts: factsCreated, tests: testsCreated });
+      res.json({ message: 'Propuesta aplicada y marcada como aprobada.', factsCreated, testsCreated });
+    } catch (error) {
+      const msg = error.message;
+      let status = 500;
+      if (/Tarea no encontrada/.test(msg)) status = 404;
+      else if (/ya fue aplicada/.test(msg)) status = 409;
+      else if (/No hay una propuesta|debe usar listas|incompletos/.test(msg)) status = 400;
+      const friendly = /"message":"([^"]+)"/.exec(msg)?.[1];
+      res.status(status).json({ error: friendly || msg });
+    }
+    return;
+  }
   try {
     const job = await db.get('SELECT client_id, source_id, status, proposal_json FROM intake_jobs WHERE id = ?', [jobId]);
     if (!job) return res.status(404).json({ error: 'Tarea no encontrada.' });
@@ -1517,10 +2152,29 @@ app.post('/api/intake-jobs/:jobId/apply', async (req, res) => {
 app.get('/api/clients/:id/gap-questions', async (req, res) => {
   const { id: clientId } = req.params;
   try {
-    const client = await db.get('SELECT niche FROM clients WHERE id = ?', [clientId]);
+    let client, facts;
+    if (studioDbBackend === 'postgres') {
+      client = (await studioSupabaseRequest(`/rest/v1/clients?id=eq.${encodeURIComponent(clientId)}&select=niche,vertical_key`))?.[0];
+      facts = await studioSupabaseRequestAll(`/rest/v1/knowledge_items?client_id=eq.${encodeURIComponent(clientId)}&status=eq.approved&select=category,subject,value`);
+    } else {
+      client = await db.get('SELECT niche, vertical_key FROM clients WHERE id = ?', [clientId]);
+      facts = await db.all("SELECT category, subject, value FROM knowledge_items WHERE client_id = ? AND status = 'approved'", [clientId]);
+    }
     if (!client) return res.status(404).json({ error: 'Cliente no encontrado.' });
-    const facts = await db.all("SELECT category, subject, value FROM knowledge_items WHERE client_id = ? AND status = 'approved'", [clientId]);
-    res.json({ questions: buildGapQuestions(client.niche, facts) });
+    const genericQuestions = buildGapQuestions(client.niche, facts);
+    const verticalQuestions = getVerticalPack(client.vertical_key).required_knowledge.map((question, index) => ({
+      key: `vertical-${client.vertical_key}-${index + 1}`,
+      question,
+      priority: 'critical'
+    }));
+    const seen = new Set();
+    const questions = [...verticalQuestions, ...genericQuestions].filter(item => {
+      const normalized = item.question.toLocaleLowerCase('es').replace(/[^a-záéíóúñ0-9]+/g, ' ').trim();
+      if (seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    });
+    res.json({ vertical: client.vertical_key, questions });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1535,6 +2189,23 @@ app.post('/api/clients/:id/knowledge-items', async (req, res) => {
   }
   if ((testQuestion.trim() || expectedBehavior.trim()) && (!testQuestion.trim() || !expectedBehavior.trim())) {
     return res.status(400).json({ error: 'Para guardar una prueba se requieren pregunta y comportamiento esperado.' });
+  }
+  if (studioDbBackend === 'postgres') {
+    try {
+      const result = await studioSupabaseRequest('/rest/v1/rpc/studio_create_knowledge_item', {
+        method: 'POST',
+        body: JSON.stringify({
+          p_client_id: clientId, p_category: category, p_subject: subject, p_value: value, p_notes: notes,
+          p_source_id: sourceId || null, p_test_question: testQuestion, p_expected_behavior: expectedBehavior
+        })
+      });
+      const { item_id: itemId, test_id: testId } = result?.[0] || {};
+      await writeAudit('knowledge_item_created', 'knowledge_item', itemId, { clientId, sourceId, testId });
+      res.status(201).json({ message: 'Dato confirmado guardado.', itemId, testId });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+    return;
   }
   try {
     const itemId = `knowledge-${randomUUID()}`;
@@ -1561,6 +2232,17 @@ app.post('/api/clients/:id/knowledge-items', async (req, res) => {
 
 app.delete('/api/clients/:id/knowledge-items/:itemId', async (req, res) => {
   const { id: clientId, itemId } = req.params;
+  if (studioDbBackend === 'postgres') {
+    try {
+      const rows = await studioSupabaseRequest(`/rest/v1/knowledge_items?id=eq.${encodeURIComponent(itemId)}&client_id=eq.${encodeURIComponent(clientId)}`, { method: 'DELETE', headers: { prefer: 'return=representation' } });
+      if (!rows?.length) return res.status(404).json({ error: 'Dato no encontrado.' });
+      await writeAudit('knowledge_item_deleted', 'knowledge_item', itemId, { clientId });
+      res.json({ message: 'Dato eliminado.' });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+    return;
+  }
   try {
     const result = await db.run('DELETE FROM knowledge_items WHERE id = ? AND client_id = ?', [itemId, clientId]);
     if (result.changes === 0) return res.status(404).json({ error: 'Dato no encontrado.' });
@@ -1573,6 +2255,16 @@ app.delete('/api/clients/:id/knowledge-items/:itemId', async (req, res) => {
 
 app.delete('/api/clients/:id/tests/:testId', async (req, res) => {
   const { id: clientId, testId } = req.params;
+  if (studioDbBackend === 'postgres') {
+    try {
+      const rows = await studioSupabaseRequest(`/rest/v1/agent_tests?id=eq.${encodeURIComponent(testId)}&client_id=eq.${encodeURIComponent(clientId)}`, { method: 'DELETE', headers: { prefer: 'return=representation' } });
+      if (!rows?.length) return res.status(404).json({ error: 'Prueba no encontrada.' });
+      res.json({ message: 'Prueba eliminada.' });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+    return;
+  }
   try {
     const result = await db.run('DELETE FROM agent_tests WHERE id = ? AND client_id = ?', [testId, clientId]);
     if (result.changes === 0) return res.status(404).json({ error: 'Prueba no encontrada.' });
@@ -1582,16 +2274,73 @@ app.delete('/api/clients/:id/tests/:testId', async (req, res) => {
   }
 });
 
+// Compara el catálogo que Studio cree que configuró (agenda_configs local) contra lo que
+// realmente existe en el Supabase del cliente. No hay una consulta única posible entre dos
+// bases separadas: se traen ambos lados y se comparan en memoria por nombre.
+function diffCatalogList(localItems, remoteItems, matchFields = []) {
+  const localNames = new Set(localItems.map(item => item.name?.trim().toLowerCase()).filter(Boolean));
+  const remoteNames = new Set(remoteItems.map(item => item.name?.trim().toLowerCase()).filter(Boolean));
+  const missingInSupabase = localItems.filter(item => !remoteNames.has(item.name?.trim().toLowerCase()));
+  const onlyInSupabase = remoteItems.filter(item => !localNames.has(item.name?.trim().toLowerCase()));
+  const mismatched = [];
+  for (const local of localItems) {
+    const remote = remoteItems.find(item => item.name?.trim().toLowerCase() === local.name?.trim().toLowerCase());
+    if (!remote) continue;
+    const diffs = matchFields.filter(field => String(local[field] ?? '') !== String(remote[field] ?? ''));
+    if (diffs.length) mismatched.push({ name: local.name, fields: diffs, local: matchFields.reduce((o, f) => ({ ...o, [f]: local[f] }), {}), remote: matchFields.reduce((o, f) => ({ ...o, [f]: remote[f] }), {}) });
+  }
+  return { missingInSupabase, onlyInSupabase, mismatched };
+}
+
+app.get('/api/clients/:id/config-drift', async (req, res) => {
+  try {
+    const infra = await studioInfraRow(req.params.id, 'supabase_url');
+    if (!infra?.supabase_url || !(await localVault.exists(req.params.id))) return res.status(409).json({ error: 'Configura el vault Supabase del cliente para comparar el catálogo.' });
+    const record = studioDbBackend === 'postgres'
+      ? (await studioSupabaseRequest(`/rest/v1/agenda_configs?client_id=eq.${encodeURIComponent(req.params.id)}&select=config_json`))?.[0]
+      : await db.get('SELECT config_json FROM agenda_configs WHERE client_id = ?', [req.params.id]);
+    let local = { ...agendaV1Defaults };
+    if (record?.config_json) {
+      try {
+        const parsedConfig = studioDbBackend === 'postgres' ? record.config_json : JSON.parse(record.config_json);
+        local = normalizeAgendaConfig(parsedConfig);
+      } catch { /* base segura */ }
+    }
+    const secret = await localVault.read(req.params.id);
+    const headers = { apikey: secret, authorization: `Bearer ${secret}` };
+    const [locationsResponse, servicesResponse, resourcesResponse] = await Promise.all([
+      fetch(`${infra.supabase_url}/rest/v1/za_locations?active=eq.true&select=name,address`, { headers, signal: AbortSignal.timeout(8000) }),
+      fetch(`${infra.supabase_url}/rest/v1/za_services?active=eq.true&select=name,duration_minutes,price_clp`, { headers, signal: AbortSignal.timeout(8000) }),
+      fetch(`${infra.supabase_url}/rest/v1/za_resources?active=eq.true&select=name,specialty`, { headers, signal: AbortSignal.timeout(8000) })
+    ]);
+    if (!locationsResponse.ok || !servicesResponse.ok || !resourcesResponse.ok) return res.status(502).json({ error: 'No se pudo leer el catálogo remoto; confirma que la migración y el seed se ejecutaron.' });
+    const [remoteLocations, remoteServices, remoteResources] = await Promise.all([locationsResponse.json(), servicesResponse.json(), resourcesResponse.json()]);
+    res.json({
+      locations: diffCatalogList(local.locations || [], remoteLocations, ['address']),
+      services: diffCatalogList(local.services || [], remoteServices, ['duration_minutes', 'price_clp']),
+      resources: diffCatalogList(local.resources || [], remoteResources, ['specialty']),
+      checkedAt: new Date().toISOString()
+    });
+  } catch (error) { res.status(502).json({ error: `No se pudo comparar el catálogo: ${error.message}` }); }
+});
+
 // Actualizar el estado de construcción del proyecto de un cliente
 app.get('/api/clients/:id/agenda', async (req, res) => {
   try {
     if (!(await clientExists(req.params.id))) return res.status(404).json({ error: 'Cliente no encontrado.' });
-    const record = await db.get('SELECT config_json, updated_at FROM agenda_configs WHERE client_id = ?', [req.params.id]);
     let config = { ...agendaV1Defaults };
-    if (record?.config_json) {
-      try { config = normalizeAgendaConfig(JSON.parse(record.config_json)); } catch { /* base segura */ }
+    let updatedAt = null;
+    if (studioDbBackend === 'postgres') {
+      const rows = await studioSupabaseRequest(`/rest/v1/agenda_configs?client_id=eq.${encodeURIComponent(req.params.id)}&select=config_json,updated_at`);
+      const record = rows?.[0];
+      if (record?.config_json) { try { config = normalizeAgendaConfig(record.config_json); } catch { /* base segura */ } }
+      updatedAt = record?.updated_at || null;
+    } else {
+      const record = await db.get('SELECT config_json, updated_at FROM agenda_configs WHERE client_id = ?', [req.params.id]);
+      if (record?.config_json) { try { config = normalizeAgendaConfig(JSON.parse(record.config_json)); } catch { /* base segura */ } }
+      updatedAt = record?.updated_at || null;
     }
-    res.json({ ...config, updatedAt: record?.updated_at || null });
+    res.json({ ...config, updatedAt });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
@@ -1600,9 +2349,16 @@ app.put('/api/clients/:id/agenda', async (req, res) => {
     if (!(await clientExists(req.params.id))) return res.status(404).json({ error: 'Cliente no encontrado.' });
     const config = normalizeAgendaConfig(req.body || {});
     const now = new Date().toISOString();
-    await db.run(`INSERT INTO agenda_configs (client_id, config_json, updated_at) VALUES (?, ?, ?)
-      ON CONFLICT(client_id) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at`,
-      [req.params.id, JSON.stringify(config), now]);
+    if (studioDbBackend === 'postgres') {
+      await studioSupabaseRequest('/rest/v1/agenda_configs?on_conflict=client_id', {
+        method: 'POST', headers: { prefer: 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify({ client_id: req.params.id, config_json: config, updated_at: now })
+      });
+    } else {
+      await db.run(`INSERT INTO agenda_configs (client_id, config_json, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(client_id) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at`,
+        [req.params.id, JSON.stringify(config), now]);
+    }
     await writeAudit('agenda_configured', 'client', req.params.id, { enabled: config.enabled, services: config.services.length, resources: config.resources.length });
     res.json({ ...config, updatedAt: now });
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -1618,6 +2374,17 @@ app.put('/api/clients/:id/project', async (req, res) => {
     return res.status(400).json({ error: 'Estado de proyecto inválido.' });
   }
 
+  if (studioDbBackend === 'postgres') {
+    try {
+      const rows = await studioSupabaseRequest(`/rest/v1/clients?id=eq.${encodeURIComponent(id)}`, {
+        method: 'PATCH', headers: { prefer: 'return=representation' },
+        body: JSON.stringify({ project_stage: stage, project_notes: notes, next_action: nextAction })
+      });
+      if (!rows?.length) return res.status(404).json({ error: 'Cliente no encontrado.' });
+      res.json({ message: 'Proyecto actualizado.' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+    return;
+  }
   try {
     const result = await db.run(`
       UPDATE clients SET project_stage = ?, project_notes = ?, next_action = ? WHERE id = ?
@@ -1633,26 +2400,47 @@ app.put('/api/clients/:id/project', async (req, res) => {
 // Es la ÚNICA fuente del contrato: la usan tanto el versionado como el playground de calidad,
 // para que "entrenar" y "probar" ejerciten exactamente el mismo motor y los mismos datos.
 async function buildClientPackage(clientId, version = 'preview') {
-  const client = await db.get('SELECT * FROM clients WHERE id = ?', [clientId]);
-  if (!client) return null;
-  const documents = await db.all('SELECT id, title, category, content FROM documents WHERE client_id = ?', [clientId]);
-  const approvedSources = await db.all(`
-    SELECT id, title, source_type, original_name, storage_path, mime_type, notes, content, version_number, created_at
-    FROM source_files WHERE client_id = ? AND status = 'approved' ORDER BY created_at ASC
-  `, [clientId]);
-  const confirmedFacts = await db.all(`
-    SELECT id, source_id, category, subject, value, notes, confirmed_at
-    FROM knowledge_items WHERE client_id = ? AND status = 'approved' ORDER BY confirmed_at ASC
-  `, [clientId]);
-  const activeTests = await db.all(`
-    SELECT id, knowledge_item_id, question, expected_behavior, last_result
-    FROM agent_tests WHERE client_id = ? AND status = 'active' ORDER BY created_at ASC
-  `, [clientId]);
-  const agendaRecord = await db.get('SELECT config_json FROM agenda_configs WHERE client_id = ?', [clientId]);
+  let client, documents, approvedSources, confirmedFacts, activeTests, agendaRecord;
+  if (studioDbBackend === 'postgres') {
+    const clientRows = await studioSupabaseRequest(`/rest/v1/clients?id=eq.${encodeURIComponent(clientId)}`);
+    client = clientRows?.[0];
+    if (!client) return null;
+    [documents, approvedSources, confirmedFacts, activeTests, agendaRecord] = await Promise.all([
+      studioSupabaseRequestAll(`/rest/v1/documents?client_id=eq.${encodeURIComponent(clientId)}&select=id,title,category,content`),
+      studioSupabaseRequestAll(`/rest/v1/source_files?client_id=eq.${encodeURIComponent(clientId)}&status=eq.approved&select=id,title,source_type,original_name,storage_path,mime_type,notes,content,version_number,created_at&order=created_at.asc`),
+      studioSupabaseRequestAll(`/rest/v1/knowledge_items?client_id=eq.${encodeURIComponent(clientId)}&status=eq.approved&select=id,source_id,category,subject,value,notes,confirmed_at&order=confirmed_at.asc`),
+      studioSupabaseRequestAll(`/rest/v1/agent_tests?client_id=eq.${encodeURIComponent(clientId)}&status=eq.active&select=id,knowledge_item_id,question,expected_behavior,last_result&order=created_at.asc`),
+      studioSupabaseRequest(`/rest/v1/agenda_configs?client_id=eq.${encodeURIComponent(clientId)}&select=config_json`).then(rows => rows?.[0] || null)
+    ]);
+  } else {
+    client = await db.get('SELECT * FROM clients WHERE id = ?', [clientId]);
+    if (!client) return null;
+    documents = await db.all('SELECT id, title, category, content FROM documents WHERE client_id = ?', [clientId]);
+    approvedSources = await db.all(`
+      SELECT id, title, source_type, original_name, storage_path, mime_type, notes, content, version_number, created_at
+      FROM source_files WHERE client_id = ? AND status = 'approved' ORDER BY created_at ASC
+    `, [clientId]);
+    confirmedFacts = await db.all(`
+      SELECT id, source_id, category, subject, value, notes, confirmed_at
+      FROM knowledge_items WHERE client_id = ? AND status = 'approved' ORDER BY confirmed_at ASC
+    `, [clientId]);
+    activeTests = await db.all(`
+      SELECT id, knowledge_item_id, question, expected_behavior, last_result
+      FROM agent_tests WHERE client_id = ? AND status = 'active' ORDER BY created_at ASC
+    `, [clientId]);
+    agendaRecord = await db.get('SELECT config_json FROM agenda_configs WHERE client_id = ?', [clientId]);
+  }
   let agenda = { ...agendaV1Defaults };
   if (agendaRecord?.config_json) {
-    try { agenda = normalizeAgendaConfig(JSON.parse(agendaRecord.config_json)); } catch { /* no empaquetar valores corruptos */ }
+    try {
+      // jsonb (Postgres) llega ya parseado como objeto vía PostgREST; TEXT (SQLite) llega como
+      // string y necesita JSON.parse — mismo dato, dos formas de recibirlo según el backend.
+      const parsedConfig = studioDbBackend === 'postgres' ? agendaRecord.config_json : JSON.parse(agendaRecord.config_json);
+      agenda = normalizeAgendaConfig(parsedConfig);
+    } catch { /* no empaquetar valores corruptos */ }
   }
+  const verticalPack = getVerticalPack(client.vertical_key);
+  const { agenda_defaults: _agendaDefaults, ...verticalContract } = verticalPack;
   return {
     standard_version: 1,
     package_type: 'zeroagent-agent',
@@ -1664,6 +2452,7 @@ async function buildClientPackage(clientId, version = 'preview') {
       niche: client.niche,
       description: client.desc || ''
     },
+    vertical: verticalContract,
     agent: {
       name: client.agent_name,
       tone: client.agent_tone,
@@ -1707,7 +2496,7 @@ async function buildClientPackage(clientId, version = 'preview') {
         },
         agent_flow_contract: {
           standard: 'zeroagent-agenda-flows',
-          tools: ['get_availability', 'get_my_appointment', 'create_appointment', 'cancel_appointment', 'reschedule_appointment', 'request_human_handoff'],
+          tools: ['get_availability', 'get_my_appointment', 'create_appointment', 'cancel_appointment', 'reschedule_appointment', 'update_customer_profile', 'request_human_handoff'],
           guarantees: ['verified_channel_identity', 'atomic_mutations', 'intent_can_change_between_turns', 'no_confirmation_without_tool_success']
         }
       }
@@ -1723,6 +2512,39 @@ async function buildClientPackage(clientId, version = 'preview') {
   };
 }
 
+function runPackageQualityGate(packageData) {
+  const results = (packageData.tests || []).map(test => {
+    const answer = answerDeterministically(packageData, test.question);
+    const evaluation = matchExpectedBehavior(test.expected_behavior, answer.text);
+    return {
+      id: test.id,
+      question: test.question,
+      passed: evaluation.passed,
+      expectedTerms: evaluation.expectedTerms,
+      matchedTerms: evaluation.matchedTerms,
+      minimumMatches: evaluation.minimumMatches,
+      answer: answer.text
+    };
+  });
+  const failures = results.filter(result => !result.passed);
+  const agenda = packageData.solutions?.agenda;
+  const contractFailures = [];
+  if (agenda?.config?.enabled) {
+    const requiredTools = ['get_availability', 'get_my_appointment', 'create_appointment', 'cancel_appointment', 'reschedule_appointment', 'update_customer_profile', 'request_human_handoff'];
+    const actualTools = getAgendaToolDefinitions(packageData).map(item => item.function.name);
+    const declaredTools = agenda.agent_flow_contract?.tools || [];
+    for (const tool of requiredTools) {
+      if (!actualTools.includes(tool)) contractFailures.push(`El runtime no expone ${tool}.`);
+      if (!declaredTools.includes(tool)) contractFailures.push(`El paquete no declara ${tool}.`);
+    }
+    if (agenda.safety?.availability_is_authoritative !== true) contractFailures.push('Disponibilidad no está declarada como autoritativa.');
+    if (agenda.safety?.no_booking_without_live_availability_check !== true) contractFailures.push('Falta la garantía de disponibilidad viva.');
+    if (!agenda.agent_flow_contract?.guarantees?.includes('atomic_mutations')) contractFailures.push('Falta la garantía de mutaciones atómicas.');
+  }
+  if (!results.length) contractFailures.push('La versión no contiene pruebas de regresión activas.');
+  return { passed: failures.length === 0 && contractFailures.length === 0, results, failures, contractFailures };
+}
+
 // Crear un paquete versionado de agente. En esta etapa se genera el contrato portable;
 // el runtime Docker se conectará a este mismo paquete en una etapa posterior.
 app.post('/api/clients/:id/versions', async (req, res) => {
@@ -1732,6 +2554,22 @@ app.post('/api/clients/:id/versions', async (req, res) => {
     return res.status(400).json({ error: 'La versión debe usar el formato mayor.menor.parche, por ejemplo 0.1.0.' });
   }
 
+  if (studioDbBackend === 'postgres') {
+    try {
+      const packageData = await buildClientPackage(clientId, version);
+      if (!packageData) return res.status(404).json({ error: 'Cliente no encontrado.' });
+      const versionId = `version-${randomUUID()}`;
+      await studioSupabaseRequest('/rest/v1/agent_versions', {
+        method: 'POST', headers: { prefer: 'return=minimal' },
+        body: JSON.stringify({ id: versionId, client_id: clientId, version, status: 'draft', summary: summary.trim(), package_json: packageData, created_at: packageData.generated_at })
+      });
+      res.status(201).json({ message: 'Versión de borrador creada.', versionId, package: packageData });
+    } catch (error) {
+      const isDuplicate = isStudioUniqueViolation(error);
+      res.status(isDuplicate ? 409 : 500).json({ error: isDuplicate ? 'Ya existe esa versión para este agente.' : error.message });
+    }
+    return;
+  }
   try {
     const packageData = await buildClientPackage(clientId, version);
     if (!packageData) return res.status(404).json({ error: 'Cliente no encontrado.' });
@@ -1749,13 +2587,47 @@ app.post('/api/clients/:id/versions', async (req, res) => {
 
 app.put('/api/clients/:id/versions/:versionId/approve', async (req, res) => {
   const { id: clientId, versionId } = req.params;
+  if (studioDbBackend === 'postgres') {
+    try {
+      const rows = await studioSupabaseRequest(`/rest/v1/agent_versions?id=eq.${encodeURIComponent(versionId)}&client_id=eq.${encodeURIComponent(clientId)}&select=package_json`);
+      const version = rows?.[0];
+      if (!version) return res.status(404).json({ error: 'Versión no encontrada.' });
+      const quality = runPackageQualityGate(version.package_json);
+      for (const result of quality.results) {
+        await studioSupabaseRequest(`/rest/v1/agent_tests?id=eq.${encodeURIComponent(result.id)}&client_id=eq.${encodeURIComponent(clientId)}`, {
+          method: 'PATCH', headers: { prefer: 'return=minimal' },
+          body: JSON.stringify({ last_result: { passed: result.passed, checkedAt: new Date().toISOString(), matchedTerms: result.matchedTerms, expectedTerms: result.expectedTerms } })
+        });
+      }
+      if (!quality.passed) return res.status(409).json({ error: 'La versión no pasó la compuerta de calidad y no fue aprobada.', quality });
+      const updated = await studioSupabaseRequest(`/rest/v1/agent_versions?id=eq.${encodeURIComponent(versionId)}&client_id=eq.${encodeURIComponent(clientId)}`, {
+        method: 'PATCH', headers: { prefer: 'return=representation' },
+        body: JSON.stringify({ status: 'approved', approved_at: new Date().toISOString() })
+      });
+      if (!updated?.length) return res.status(404).json({ error: 'Versión no encontrada.' });
+      res.json({ message: 'Versión aprobada.', quality });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+    return;
+  }
   try {
+    const version = await db.get('SELECT package_json FROM agent_versions WHERE id = ? AND client_id = ?', [versionId, clientId]);
+    if (!version) return res.status(404).json({ error: 'Versión no encontrada.' });
+    const quality = runPackageQualityGate(JSON.parse(version.package_json));
+    for (const result of quality.results) {
+      await db.run('UPDATE agent_tests SET last_result = ? WHERE id = ? AND client_id = ?', [
+        JSON.stringify({ passed: result.passed, checkedAt: new Date().toISOString(), matchedTerms: result.matchedTerms, expectedTerms: result.expectedTerms }),
+        result.id, clientId
+      ]);
+    }
+    if (!quality.passed) return res.status(409).json({ error: 'La versión no pasó la compuerta de calidad y no fue aprobada.', quality });
     const result = await db.run(`
       UPDATE agent_versions SET status = 'approved', approved_at = ?
       WHERE id = ? AND client_id = ?
     `, [new Date().toISOString(), versionId, clientId]);
     if (result.changes === 0) return res.status(404).json({ error: 'Versión no encontrada.' });
-    res.json({ message: 'Versión aprobada.' });
+    res.json({ message: 'Versión aprobada.', quality });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1764,12 +2636,14 @@ app.put('/api/clients/:id/versions/:versionId/approve', async (req, res) => {
 app.get('/api/clients/:id/versions/:versionId/export', async (req, res) => {
   const { id: clientId, versionId } = req.params;
   try {
-    const record = await db.get(`
-      SELECT version, package_json FROM agent_versions WHERE id = ? AND client_id = ?
-    `, [versionId, clientId]);
+    const record = studioDbBackend === 'postgres'
+      ? (await studioSupabaseRequest(`/rest/v1/agent_versions?id=eq.${encodeURIComponent(versionId)}&client_id=eq.${encodeURIComponent(clientId)}&select=version,package_json`))?.[0]
+      : await db.get(`SELECT version, package_json FROM agent_versions WHERE id = ? AND client_id = ?`, [versionId, clientId]);
     if (!record) return res.status(404).json({ error: 'Versión no encontrada.' });
     res.setHeader('Content-Disposition', `attachment; filename="${safeFileName(`${clientId}-${record.version}-package.json`)}"`);
-    res.type('application/json').send(record.package_json);
+    // jsonb (Postgres) llega ya parseado — hay que re-serializarlo a texto para mandarlo como
+    // archivo descargable; TEXT (SQLite) ya es el string tal cual se guardó.
+    res.type('application/json').send(studioDbBackend === 'postgres' ? JSON.stringify(record.package_json, null, 2) : record.package_json);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1794,14 +2668,15 @@ app.post('/api/clients/:id/versions/:versionId/build-runtime', async (req, res) 
     if (!['preview', 'staging', 'production'].includes(target)) {
       return res.status(400).json({ error: 'Debes indicar explícitamente el destino: preview, staging o production.' });
     }
-    const record = await db.get(`
-      SELECT version, status, package_json FROM agent_versions WHERE id = ? AND client_id = ?
-    `, [versionId, clientId]);
+    const record = studioDbBackend === 'postgres'
+      ? (await studioSupabaseRequest(`/rest/v1/agent_versions?id=eq.${encodeURIComponent(versionId)}&client_id=eq.${encodeURIComponent(clientId)}&select=version,status,package_json`))?.[0]
+      : await db.get(`SELECT version, status, package_json FROM agent_versions WHERE id = ? AND client_id = ?`, [versionId, clientId]);
     if (!record) return res.status(404).json({ error: 'Versión no encontrada.' });
     if (record.status !== 'approved') return res.status(409).json({ error: 'Aprueba la versión antes de construir una instalación.' });
     const preflight = await getInstallationPreflight(clientId, target);
     if (!preflight.ready) return res.status(409).json({ error: 'La instalación no pasó la revisión previa.', preflight });
-    const outputDir = await buildClientRuntime(clientId, record.version, JSON.parse(record.package_json), target);
+    const packageData = studioDbBackend === 'postgres' ? record.package_json : JSON.parse(record.package_json);
+    const outputDir = await buildClientRuntime(clientId, record.version, packageData, target);
     await writeAudit('runtime_built', 'agent_version', versionId, { clientId, version: record.version, target, outputDir });
     res.json({
       message: `Runtime ${target} construido. Copia esta carpeta al entorno correspondiente y configura sus credenciales allí.`,
@@ -1838,16 +2713,11 @@ app.post('/api/clients/:id/sources', async (req, res) => {
     return res.status(404).json({ error: 'Cliente no encontrado.' });
   }
 
+  // Decodificar y escribir el archivo a disco (si vino) ANTES de llamar al backend — el
+  // storage_path resultante se pasa ya resuelto tanto a la RPC de Postgres como al INSERT SQLite.
+  let sourceId, storagePath = null;
   try {
-    const sourceId = `source-${randomUUID()}`;
-    const jobId = `job-${randomUUID()}`;
-    const createdAt = new Date().toISOString();
-    const previous = replacesSourceId
-      ? await db.get('SELECT version_number FROM source_files WHERE id = ? AND client_id = ?', [replacesSourceId, clientId])
-      : null;
-    const versionNumber = previous ? previous.version_number + 1 : 1;
-    let storagePath = null;
-
+    sourceId = `source-${randomUUID()}`;
     const binary = decodeBase64File(fileData);
     if (binary) {
       const clientStorageId = safeFileName(clientId);
@@ -1857,6 +2727,59 @@ app.post('/api/clients/:id/sources', async (req, res) => {
       await fs.writeFile(path.join(clientDir, fileName), binary);
       storagePath = path.posix.join('sources', clientStorageId, sourceId, fileName);
     }
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  if (studioDbBackend === 'postgres') {
+    try {
+      const result = await studioSupabaseRequest('/rest/v1/rpc/studio_add_source_version', {
+        method: 'POST',
+        body: JSON.stringify({
+          p_client_id: clientId, p_source_id: sourceId, p_title: title, p_source_type: sourceType, p_original_name: originalName || null,
+          p_storage_path: storagePath, p_mime_type: mimeType || null, p_size_bytes: Number(sizeBytes) || 0,
+          p_notes: notes, p_content: content, p_replaces_source_id: replacesSourceId
+        })
+      });
+      const row = result?.[0];
+      const jobId = row.job_id;
+      const taskDirectory = path.join(ideInboxRoot, jobId);
+      const relativeTaskPath = path.posix.join('.zeroagent', 'inbox', jobId, 'task.json');
+      const task = {
+        standard_version: 1, task_id: jobId, kind: 'interpret_source', status: 'pending_ide', created_at: new Date().toISOString(),
+        client: { id: clientId },
+        source: {
+          id: row.source_id, title: title.trim(), type: sourceType, original_name: originalName, storage_path: storagePath,
+          content: content.trim(), notes: notes.trim(), version_number: row.version_number, replaces_source_id: replacesSourceId
+        },
+        instructions: row.instructions,
+        expected_output: path.posix.join('.zeroagent', 'proposals', `${jobId}.json`),
+        rules: [
+          'No aplicar cambios directamente a la base de conocimiento.',
+          'Identificar datos nuevos, modificados, eliminados, ambiguos o contradictorios.',
+          'Proponer información estructurada y casos de prueba afectados.',
+          'Conservar la relación con la fuente original.'
+        ]
+      };
+      await fs.mkdir(taskDirectory, { recursive: true });
+      await fs.writeFile(path.join(taskDirectory, 'task.json'), JSON.stringify(task, null, 2), 'utf8');
+      await studioSupabaseRequest(`/rest/v1/intake_jobs?id=eq.${encodeURIComponent(jobId)}`, {
+        method: 'PATCH', headers: { prefer: 'return=minimal' }, body: JSON.stringify({ workspace_path: relativeTaskPath })
+      });
+      res.status(201).json({ message: 'Fuente registrada y enviada a la cola local del IDE.', sourceId: row.source_id, jobId, workspacePath: relativeTaskPath });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+    return;
+  }
+
+  try {
+    const jobId = `job-${randomUUID()}`;
+    const createdAt = new Date().toISOString();
+    const previous = replacesSourceId
+      ? await db.get('SELECT version_number FROM source_files WHERE id = ? AND client_id = ?', [replacesSourceId, clientId])
+      : null;
+    const versionNumber = previous ? previous.version_number + 1 : 1;
 
     await db.run(`
       INSERT INTO source_files (
@@ -1922,6 +2845,19 @@ app.put('/api/clients/:id/sources/:sourceId/status', async (req, res) => {
   const allowedStatuses = ['pending_ide', 'under_review', 'approved', 'rejected'];
   if (!allowedStatuses.includes(status)) return res.status(400).json({ error: 'Estado de fuente inválido.' });
 
+  if (studioDbBackend === 'postgres') {
+    try {
+      const reviewedAt = ['approved', 'rejected'].includes(status) ? new Date().toISOString() : null;
+      const rows = await studioSupabaseRequest(`/rest/v1/source_files?id=eq.${encodeURIComponent(sourceId)}&client_id=eq.${encodeURIComponent(clientId)}`, {
+        method: 'PATCH', headers: { prefer: 'return=representation' }, body: JSON.stringify({ status, reviewed_at: reviewedAt })
+      });
+      if (!rows?.length) return res.status(404).json({ error: 'Fuente no encontrada.' });
+      res.json({ message: 'Estado de fuente actualizado.' });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+    return;
+  }
   try {
     const result = await db.run(`
       UPDATE source_files SET status = ?, reviewed_at = CASE WHEN ? IN ('approved', 'rejected') THEN ? ELSE NULL END
@@ -1936,6 +2872,28 @@ app.put('/api/clients/:id/sources/:sourceId/status', async (req, res) => {
 
 app.delete('/api/clients/:id/sources/:sourceId', async (req, res) => {
   const { id: clientId, sourceId } = req.params;
+  if (studioDbBackend === 'postgres') {
+    try {
+      const sourceRows = await studioSupabaseRequest(`/rest/v1/source_files?id=eq.${encodeURIComponent(sourceId)}&client_id=eq.${encodeURIComponent(clientId)}&select=storage_path`);
+      const source = sourceRows?.[0];
+      if (!source) return res.status(404).json({ error: 'Fuente no encontrada.' });
+      const jobs = await studioSupabaseRequest(`/rest/v1/intake_jobs?source_id=eq.${encodeURIComponent(sourceId)}&client_id=eq.${encodeURIComponent(clientId)}&select=workspace_path`);
+      await studioSupabaseRequest(`/rest/v1/source_files?id=eq.${encodeURIComponent(sourceId)}&client_id=eq.${encodeURIComponent(clientId)}`, { method: 'DELETE', headers: { prefer: 'return=minimal' } });
+      if (source.storage_path) {
+        await fs.rm(path.join(__dirname, 'storage', path.dirname(source.storage_path)), { recursive: true, force: true });
+      }
+      for (const job of jobs || []) {
+        if (job.workspace_path) {
+          await fs.rm(path.dirname(path.join(__dirname, job.workspace_path)), { recursive: true, force: true });
+        }
+      }
+      await writeAudit('delete_source', 'source', sourceId, { client_id: clientId, storage_path: source.storage_path });
+      res.json({ message: 'Fuente eliminada.' });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+    return;
+  }
   try {
     const source = await db.get('SELECT storage_path FROM source_files WHERE id = ? AND client_id = ?', [sourceId, clientId]);
     if (!source) return res.status(404).json({ error: 'Fuente no encontrada.' });
@@ -1960,33 +2918,102 @@ app.delete('/api/clients/:id/sources/:sourceId', async (req, res) => {
 
 // 2. Crear un nuevo cliente
 app.post('/api/clients', async (req, res) => {
-  const { id, name, niche, desc, agent } = req.body;
+  const { id, name, niche, desc, agent, verticalKey = 'custom' } = req.body;
   if (!/^[a-z0-9][a-z0-9._-]{1,79}$/i.test(String(id || '')) || !String(name || '').trim()) {
     return res.status(400).json({ error: 'El cliente requiere nombre y un ID seguro de 2 a 80 caracteres.' });
   }
+  const availablePacks = new Set(listVerticalPacks().map(pack => pack.key));
+  if (!availablePacks.has(verticalKey)) return res.status(400).json({ error: 'La vertical seleccionada no existe.' });
+  const verticalPack = getVerticalPack(verticalKey);
+  const agendaConfig = normalizeAgendaConfig(verticalAgendaDefaults(verticalKey));
+  const guardrails = verticalPack.guardrails.map(rule => `- ${rule}`).join('\n');
+  const welcomeMsg = `¡Hola! Soy tu asistente de WhatsApp. ¿En qué te puedo asesorar hoy?`;
+  const agentName = agent?.name || `Asistente de ${name}`;
+  const agentTone = agent?.tone || 'friendly';
+  const agentAvatarColor = agent?.avatarColor || 'emerald';
+  const agentRole = agent?.role || `Resolver consultas sobre ${name}.`;
+  const agentWhatsapp = agent?.whatsapp || '';
+  const agentSystemPrompt = agent?.systemPrompt || `Eres el asistente de ${name}. Usa sólo el conocimiento aprobado y las herramientas del runtime.\n${guardrails}`;
+  if (studioDbBackend === 'postgres') {
+    try {
+      await studioSupabaseRequest('/rest/v1/rpc/studio_create_client', {
+        method: 'POST',
+        body: JSON.stringify({
+          p_id: id, p_name: name, p_niche: String(niche || verticalPack.label).trim(), p_desc: desc ?? null,
+          p_agent_name: agentName, p_agent_tone: agentTone, p_agent_avatar_color: agentAvatarColor,
+          p_agent_role: agentRole, p_agent_whatsapp: agentWhatsapp, p_agent_system_prompt: agentSystemPrompt,
+          p_vertical_key: verticalKey, p_agenda_config: agendaConfig, p_welcome_text: welcomeMsg,
+          p_welcome_time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        })
+      });
+      res.status(201).json({ message: 'Cliente creado con éxito.' });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+    return;
+  }
   try {
+    await db.exec('BEGIN IMMEDIATE');
     await db.run(`
-      INSERT INTO clients (id, name, niche, desc, agent_name, agent_tone, agent_avatar_color, agent_role, agent_whatsapp, agent_system_prompt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO clients (id, name, niche, desc, agent_name, agent_tone, agent_avatar_color, agent_role, agent_whatsapp, agent_system_prompt, vertical_key)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
-      id, name, niche, desc,
-      agent?.name || `Asistente de ${name}`,
-      agent?.tone || 'friendly',
-      agent?.avatarColor || 'emerald',
-      agent?.role || `Resolver consultas sobre ${name}.`,
-      agent?.whatsapp || '',
-      agent?.systemPrompt || `Eres el asistente de ${name}. Consulta el entrenamiento.`
+      id, name, String(niche || verticalPack.label).trim(), desc,
+      agentName, agentTone, agentAvatarColor, agentRole, agentWhatsapp, agentSystemPrompt, verticalKey
     ]);
 
-    // Crear mensaje de bienvenida inicial
-    const welcomeMsg = `¡Hola! Soy tu asistente de WhatsApp. ¿En qué te puedo asesorar hoy?`;
+    await db.run(`INSERT INTO agenda_configs (client_id, config_json, updated_at) VALUES (?, ?, ?)`, [
+      id, JSON.stringify(agendaConfig), new Date().toISOString()
+    ]);
+
     await db.run(`
       INSERT INTO chats (client_id, sender, text, time)
       VALUES (?, ?, ?, ?)
     `, [id, 'agent', welcomeMsg, new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })]);
 
+    await db.exec('COMMIT');
     res.status(201).json({ message: 'Cliente creado con éxito.' });
   } catch (error) {
+    try { await db.exec('ROLLBACK'); } catch { /* no había transacción activa */ }
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/clients/:id/vertical', async (req, res) => {
+  const verticalKey = String(req.body?.verticalKey || '').trim();
+  const availablePacks = new Set(listVerticalPacks().map(pack => pack.key));
+  if (!availablePacks.has(verticalKey)) return res.status(400).json({ error: 'La vertical seleccionada no existe.' });
+  const applyAgendaDefaults = req.body?.applyAgendaDefaults === true;
+  if (studioDbBackend === 'postgres') {
+    try {
+      const config = applyAgendaDefaults ? normalizeAgendaConfig(verticalAgendaDefaults(verticalKey)) : null;
+      await studioSupabaseRequest('/rest/v1/rpc/studio_update_client_vertical', {
+        method: 'POST',
+        body: JSON.stringify({ p_client_id: req.params.id, p_vertical_key: verticalKey, p_apply_agenda_defaults: applyAgendaDefaults, p_agenda_config: config })
+      });
+      await writeAudit('client_vertical_updated', 'client', req.params.id, { verticalKey, appliedAgendaDefaults: applyAgendaDefaults });
+      res.json({ message: 'Vertical actualizada.', vertical: getVerticalPack(verticalKey) });
+    } catch (error) {
+      const notFound = /Cliente no encontrado/.test(error.message);
+      res.status(notFound ? 404 : 500).json({ error: notFound ? 'Cliente no encontrado.' : error.message });
+    }
+    return;
+  }
+  try {
+    if (!(await clientExists(req.params.id))) return res.status(404).json({ error: 'Cliente no encontrado.' });
+    const now = new Date().toISOString();
+    await db.exec('BEGIN IMMEDIATE');
+    await db.run('UPDATE clients SET vertical_key = ? WHERE id = ?', [verticalKey, req.params.id]);
+    if (applyAgendaDefaults) {
+      const config = normalizeAgendaConfig(verticalAgendaDefaults(verticalKey));
+      await db.run(`INSERT INTO agenda_configs (client_id, config_json, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(client_id) DO UPDATE SET config_json=excluded.config_json, updated_at=excluded.updated_at`, [req.params.id, JSON.stringify(config), now]);
+    }
+    await db.exec('COMMIT');
+    await writeAudit('client_vertical_updated', 'client', req.params.id, { verticalKey, appliedAgendaDefaults: applyAgendaDefaults });
+    res.json({ message: 'Vertical actualizada.', vertical: getVerticalPack(verticalKey) });
+  } catch (error) {
+    try { await db.exec('ROLLBACK'); } catch { /* no había transacción activa */ }
     res.status(500).json({ error: error.message });
   }
 });
@@ -1994,6 +3021,23 @@ app.post('/api/clients', async (req, res) => {
 // 3. Eliminar un cliente
 app.delete('/api/clients/:id', async (req, res) => {
   const { id } = req.params;
+  if (studioDbBackend === 'postgres') {
+    try {
+      const rows = await studioSupabaseRequest(`/rest/v1/clients?id=eq.${encodeURIComponent(id)}&select=id,name`);
+      const client = rows?.[0];
+      if (!client) return res.status(404).json({ error: 'Cliente no encontrado.' });
+      // TODO Fase 10 (settings export/import): studio_restore_snapshot ya existe para restaurar,
+      // pero el snapshot PREVIO a este delete (createDataSnapshot, hoy solo lee SQLite) todavía no
+      // tiene su versión Postgres — se resuelve cuando se migre el área de settings. Supabase
+      // conserva sus propios respaldos de plataforma mientras tanto.
+      await studioSupabaseRequest(`/rest/v1/clients?id=eq.${encodeURIComponent(id)}`, { method: 'DELETE', headers: { prefer: 'return=minimal' } });
+      await writeAudit('delete_client', 'client', id, { name: client.name });
+      res.json({ message: 'Cliente eliminado correctamente.' });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+    return;
+  }
   try {
     const client = await db.get('SELECT id, name FROM clients WHERE id = ?', [id]);
     if (!client) return res.status(404).json({ error: 'Cliente no encontrado.' });
@@ -2010,6 +3054,16 @@ app.delete('/api/clients/:id', async (req, res) => {
 app.put('/api/clients/:id/agent', async (req, res) => {
   const { id } = req.params;
   const { name, tone, avatarColor, role, whatsapp, systemPrompt } = req.body;
+  if (studioDbBackend === 'postgres') {
+    try {
+      await studioSupabaseRequest(`/rest/v1/clients?id=eq.${encodeURIComponent(id)}`, {
+        method: 'PATCH', headers: { prefer: 'return=minimal' },
+        body: JSON.stringify({ agent_name: name, agent_tone: tone, agent_avatar_color: avatarColor, agent_role: role, agent_whatsapp: whatsapp, agent_system_prompt: systemPrompt })
+      });
+      res.json({ message: 'Agente actualizado con éxito.' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+    return;
+  }
   try {
     await db.run(`
       UPDATE clients
@@ -2027,6 +3081,16 @@ app.put('/api/clients/:id/agent', async (req, res) => {
 app.post('/api/clients/:id/documents', async (req, res) => {
   const { id: clientId } = req.params;
   const { id, title, category, content } = req.body;
+  if (studioDbBackend === 'postgres') {
+    try {
+      await studioSupabaseRequest('/rest/v1/documents', {
+        method: 'POST', headers: { prefer: 'return=minimal' },
+        body: JSON.stringify({ id, client_id: clientId, title, category, content })
+      });
+      res.status(201).json({ message: 'Documento indexado con éxito.' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+    return;
+  }
   try {
     await db.run(`
       INSERT INTO documents (id, client_id, title, category, content)
@@ -2042,6 +3106,15 @@ app.post('/api/clients/:id/documents', async (req, res) => {
 // 6. Eliminar un documento de entrenamiento
 app.delete('/api/clients/:id/documents/:docId', async (req, res) => {
   const { id: clientId, docId } = req.params;
+  if (studioDbBackend === 'postgres') {
+    try {
+      const rows = await studioSupabaseRequest(`/rest/v1/documents?id=eq.${encodeURIComponent(docId)}&client_id=eq.${encodeURIComponent(clientId)}`, { method: 'DELETE', headers: { prefer: 'return=representation' } });
+      if (!rows?.length) return res.status(404).json({ error: 'Documento no encontrado.' });
+      await writeAudit('delete_document', 'document', docId, { client_id: clientId });
+      res.json({ message: 'Documento eliminado con éxito.' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+    return;
+  }
   try {
     const result = await db.run('DELETE FROM documents WHERE id = ? AND client_id = ?', [docId, clientId]);
     if (result.changes === 0) return res.status(404).json({ error: 'Documento no encontrado.' });
@@ -2056,6 +3129,18 @@ app.delete('/api/clients/:id/documents/:docId', async (req, res) => {
 app.post('/api/clients/:id/chats', async (req, res) => {
   const { id: clientId } = req.params;
   const { sender, text, time } = req.body;
+  if (studioDbBackend === 'postgres') {
+    try {
+      const rows = await studioSupabaseRequest('/rest/v1/chats', {
+        method: 'POST', headers: { prefer: 'return=representation' },
+        body: JSON.stringify({ client_id: clientId, sender, text, time })
+      });
+      res.status(201).json({ message: 'Mensaje registrado con éxito.', chatId: rows?.[0]?.id });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+    return;
+  }
   try {
     const result = await db.run(`
       INSERT INTO chats (client_id, sender, text, time)
@@ -2076,6 +3161,36 @@ app.post('/api/clients/:id/chats/:chatId/feedback', async (req, res) => {
   if (!['up', 'down'].includes(rating)) return res.status(400).json({ error: 'Evaluación inválida.' });
   if (rating === 'down' && !correctionText.trim()) {
     return res.status(400).json({ error: 'Indica cómo debió responder antes de registrar una corrección.' });
+  }
+  if (studioDbBackend === 'postgres') {
+    try {
+      const result = await studioSupabaseRequest('/rest/v1/rpc/studio_record_chat_feedback', {
+        method: 'POST',
+        body: JSON.stringify({ p_client_id: clientId, p_chat_id: Number(chatId), p_rating: rating, p_correction_text: correctionText })
+      });
+      const row = result?.[0] || {};
+      // task.json a disco DESPUÉS de que la RPC confirme éxito (riesgo relocado, no eliminado —
+      // ver nota en el plan y en la migración RPC).
+      if (rating === 'down' && row.job_id) {
+        const taskDirectory = path.join(ideInboxRoot, row.job_id);
+        await fs.mkdir(taskDirectory, { recursive: true });
+        await fs.writeFile(path.join(taskDirectory, 'task.json'), JSON.stringify({
+          standard_version: 1, task_id: row.job_id, kind: 'review_conversation_feedback', status: 'pending_ide', created_at: new Date().toISOString(),
+          client: { id: clientId }, source: { id: row.source_id, type: 'note', content: row.source_content }, instructions: row.instructions,
+          expected_output: path.posix.join('.zeroagent', 'proposals', `${row.job_id}.json`),
+          rules: ['No aplicar cambios directamente.', 'Proponer un hecho o regla verificable y una prueba de regresión.']
+        }, null, 2), 'utf8');
+      }
+      await writeAudit('conversation_feedback', 'chat', String(chatId), { clientId, rating, sourceId: row.source_id });
+      res.status(201).json({ message: rating === 'down' ? 'Corrección enviada al flujo de revisión.' : 'Respuesta marcada como correcta.', sourceId: row.source_id });
+    } catch (error) {
+      const msg = error.message;
+      const notFound = /Mensaje no encontrado/.test(msg);
+      const badSender = /Sólo se evalúan/.test(msg);
+      const friendly = /"message":"([^"]+)"/.exec(msg)?.[1];
+      res.status(notFound ? 404 : badSender ? 400 : 500).json({ error: friendly || msg });
+    }
+    return;
   }
   try {
     const chat = await db.get('SELECT id, text, sender FROM chats WHERE id = ? AND client_id = ?', [chatId, clientId]);
@@ -2121,6 +3236,15 @@ app.post('/api/clients/:id/chats/:chatId/feedback', async (req, res) => {
 // 8. Limpiar chats de un cliente
 app.delete('/api/clients/:id/chats', async (req, res) => {
   const { id } = req.params;
+  if (studioDbBackend === 'postgres') {
+    try {
+      await studioSupabaseRequest('/rest/v1/rpc/studio_clear_client_chats', { method: 'POST', body: JSON.stringify({ p_client_id: id }) });
+      res.json({ message: 'Historial de chat limpiado.' });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+    return;
+  }
   try {
     await db.run('DELETE FROM conversation_feedback WHERE client_id = ?', [id]);
     await db.run('DELETE FROM chats WHERE client_id = ?', [id]);
@@ -2141,11 +3265,17 @@ app.post('/api/clients/:id/retrieve', async (req, res) => {
 
   try {
     // 1. Recuperar documentos heredados y hechos confirmados del cliente.
-    const docs = await db.all('SELECT title, content FROM documents WHERE client_id = ?', [clientId]);
-    const facts = await db.all(`
-      SELECT subject, value, notes FROM knowledge_items
-      WHERE client_id = ? AND status = 'approved'
-    `, [clientId]);
+    let docs, facts;
+    if (studioDbBackend === 'postgres') {
+      docs = await studioSupabaseRequestAll(`/rest/v1/documents?client_id=eq.${encodeURIComponent(clientId)}&select=title,content`);
+      facts = await studioSupabaseRequestAll(`/rest/v1/knowledge_items?client_id=eq.${encodeURIComponent(clientId)}&status=eq.approved&select=subject,value,notes`);
+    } else {
+      docs = await db.all('SELECT title, content FROM documents WHERE client_id = ?', [clientId]);
+      facts = await db.all(`
+        SELECT subject, value, notes FROM knowledge_items
+        WHERE client_id = ? AND status = 'approved'
+      `, [clientId]);
+    }
     const retrievalItems = [
       ...facts.map(fact => ({
         title: `Dato confirmado · ${fact.subject}`,
@@ -2203,7 +3333,9 @@ app.get('/api/clients/:id/ai-budget', async (req, res) => {
   try {
     if (!(await clientExists(req.params.id))) return res.status(404).json({ error: 'Cliente no encontrado.' });
     const overview = await getAiBudgetOverview(req.params.id);
-    const events = await db.all('SELECT kind, amount_clp, notes, created_at FROM ai_budget_events WHERE client_id = ? ORDER BY created_at DESC LIMIT 8', [req.params.id]);
+    const events = studioDbBackend === 'postgres'
+      ? await studioSupabaseRequest(`/rest/v1/ai_budget_events?client_id=eq.${encodeURIComponent(req.params.id)}&select=kind,amount_clp,notes,created_at&order=created_at.desc&limit=8`)
+      : await db.all('SELECT kind, amount_clp, notes, created_at FROM ai_budget_events WHERE client_id = ? ORDER BY created_at DESC LIMIT 8', [req.params.id]);
     res.json({ ...overview, events });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
@@ -2211,11 +3343,38 @@ app.get('/api/clients/:id/ai-budget', async (req, res) => {
 app.get('/api/clients/:id/infrastructure', async (req, res) => {
   try {
     if (!(await clientExists(req.params.id))) return res.status(404).json({ error: 'Cliente no encontrado.' });
-    const record = await db.get('SELECT supabase_url, project_ref, credential_alias, credential_hint, connection_status, last_checked_at, updated_at FROM client_infrastructure WHERE client_id = ?', [req.params.id]);
+    const record = await studioInfraRow(req.params.id, 'supabase_url, project_ref, credential_alias, credential_hint, connection_status, last_checked_at, updated_at, vercel_project_url, migration_applied, catalog_seeded, env_vars_set');
     res.json({
-      ...(record || { supabase_url: '', project_ref: '', credential_alias: '', credential_hint: '', connection_status: 'not_configured', last_checked_at: null }),
+      ...(record || { supabase_url: '', project_ref: '', credential_alias: '', credential_hint: '', connection_status: 'not_configured', last_checked_at: null, vercel_project_url: '', migration_applied: 0, catalog_seeded: 0, env_vars_set: 0 }),
+      migration_applied: Boolean(record?.migration_applied),
+      catalog_seeded: Boolean(record?.catalog_seeded),
+      env_vars_set: Boolean(record?.env_vars_set),
       vault_configured: await localVault.exists(req.params.id)
     });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Checklist de despliegue: pasos externos (migración, catálogo, Vercel, env vars) que hoy sólo
+// vivían como procedimiento escrito en PROJECT_CONTEXT.md. Marcado manual — Studio no orquesta
+// Supabase/Vercel por sí solo, sólo deja visible qué falta para este cliente.
+app.put('/api/clients/:id/deployment-checklist', async (req, res) => {
+  const { vercelProjectUrl, migrationApplied, catalogSeeded, envVarsSet } = req.body;
+  try {
+    if (!(await clientExists(req.params.id))) return res.status(404).json({ error: 'Cliente no encontrado.' });
+    const now = new Date().toISOString();
+    if (studioDbBackend === 'postgres') {
+      await studioSupabaseRequest('/rest/v1/client_infrastructure?on_conflict=client_id', {
+        method: 'POST', headers: { prefer: 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify({ client_id: req.params.id, updated_at: now, vercel_project_url: String(vercelProjectUrl || '').trim(), migration_applied: Boolean(migrationApplied), catalog_seeded: Boolean(catalogSeeded), env_vars_set: Boolean(envVarsSet) })
+      });
+    } else {
+      await db.run(`INSERT INTO client_infrastructure (client_id, updated_at, vercel_project_url, migration_applied, catalog_seeded, env_vars_set)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(client_id) DO UPDATE SET vercel_project_url=excluded.vercel_project_url, migration_applied=excluded.migration_applied, catalog_seeded=excluded.catalog_seeded, env_vars_set=excluded.env_vars_set, updated_at=excluded.updated_at`,
+        [req.params.id, now, String(vercelProjectUrl || '').trim(), migrationApplied ? 1 : 0, catalogSeeded ? 1 : 0, envVarsSet ? 1 : 0]);
+    }
+    await writeAudit('deployment_checklist_updated', 'client', req.params.id, { vercelProjectUrl: Boolean(vercelProjectUrl), migrationApplied: Boolean(migrationApplied), catalogSeeded: Boolean(catalogSeeded), envVarsSet: Boolean(envVarsSet) });
+    res.json({ message: 'Checklist de despliegue actualizado.' });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
@@ -2223,7 +3382,7 @@ app.get('/api/clients/:id/infrastructure', async (req, res) => {
 // Nunca se expone esta ruta al runtime ni se copia la credencial al navegador.
 app.get('/api/clients/:id/agenda-feedback', async (req, res) => {
   try {
-    const infra = await db.get('SELECT supabase_url FROM client_infrastructure WHERE client_id = ?', [req.params.id]);
+    const infra = await studioInfraRow(req.params.id, 'supabase_url');
     if (!infra?.supabase_url || !(await localVault.exists(req.params.id))) return res.status(409).json({ error: 'Configura el vault Supabase del cliente para revisar feedback remoto.' });
     const secret = await localVault.read(req.params.id);
     const [feedbackResponse, outboxResponse] = await Promise.all([
@@ -2236,6 +3395,93 @@ app.get('/api/clients/:id/agenda-feedback', async (req, res) => {
   } catch (error) { res.status(502).json({ error: `No se pudo consultar Agenda remota: ${error.message}` }); }
 });
 
+// Lectura local de mantenimiento: trae de un solo vistazo lo que un cliente con
+// Supabase real conectado tiene pendiente de revisión (handoffs abiertos y sugerencias
+// de conocimiento sin aprobar). Mismo patrón que /agenda-feedback: nunca se expone al runtime.
+app.get('/api/clients/:id/remote-inbox', async (req, res) => {
+  try {
+    const infra = await studioInfraRow(req.params.id, 'supabase_url');
+    if (!infra?.supabase_url || !(await localVault.exists(req.params.id))) return res.status(409).json({ error: 'Configura el vault Supabase del cliente para revisar la bandeja remota.' });
+    const secret = await localVault.read(req.params.id);
+    const headers = { apikey: secret, authorization: `Bearer ${secret}` };
+    const [handoffsResponse, suggestionsResponse, correctionsResponse] = await Promise.all([
+      fetch(`${infra.supabase_url}/rest/v1/za_handoff_tickets?status=eq.open&select=id,channel,customer_message,reason,created_at&order=created_at.desc&limit=20`, { headers, signal: AbortSignal.timeout(8000) }),
+      fetch(`${infra.supabase_url}/rest/v1/za_knowledge_suggestions?status=eq.pending&select=id,category,subject,value,created_at&order=created_at.desc&limit=20`, { headers, signal: AbortSignal.timeout(8000) }),
+      fetch(`${infra.supabase_url}/rest/v1/za_feedback_items?rating=eq.down&status=in.(new,reviewing)&select=id,question,reply,correction_text,status,created_at&order=created_at.desc&limit=20`, { headers, signal: AbortSignal.timeout(8000) })
+    ]);
+    if (!handoffsResponse.ok || !suggestionsResponse.ok || !correctionsResponse.ok) return res.status(502).json({ error: 'No se pudieron leer las tablas remotas; confirma que la migración está ejecutada.' });
+    const [handoffs, suggestions, corrections] = await Promise.all([handoffsResponse.json(), suggestionsResponse.json(), correctionsResponse.json()]);
+    // Datos/Info de inyección directa: son sólo visibilidad para Daniel (no requieren su
+    // aprobación), y la migración que las crea (agenda-v1-direct-data.sql) puede no estar
+    // aplicada todavía en este cliente — por eso se leen aparte y con fallo silencioso a [].
+    const [businessData, businessInfo] = await Promise.all([
+      fetch(`${infra.supabase_url}/rest/v1/za_business_data?active=eq.true&select=id,label,value,category,created_at&order=created_at.desc&limit=30`, { headers, signal: AbortSignal.timeout(8000) }).then(r => r.ok ? r.json() : []).catch(() => []),
+      fetch(`${infra.supabase_url}/rest/v1/za_business_info?active=eq.true&select=id,text,created_at&order=created_at.desc&limit=30`, { headers, signal: AbortSignal.timeout(8000) }).then(r => r.ok ? r.json() : []).catch(() => [])
+    ]);
+    res.json({ handoffs, suggestions, corrections, businessData, businessInfo, checkedAt: new Date().toISOString() });
+  } catch (error) { res.status(502).json({ error: `No se pudo consultar la bandeja remota: ${error.message}` }); }
+});
+
+// Cambia el estado de una corrección real (caso de una conversación de producción con
+// rating negativo) después de que Daniel + Claude revisaron el caso y ajustaron prompt/
+// conocimiento localmente. No crea nada automático: el ajuste real se hace en Solución/Conocimiento.
+app.patch('/api/clients/:id/remote-inbox/corrections/:correctionId/status', async (req, res) => {
+  const { id: clientId, correctionId } = req.params;
+  const { status } = req.body;
+  if (!['reviewing', 'resolved', 'dismissed'].includes(status)) return res.status(400).json({ error: 'Estado inválido.' });
+  try {
+    const infra = await studioInfraRow(clientId, 'supabase_url');
+    if (!infra?.supabase_url || !(await localVault.exists(clientId))) return res.status(409).json({ error: 'Configura el vault Supabase del cliente primero.' });
+    const secret = await localVault.read(clientId);
+    const headers = { apikey: secret, authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' };
+    const body = { status, ...(status === 'resolved' ? { resolved_at: new Date().toISOString() } : {}) };
+    const patchResponse = await fetch(`${infra.supabase_url}/rest/v1/za_feedback_items?id=eq.${encodeURIComponent(correctionId)}`, { method: 'PATCH', headers, body: JSON.stringify(body) });
+    if (!patchResponse.ok) return res.status(502).json({ error: 'No se pudo actualizar la corrección remota.' });
+    await writeAudit('remote_correction_status_updated', 'feedback_item', correctionId, { clientId, status });
+    res.json({ message: 'Corrección actualizada.' });
+  } catch (error) { res.status(502).json({ error: `No se pudo actualizar la corrección: ${error.message}` }); }
+});
+
+// Aprueba una sugerencia de conocimiento remota: la convierte en un knowledge_item local
+// (aparece en Conocimiento, entra a la próxima versión) y marca la sugerencia como aprobada
+// en el Supabase del cliente para que no vuelva a aparecer pendiente.
+app.post('/api/clients/:id/remote-inbox/suggestions/:suggestionId/approve', async (req, res) => {
+  const { id: clientId, suggestionId } = req.params;
+  try {
+    const infra = await studioInfraRow(clientId, 'supabase_url');
+    if (!infra?.supabase_url || !(await localVault.exists(clientId))) return res.status(409).json({ error: 'Configura el vault Supabase del cliente primero.' });
+    const secret = await localVault.read(clientId);
+    const headers = { apikey: secret, authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' };
+    const lookup = await fetch(`${infra.supabase_url}/rest/v1/za_knowledge_suggestions?id=eq.${encodeURIComponent(suggestionId)}&select=id,category,subject,value,status`, { headers, signal: AbortSignal.timeout(8000) });
+    if (!lookup.ok) return res.status(502).json({ error: 'No se pudo leer la sugerencia remota.' });
+    const [suggestion] = await lookup.json();
+    if (!suggestion) return res.status(404).json({ error: 'Sugerencia no encontrada.' });
+    if (suggestion.status !== 'pending') return res.status(409).json({ error: 'Esta sugerencia ya fue revisada.' });
+
+    const itemId = `knowledge-${randomUUID()}`;
+    const confirmedAt = new Date().toISOString();
+    if (studioDbBackend === 'postgres') {
+      await studioSupabaseRequest('/rest/v1/knowledge_items', {
+        method: 'POST', headers: { prefer: 'return=minimal' },
+        body: JSON.stringify({ id: itemId, client_id: clientId, source_id: null, category: suggestion.category, subject: suggestion.subject, value: suggestion.value, status: 'approved', notes: 'Aprobado desde sugerencia del cliente.', confirmed_at: confirmedAt })
+      });
+    } else {
+      await db.run(`
+        INSERT INTO knowledge_items (id, client_id, source_id, category, subject, value, status, notes, confirmed_at)
+        VALUES (?, ?, NULL, ?, ?, ?, 'approved', ?, ?)
+      `, [itemId, clientId, suggestion.category, suggestion.subject, suggestion.value, 'Aprobado desde sugerencia del cliente.', confirmedAt]);
+    }
+
+    const patchResponse = await fetch(`${infra.supabase_url}/rest/v1/za_knowledge_suggestions?id=eq.${encodeURIComponent(suggestionId)}`, {
+      method: 'PATCH', headers, body: JSON.stringify({ status: 'approved' })
+    });
+    if (!patchResponse.ok) return res.status(502).json({ error: 'El dato se guardó local, pero no se pudo marcar la sugerencia remota como aprobada.' });
+
+    await writeAudit('remote_knowledge_suggestion_approved', 'knowledge_item', itemId, { clientId, suggestionId });
+    res.status(201).json({ message: 'Sugerencia aprobada e incorporada al conocimiento del cliente.', itemId });
+  } catch (error) { res.status(502).json({ error: `No se pudo aprobar la sugerencia: ${error.message}` }); }
+});
+
 app.put('/api/clients/:id/infrastructure', async (req, res) => {
   const { supabaseUrl = '', projectRef = '', secretKey = '' } = req.body;
   if (supabaseUrl && !/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/i.test(supabaseUrl.trim())) {
@@ -2243,13 +3489,20 @@ app.put('/api/clients/:id/infrastructure', async (req, res) => {
   }
   try {
     const now = new Date().toISOString();
-    const existing = await db.get('SELECT credential_hint FROM client_infrastructure WHERE client_id = ?', [req.params.id]);
+    const existing = await studioInfraRow(req.params.id, 'credential_hint');
     let hint = existing?.credential_hint || '';
     if (secretKey.trim()) hint = (await localVault.store(req.params.id, secretKey)).hint;
-    await db.run(`INSERT INTO client_infrastructure (client_id, supabase_url, project_ref, credential_alias, credential_hint, connection_status, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(client_id) DO UPDATE SET supabase_url=excluded.supabase_url, project_ref=excluded.project_ref, credential_alias=excluded.credential_alias, credential_hint=excluded.credential_hint, connection_status=excluded.connection_status, updated_at=excluded.updated_at`,
-      [req.params.id, supabaseUrl.trim().replace(/\/$/, ''), projectRef.trim(), `zeroagent/${req.params.id}/supabase`, hint, hint ? 'saved_unverified' : 'not_configured', now]);
+    if (studioDbBackend === 'postgres') {
+      await studioSupabaseRequest('/rest/v1/client_infrastructure?on_conflict=client_id', {
+        method: 'POST', headers: { prefer: 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify({ client_id: req.params.id, supabase_url: supabaseUrl.trim().replace(/\/$/, ''), project_ref: projectRef.trim(), credential_alias: `zeroagent/${req.params.id}/supabase`, credential_hint: hint, connection_status: hint ? 'saved_unverified' : 'not_configured', updated_at: now })
+      });
+    } else {
+      await db.run(`INSERT INTO client_infrastructure (client_id, supabase_url, project_ref, credential_alias, credential_hint, connection_status, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(client_id) DO UPDATE SET supabase_url=excluded.supabase_url, project_ref=excluded.project_ref, credential_alias=excluded.credential_alias, credential_hint=excluded.credential_hint, connection_status=excluded.connection_status, updated_at=excluded.updated_at`,
+        [req.params.id, supabaseUrl.trim().replace(/\/$/, ''), projectRef.trim(), `zeroagent/${req.params.id}/supabase`, hint, hint ? 'saved_unverified' : 'not_configured', now]);
+    }
     await writeAudit('infrastructure_saved', 'client', req.params.id, { supabaseUrl: Boolean(supabaseUrl), projectRef, secretStored: Boolean(secretKey.trim()) });
     res.json({ message: 'Infraestructura guardada en vault local.' });
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -2257,7 +3510,7 @@ app.put('/api/clients/:id/infrastructure', async (req, res) => {
 
 app.post('/api/clients/:id/infrastructure/test', async (req, res) => {
   try {
-    const infra = await db.get('SELECT supabase_url FROM client_infrastructure WHERE client_id = ?', [req.params.id]);
+    const infra = await studioInfraRow(req.params.id, 'supabase_url');
     if (!infra?.supabase_url || !(await localVault.exists(req.params.id))) return res.status(409).json({ error: 'Primero configura URL y credencial del proyecto.' });
     const secret = await localVault.read(req.params.id);
     const headers = { apikey: secret, authorization: `Bearer ${secret}` };
@@ -2267,7 +3520,14 @@ app.post('/api/clients/:id/infrastructure/test', async (req, res) => {
     ]);
     const now = new Date().toISOString();
     const ok = adminResponse.ok && agendaResponse.ok;
-    await db.run('UPDATE client_infrastructure SET connection_status = ?, last_checked_at = ?, updated_at = ? WHERE client_id = ?', [ok ? 'connected' : 'failed', now, now, req.params.id]);
+    if (studioDbBackend === 'postgres') {
+      await studioSupabaseRequest(`/rest/v1/client_infrastructure?client_id=eq.${encodeURIComponent(req.params.id)}`, {
+        method: 'PATCH', headers: { prefer: 'return=minimal' },
+        body: JSON.stringify({ connection_status: ok ? 'connected' : 'failed', last_checked_at: now, updated_at: now })
+      });
+    } else {
+      await db.run('UPDATE client_infrastructure SET connection_status = ?, last_checked_at = ?, updated_at = ? WHERE client_id = ?', [ok ? 'connected' : 'failed', now, now, req.params.id]);
+    }
     if (!adminResponse.ok) return res.status(502).json({ error: `La credencial no tiene autoridad de service role (${adminResponse.status}).` });
     if (!agendaResponse.ok) return res.status(502).json({ error: `Supabase respondió, pero Agenda v1 no está instalada o accesible (${agendaResponse.status}).` });
     await writeAudit('infrastructure_connection_tested', 'client', req.params.id, { authStatus: adminResponse.status, agendaStatus: agendaResponse.status });
@@ -2278,7 +3538,11 @@ app.post('/api/clients/:id/infrastructure/test', async (req, res) => {
 app.delete('/api/clients/:id/infrastructure', async (req, res) => {
   try {
     await localVault.remove(req.params.id);
-    await db.run('DELETE FROM client_infrastructure WHERE client_id = ?', [req.params.id]);
+    if (studioDbBackend === 'postgres') {
+      await studioSupabaseRequest(`/rest/v1/client_infrastructure?client_id=eq.${encodeURIComponent(req.params.id)}`, { method: 'DELETE', headers: { prefer: 'return=minimal' } });
+    } else {
+      await db.run('DELETE FROM client_infrastructure WHERE client_id = ?', [req.params.id]);
+    }
     await writeAudit('infrastructure_removed', 'client', req.params.id, {});
     res.json({ message: 'Credencial local revocada y olvidada.' });
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -2287,8 +3551,19 @@ app.delete('/api/clients/:id/infrastructure', async (req, res) => {
 app.put('/api/clients/:id/ai-budget', async (req, res) => {
   const { provider = 'openai', model = 'gpt-4o-mini', cycleBudgetClp, usdClp = 922, paused = false } = req.body;
   if (!Number.isFinite(Number(cycleBudgetClp)) || Number(cycleBudgetClp) < 0) return res.status(400).json({ error: 'Presupuesto inválido.' });
+  const now = new Date().toISOString();
+  if (studioDbBackend === 'postgres') {
+    try {
+      await studioSupabaseRequest('/rest/v1/ai_budget_configs?on_conflict=client_id', {
+        method: 'POST', headers: { prefer: 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify({ client_id: req.params.id, provider, model, cycle_budget_clp: Number(cycleBudgetClp), usd_clp: Number(usdClp), cycle_started_at: now, paused: Boolean(paused), updated_at: now })
+      });
+      await writeAudit('ai_budget_configured', 'client', req.params.id, { provider, model, cycleBudgetClp, paused });
+      res.json(await getAiBudgetOverview(req.params.id));
+    } catch (error) { res.status(500).json({ error: error.message }); }
+    return;
+  }
   try {
-    const now = new Date().toISOString();
     await db.run(`INSERT INTO ai_budget_configs (client_id, provider, model, cycle_budget_clp, usd_clp, cycle_started_at, paused, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(client_id) DO UPDATE SET provider=excluded.provider, model=excluded.model, cycle_budget_clp=excluded.cycle_budget_clp, usd_clp=excluded.usd_clp, paused=excluded.paused, updated_at=excluded.updated_at`,
@@ -2301,6 +3576,16 @@ app.put('/api/clients/:id/ai-budget', async (req, res) => {
 app.post('/api/clients/:id/ai-budget/recharge', async (req, res) => {
   const { amountClp, notes = '' } = req.body;
   if (!Number.isFinite(Number(amountClp)) || Number(amountClp) <= 0) return res.status(400).json({ error: 'Indica un monto de recarga válido.' });
+  if (studioDbBackend === 'postgres') {
+    try {
+      await studioSupabaseRequest('/rest/v1/rpc/studio_recharge_ai_budget', {
+        method: 'POST', body: JSON.stringify({ p_client_id: req.params.id, p_amount_clp: Number(amountClp), p_notes: notes })
+      });
+      await writeAudit('ai_budget_recharged', 'client', req.params.id, { amountClp });
+      res.json(await getAiBudgetOverview(req.params.id));
+    } catch (error) { res.status(500).json({ error: error.message }); }
+    return;
+  }
   try {
     const existing = await getAiBudgetOverview(req.params.id);
     const now = new Date().toISOString();
@@ -2321,8 +3606,18 @@ app.post('/api/clients/:id/ai-usage', async (req, res) => {
   if (process.env.ZEROAGENT_METRICS_TOKEN && req.headers.authorization !== `Bearer ${process.env.ZEROAGENT_METRICS_TOKEN}`) {
     return res.status(401).json({ error: 'Telemetría no autorizada.' });
   }
+  const cost = estimateUsageUsd(model, inputTokens, outputTokens);
+  if (studioDbBackend === 'postgres') {
+    try {
+      await studioSupabaseRequest('/rest/v1/ai_usage_records', {
+        method: 'POST', headers: { prefer: 'return=minimal' },
+        body: JSON.stringify({ id: `usage-${randomUUID()}`, client_id: req.params.id, occurred_at: new Date().toISOString(), provider, model, input_tokens: Number(inputTokens) || 0, output_tokens: Number(outputTokens) || 0, estimated_cost_usd: cost, conversation_ref: conversationRef, source })
+      });
+      res.status(201).json({ estimatedCostUsd: cost, ...(await getAiBudgetOverview(req.params.id)) });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+    return;
+  }
   try {
-    const cost = estimateUsageUsd(model, inputTokens, outputTokens);
     await db.run(`INSERT INTO ai_usage_records (id, client_id, occurred_at, provider, model, input_tokens, output_tokens, estimated_cost_usd, conversation_ref, source)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [`usage-${randomUUID()}`, req.params.id, new Date().toISOString(), provider, model, Number(inputTokens) || 0, Number(outputTokens) || 0, cost, conversationRef, source]);
@@ -2342,9 +3637,11 @@ app.post('/api/clients/:id/playground/chat', async (req, res) => {
     let packageData;
     let versionMeta;
     if (versionId) {
-      const version = await db.get('SELECT id, version, status, package_json FROM agent_versions WHERE id = ? AND client_id = ?', [versionId, clientId]);
+      const version = studioDbBackend === 'postgres'
+        ? (await studioSupabaseRequest(`/rest/v1/agent_versions?id=eq.${encodeURIComponent(versionId)}&client_id=eq.${encodeURIComponent(clientId)}&select=id,version,status,package_json`))?.[0]
+        : await db.get('SELECT id, version, status, package_json FROM agent_versions WHERE id = ? AND client_id = ?', [versionId, clientId]);
       if (!version) return res.status(404).json({ error: 'Versión no encontrada.' });
-      packageData = JSON.parse(version.package_json);
+      packageData = studioDbBackend === 'postgres' ? version.package_json : JSON.parse(version.package_json);
       versionMeta = { id: version.id, number: version.version, status: version.status };
     } else {
       packageData = await buildClientPackage(clientId);
@@ -2360,9 +3657,16 @@ app.post('/api/clients/:id/playground/chat', async (req, res) => {
     });
     const inputTokens = Number(result.usage?.inputTokens) || 0;
     const outputTokens = Number(result.usage?.outputTokens) || 0;
-    await db.run(`INSERT INTO ai_usage_records (id, client_id, occurred_at, provider, model, input_tokens, output_tokens, estimated_cost_usd, conversation_ref, source)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'playground', 'studio_playground')`,
-      [`usage-${randomUUID()}`, clientId, new Date().toISOString(), result.provider || 'deterministic', result.model || 'deterministic', inputTokens, outputTokens]);
+    if (studioDbBackend === 'postgres') {
+      await studioSupabaseRequest('/rest/v1/ai_usage_records', {
+        method: 'POST', headers: { prefer: 'return=minimal' },
+        body: JSON.stringify({ id: `usage-${randomUUID()}`, client_id: clientId, occurred_at: new Date().toISOString(), provider: result.provider || 'deterministic', model: result.model || 'deterministic', input_tokens: inputTokens, output_tokens: outputTokens, estimated_cost_usd: 0, conversation_ref: 'playground', source: 'studio_playground' })
+      });
+    } else {
+      await db.run(`INSERT INTO ai_usage_records (id, client_id, occurred_at, provider, model, input_tokens, output_tokens, estimated_cost_usd, conversation_ref, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'playground', 'studio_playground')`,
+        [`usage-${randomUUID()}`, clientId, new Date().toISOString(), result.provider || 'deterministic', result.model || 'deterministic', inputTokens, outputTokens]);
+    }
     const sources = new Set(Array.isArray(result.source) ? result.source : [result.source].filter(Boolean));
     const retrievedContext = (packageData.knowledge?.confirmed_facts || []).filter(fact => sources.has(fact.subject));
     res.json({
@@ -2391,23 +3695,25 @@ app.get('/api/settings/export', async (req, res) => {
 app.post('/api/settings/import', async (req, res) => {
   const snapshot = req.body;
   const tables = snapshot?.tables;
-  const restoreOrder = [
-    'clients', 'audit_events', 'source_files', 'intake_jobs', 'agent_versions',
-    'documents', 'knowledge_items', 'agent_tests', 'chats', 'conversation_feedback',
-    'ai_budget_configs', 'ai_usage_records', 'ai_budget_events', 'client_infrastructure',
-    'agenda_configs', 'onboarding_sessions', 'onboarding_responses', 'onboarding_files',
-    'commercial_leads', 'prospecting_searches', 'prospects', 'prospect_activities'
-  ];
-  if (snapshot?.snapshot_version !== 2 || !tables || !restoreOrder.every(table => Array.isArray(tables[table]))) {
+  if (snapshot?.snapshot_version !== 2 || !tables || !studioAllTables.every(table => Array.isArray(tables[table]))) {
     return res.status(400).json({ error: 'El archivo no es un respaldo ZeroAgent v2 completo. No se modificó la base de datos.' });
+  }
+  if (studioDbBackend === 'postgres') {
+    try {
+      const snapshotPath = await createDataSnapshot('before-import');
+      await studioSupabaseRequest('/rest/v1/rpc/studio_restore_snapshot', { method: 'POST', body: JSON.stringify({ p_snapshot: snapshot }) });
+      await writeAudit('import_database', 'database', 'local', { snapshot_path: snapshotPath, clients_imported: tables.clients.length });
+      res.json({ message: 'Respaldo completo restaurado con éxito.' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+    return;
   }
   try {
     const snapshotPath = await createDataSnapshot('before-import');
     await db.exec('PRAGMA foreign_keys = OFF;');
     await db.exec('BEGIN IMMEDIATE;');
     try {
-      for (const table of [...restoreOrder].reverse()) await db.exec(`DELETE FROM ${table};`);
-      for (const table of restoreOrder) {
+      for (const table of [...studioAllTables].reverse()) await db.exec(`DELETE FROM ${table};`);
+      for (const table of studioAllTables) {
         const columns = (await db.all(`PRAGMA table_info(${table});`)).map(item => item.name);
         for (const row of tables[table]) {
           const rowColumns = columns.filter(column => Object.hasOwn(row, column));
@@ -2431,6 +3737,16 @@ app.post('/api/settings/import', async (req, res) => {
 
 // Resetear base de datos completa a los valores por defecto
 app.post('/api/settings/reset', async (req, res) => {
+  if (studioDbBackend === 'postgres') {
+    try {
+      const snapshotPath = await createDataSnapshot('before-reset');
+      await studioSupabaseRequest('/rest/v1/rpc/studio_reset_database', { method: 'POST', body: JSON.stringify({}) });
+      await seedDatabase();
+      await writeAudit('reset_database', 'database', 'local', { snapshot_path: snapshotPath });
+      res.json({ message: 'Base de datos re-establecida a los valores iniciales.' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+    return;
+  }
   try {
     const snapshotPath = await createDataSnapshot('before-reset');
     await db.exec('DELETE FROM prospect_activities;');
@@ -2446,7 +3762,7 @@ app.post('/api/settings/reset', async (req, res) => {
     await db.exec('DELETE FROM chats;');
     await db.exec('DELETE FROM documents;');
     await db.exec('DELETE FROM clients;');
-    
+
     // Forzar re-sembrado de manera segura sin re-abrir la conexión SQLite
     await seedDatabase();
     await writeAudit('reset_database', 'database', 'local', { snapshot_path: snapshotPath });
@@ -2459,15 +3775,21 @@ app.post('/api/settings/reset', async (req, res) => {
 // ==========================================
 // ARRANQUE DEL SERVIDOR
 // ==========================================
-initDatabase()
-  .then(() => {
-    app.listen(PORT, '127.0.0.1', () => {
-      console.log(`\n==========================================`);
-      console.log(`🚀 ZeroAgent Backend activo en puerto ${PORT}`);
-      console.log(`🌐 Acceso local: http://localhost:${PORT}`);
-      console.log(`==========================================\n`);
-    });
-  })
-  .catch(err => {
-    console.error('Error al inicializar la base de datos:', err);
+(async () => {
+  await ensureStorageDirectories();
+  if (studioDbBackend === 'postgres') {
+    if (!studioSupabaseSettings()) throw new Error('STUDIO_DB_BACKEND=postgres pero faltan STUDIO_SUPABASE_URL/STUDIO_SUPABASE_SERVICE_ROLE_KEY.');
+    console.log('Backend de base de datos: postgres (Supabase propio de Studio).');
+  } else {
+    await initDatabase();
+    console.log('Backend de base de datos: sqlite (local).');
+  }
+  app.listen(PORT, '127.0.0.1', () => {
+    console.log(`\n==========================================`);
+    console.log(`🚀 ZeroAgent Backend activo en puerto ${PORT}`);
+    console.log(`🌐 Acceso local: http://localhost:${PORT}`);
+    console.log(`==========================================\n`);
   });
+})().catch(err => {
+  console.error('Error al inicializar la base de datos:', err);
+});

@@ -1,27 +1,45 @@
-import { loadPackage, answer } from './engine.js';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { answer } from './engine.js';
 import { getAgendaToolDefinitions } from './agenda-tools.js';
+import { matchExpectedBehavior } from './regression-match.js';
 
-const packageData = await loadPackage();
+// agent-package.json es un artefacto por-cliente que Studio genera al construir un build — no
+// existe en la plantilla suelta. Sin un fallback, `npm test` en runtime-template fallaba con
+// ENOENT y no había forma de correr esta prueba sin haber construido un cliente primero. Se usa
+// el paquete real si existe (build de un cliente) y si no, el fixture mínimo versionado.
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const realPackagePath = path.join(root, 'agent-package.json');
+const fixturePackagePath = path.join(root, 'agent-package.fixture.json');
+const packagePath = await fs.access(realPackagePath).then(() => realPackagePath).catch(() => fixturePackagePath);
+if (packagePath === fixturePackagePath) console.log('(usando agent-package.fixture.json — no hay un cliente construido en esta carpeta)');
+const packageData = JSON.parse(await fs.readFile(packagePath, 'utf8'));
 const tests = packageData.tests || [];
 let failures = 0;
 for (const test of tests) {
   const result = answer(packageData, test.question);
-  const expected = String(test.expected_behavior || '').toLowerCase();
-  const actual = String(result.text || '').toLowerCase();
-  // El vínculo a un hecho permite trazabilidad, pero no es evidencia de que la
-  // respuesta siga siendo correcta: el valor del hecho podría estar corrompido.
-  // Una regresión sólo pasa si conserva vocabulario significativo aprobado.
-  const expectedTerms = expected.split(/[^\p{L}\p{N}]+/u).filter(word => word.length > 3);
-  const passed = expectedTerms.length > 0 && expectedTerms.some(word => actual.includes(word));
+  const expected = String(test.expected_behavior || '');
+  const actual = String(result.text || '');
+  // Evaluación determinista en español: compara raíces morfológicas (convenio/convenios,
+  // diagnosticar/diagnóstico), conserva polaridad y números, y excluye verbos de redacción
+  // como "aclarar" o "indicar" que no constituyen evidencia del contenido esperado.
+  const evaluation = matchExpectedBehavior(expected, actual);
+  const passed = evaluation.passed;
   console.log(`${passed ? 'PASS' : 'FAIL'} · ${test.question}`);
-  if (!passed) failures++;
+  if (!passed) {
+    console.log(`  esperadas=${evaluation.expectedTerms.join(', ')} · coinciden=${evaluation.matchedTerms.join(', ') || '(ninguna)'} · mínimo=${evaluation.minimumMatches}`);
+    console.log(`  respuesta=${actual}`);
+    failures++;
+  }
 }
 const agenda = packageData.solutions?.agenda;
 if (agenda?.config?.enabled) {
-  const requiredTools = ['get_availability', 'get_my_appointment', 'create_appointment', 'cancel_appointment', 'reschedule_appointment', 'request_human_handoff'];
+  const requiredTools = ['get_availability', 'get_my_appointment', 'create_appointment', 'cancel_appointment', 'reschedule_appointment', 'update_customer_profile', 'request_human_handoff'];
   const actualTools = getAgendaToolDefinitions(packageData).map(item => item.function.name);
+  const declaredTools = agenda.agent_flow_contract?.tools || [];
   for (const name of requiredTools) {
-    const passed = actualTools.includes(name);
+    const passed = actualTools.includes(name) && declaredTools.includes(name);
     console.log(`${passed ? 'PASS' : 'FAIL'} · Agenda tool contract · ${name}`);
     if (!passed) failures++;
   }

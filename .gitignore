@@ -7,9 +7,13 @@
 database.sqlite
 database.sqlite-shm
 database.sqlite-wal
+database.sqlite.pre-migration-backup*
 
 # Dependencias
 node_modules/
+
+# Vínculo local Vercel CLI (por proyecto, no se comparte entre máquinas)
+.vercel/
 
 # Artefactos y datos locales
 storage/agent-builds/
@@ -21,6 +25,13 @@ storage/vault-qa/
 storage/*.out
 storage/*.err
 .zeroagent/inbox/
+
+# Artefactos locales del runtime empaquetado (no deben viajar dentro del template)
+runtime-template/storage/
+
+# Fotos sueltas en la raíz ya homologadas en storage/client-landings/franciskom/
+/corporativa fransisco.png
+/sesion paso a paso fransiscokom.jpeg
 
 # Temporales
 *.log

@@ -18,9 +18,124 @@ function onboardingUrl(){return onboarding?.url?new URL(onboarding.url,location.
 function openOnboarding(){const url=onboardingUrl();if(url)window.open(url,'_blank','noopener')}
 async function copyOnboarding(){const url=onboardingUrl();if(!url)return;await navigator.clipboard.writeText(url);$('#onboarding-studio-message').textContent='Enlace copiado. Ya puedes enviárselo al dueño.'}
 
-async function renderActivity(){const feed=$('#global-activity-feed'),summary=$('#global-attention-summary');if(!feed||!summary)return;try{const clients=await getClients();const items=[];let pending=0,corrections=0,onboardings=0,installations=0;for(const client of clients){for(const job of client.intakeJobs||[]){if(['pending_ide','under_review'].includes(job.status)){pending++;items.push({icon:'file-search',title:`${client.name} · fuente ${job.status==='pending_ide'?'pendiente':'en revisión'}`,copy:job.instructions||'Revisar propuesta de conocimiento.',date:job.created_at})}}for(const feedback of client.feedback||[]){if(feedback.rating==='down'){corrections++;items.push({icon:'message-circle-warning',title:`${client.name} · corrección recibida`,copy:feedback.correction_text||'El cliente indicó que una respuesta debe corregirse.',date:feedback.created_at})}}if(client.onboarding?.status==='submitted'){onboardings++;items.push({icon:'clipboard-check',title:`${client.name} · entrevista terminada`,copy:'El dueño envió información lista para revisión.',date:client.onboarding.submitted_at})}for(const version of client.versions||[]){if(version.status==='approved'){installations++;items.push({icon:'package-check',title:`${client.name} · v${version.version} aprobada`,copy:version.summary||'Versión preparada para preview o instalación.',date:version.approved_at||version.created_at})}}}items.sort((a,b)=>String(b.date).localeCompare(String(a.date)));feed.innerHTML=items.length?items.slice(0,30).map(item=>`<article class="activity-row"><span class="activity-icon"><i data-lucide="${item.icon}"></i></span><div class="activity-copy"><strong>${esc(item.title)}</strong><p>${esc(item.copy)}</p></div><time>${esc(dateLabel(item.date))}</time></article>`).join(''):'<div class="no-data-placeholder"><h4>Todo al día</h4><p>Las acciones importantes aparecerán aquí.</p></div>';summary.innerHTML=`<span class="eyebrow">ATENCIÓN</span><h4>Resumen del portafolio</h4><div class="attention-item"><span>Fuentes por revisar</span><b>${pending}</b></div><div class="attention-item"><span>Correcciones</span><b>${corrections}</b></div><div class="attention-item"><span>Onboarding recibido</span><b>${onboardings}</b></div><div class="attention-item"><span>Versiones aprobadas</span><b>${installations}</b></div>`;$('#activity-nav-count').textContent=pending+corrections+onboardings;window.lucide?.createIcons()}catch(error){feed.innerHTML=`<p class="text-muted">${esc(error.message)}</p>`}}
+async function fetchRemoteInboxSummary(clientId){try{const infraRes=await fetch(`/api/clients/${encodeURIComponent(clientId)}/infrastructure`);if(!infraRes.ok)return null;const infra=await infraRes.json();if(!infra.vault_configured)return null;const res=await fetch(`/api/clients/${encodeURIComponent(clientId)}/remote-inbox`);if(!res.ok)return null;return await res.json()}catch{return null}}
+
+// Lleva al cliente + vista donde el ítem de actividad se revisa/resuelve de verdad,
+// para que el conteo del resumen nunca sea un número sin acción posible.
+function jumpToActivityItem(clientId,view){
+  if(!clientId||!view) return;
+  const select=$('#global-client-select');
+  if(select && select.value!==clientId){select.value=clientId;select.dispatchEvent(new Event('change',{bubbles:true}))}
+  const menuItem=document.querySelector(`.menu-item[data-view="${view}"]`);
+  menuItem?.click();
+}
+window.jumpToActivityItem=jumpToActivityItem;
+
+async function renderActivity(){
+  const feed=$('#global-activity-feed'), summary=$('#global-attention-summary');
+  if(!feed||!summary) return;
+  try{
+    const clients=await getClients();
+    const items=[];
+    let pending=0,corrections=0,onboardings=0,installations=0,handoffsOpen=0,suggestionsPending=0,realCorrections=0;
+    // target[categoria]: a qué cliente+vista salta un clic en el número del resumen
+    // (el primero que aportó al conteo — hoy sólo hay un cliente real, así que siempre es correcto).
+    const targets={};
+    const setTarget=(key,clientId,view)=>{if(!targets[key])targets[key]={clientId,view}};
+    for(const client of clients){
+      for(const job of client.intakeJobs||[]){
+        if(['pending_ide','under_review'].includes(job.status)){
+          pending++;
+          setTarget('pending',client.id,'sources');
+          items.push({icon:'file-search',title:`${client.name} · fuente ${job.status==='pending_ide'?'pendiente':'en revisión'}`,copy:job.instructions||'Revisar propuesta de conocimiento.',date:job.created_at,clientId:client.id,view:'sources'});
+        }
+      }
+      for(const feedback of client.feedback||[]){
+        if(feedback.rating==='down'){
+          corrections++;
+          setTarget('corrections',client.id,'simulator');
+          items.push({icon:'message-circle-warning',title:`${client.name} · corrección recibida`,copy:feedback.correction_text||'El cliente indicó que una respuesta debe corregirse.',date:feedback.created_at,clientId:client.id,view:'simulator'});
+        }
+      }
+      if(client.onboarding?.status==='submitted'){
+        onboardings++;
+        setTarget('onboardings',client.id,'project');
+        items.push({icon:'clipboard-check',title:`${client.name} · entrevista terminada`,copy:'El dueño envió información lista para revisión.',date:client.onboarding.submitted_at,clientId:client.id,view:'project'});
+      }
+      for(const version of client.versions||[]){
+        if(version.status==='approved'){
+          installations++;
+          setTarget('installations',client.id,'project');
+          items.push({icon:'package-check',title:`${client.name} · v${version.version} aprobada`,copy:version.summary||'Versión preparada para preview o instalación.',date:version.approved_at||version.created_at,clientId:client.id,view:'project'});
+        }
+      }
+    }
+    // Barrido remoto: una llamada por cliente, todas en paralelo (no una por una) para que
+    // esto siga siendo rápido sin importar cuántos clientes con vault configurado existan.
+    const remoteResults=await Promise.all(clients.map(client=>fetchRemoteInboxSummary(client.id).then(remote=>({client,remote}))));
+    for(const {client,remote} of remoteResults){
+      if(!remote) continue;
+      for(const ticket of remote.handoffs||[]){
+        handoffsOpen++;
+        setTarget('handoffsOpen',client.id,'simulator');
+        items.push({icon:'life-buoy',title:`${client.name} · caso derivado abierto`,copy:ticket.reason||ticket.customer_message||'Un cliente quedó esperando atención humana.',date:ticket.created_at,clientId:client.id,view:'simulator'});
+      }
+      for(const suggestion of remote.suggestions||[]){
+        suggestionsPending++;
+        setTarget('suggestionsPending',client.id,'knowledge');
+        items.push({icon:'lightbulb',title:`${client.name} · sugerencia de conocimiento`,copy:`${suggestion.subject}: ${suggestion.value}`,date:suggestion.created_at,clientId:client.id,view:'knowledge'});
+      }
+      for(const correction of remote.corrections||[]){
+        realCorrections++;
+        setTarget('realCorrections',client.id,'simulator');
+        items.push({icon:'message-circle-warning',title:`${client.name} · corrección de un cliente real`,copy:correction.correction_text||correction.reply||'Un cliente marcó una respuesta real como incorrecta.',date:correction.created_at,clientId:client.id,view:'simulator'});
+      }
+    }
+    items.sort((a,b)=>String(b.date).localeCompare(String(a.date)));
+    feed.innerHTML=items.length?items.slice(0,30).map(item=>{const clickable=item.clientId&&item.view;return `<article class="activity-row${clickable?' activity-row-clickable':''}"${clickable?` role="button" tabindex="0" data-client-id="${esc(item.clientId)}" data-view="${esc(item.view)}"`:''}><span class="activity-icon"><i data-lucide="${item.icon}"></i></span><div class="activity-copy"><strong>${esc(item.title)}</strong><p>${esc(item.copy)}</p></div><time>${esc(dateLabel(item.date))}</time></article>`}).join(''):'<div class="no-data-placeholder"><h4>Todo al día</h4><p>Las acciones importantes aparecerán aquí.</p></div>';
+    feed.querySelectorAll('.activity-row-clickable').forEach(row=>{
+      const go=()=>jumpToActivityItem(row.dataset.clientId,row.dataset.view);
+      row.addEventListener('click',go);
+      row.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();go()}});
+    });
+    const attentionRow=(key,label,count)=>{
+      const target=targets[key];
+      const clickable=count>0&&target;
+      return `<div class="attention-item${clickable?' attention-item-clickable':''}"${clickable?` role="button" tabindex="0" data-client-id="${esc(target.clientId)}" data-view="${esc(target.view)}"`:''}><span>${label}</span><b>${count}</b></div>`;
+    };
+    summary.innerHTML=`<span class="eyebrow">ATENCIÓN</span><h4>Resumen del portafolio</h4>${attentionRow('pending','Fuentes por revisar',pending)}${attentionRow('corrections','Correcciones (pruebas locales)',corrections)}${attentionRow('onboardings','Onboarding recibido',onboardings)}${attentionRow('installations','Versiones aprobadas',installations)}${attentionRow('handoffsOpen','Casos derivados',handoffsOpen)}${attentionRow('suggestionsPending','Sugerencias de conocimiento',suggestionsPending)}${attentionRow('realCorrections','Correcciones de clientes reales',realCorrections)}`;
+    summary.querySelectorAll('.attention-item-clickable').forEach(row=>{
+      const go=()=>jumpToActivityItem(row.dataset.clientId,row.dataset.view);
+      row.addEventListener('click',go);
+      row.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();go()}});
+    });
+    $('#activity-nav-count').textContent=pending+corrections+onboardings+handoffsOpen+suggestionsPending+realCorrections;
+    window.lucide?.createIcons();
+  }catch(error){
+    feed.innerHTML=`<p class="text-muted">${esc(error.message)}</p>`;
+  }
+}
+
+async function sweepClients(){
+  const button=$('#btn-sweep-clients'), status=$('#sweep-status');
+  if(!button) return;
+  button.disabled=true;
+  const original=button.innerHTML;
+  button.innerHTML='<i data-lucide="loader-2" class="spin"></i> Barriendo…';
+  window.lucide?.createIcons();
+  try{
+    await renderActivity();
+    status.textContent=`Última actualización: ${dateLabel(new Date().toISOString())}`;
+  }catch(error){
+    status.textContent=`Error al barrer: ${error.message}`;
+  }finally{
+    button.disabled=false;
+    button.innerHTML=original;
+    window.lucide?.createIcons();
+  }
+}
 
 function enhanceNavigation(){document.querySelectorAll('.menu-item').forEach(item=>item.addEventListener('click',()=>history.replaceState(null,'',`#${item.dataset.view}`)));const selector=$('#global-client-select');selector?.addEventListener('change',()=>setTimeout(()=>{renderOnboarding();renderActivity()},50));window.addEventListener('zeroagent:render-activity',renderActivity)}
 
-$('#btn-create-onboarding')?.addEventListener('click',createOnboarding);$('#btn-open-onboarding')?.addEventListener('click',openOnboarding);$('#btn-copy-onboarding')?.addEventListener('click',copyOnboarding);
+$('#btn-create-onboarding')?.addEventListener('click',createOnboarding);$('#btn-open-onboarding')?.addEventListener('click',openOnboarding);$('#btn-copy-onboarding')?.addEventListener('click',copyOnboarding);$('#btn-sweep-clients')?.addEventListener('click',sweepClients);
 document.addEventListener('DOMContentLoaded',()=>{enhanceNavigation();setTimeout(()=>{renderActivity();renderOnboarding()},350)});

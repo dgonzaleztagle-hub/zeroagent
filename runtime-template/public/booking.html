@@ -1,2 +1,140 @@
 <!doctype html>
-<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Reserva tu hora</title><style>:root{font-family:Inter,system-ui,sans-serif;background:#08101c;color:#f5f8ff;--line:#2d3a55;--muted:#a2aec4;--brand:#16c996}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px}.card{width:min(560px,100%);background:#111a2b;border:1px solid var(--line);border-radius:18px;padding:28px;box-shadow:0 18px 60px #0008}.tag{font-size:12px;color:#9af1d3;font-weight:800}.card h1{margin:8px 0}.card p{color:var(--muted);line-height:1.5}label{display:block;color:#c2cce0;font-size:12px;font-weight:700;margin:15px 0 6px}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:9px;background:#091120;color:white;padding:11px;font:inherit}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}button{width:100%;border:0;background:var(--brand);color:#042017;border-radius:9px;padding:12px;font-weight:800;margin-top:18px;cursor:pointer}.note{font-size:12px;color:var(--muted);margin-top:13px}.result{margin-top:14px;line-height:1.5;color:#a9f0d6}.error{color:#ffc4d5}@media(max-width:520px){.row{grid-template-columns:1fr}.card{padding:20px}}</style></head><body><main class="card"><span class="tag">RESERVA EN LÍNEA</span><h1>Reserva tu hora</h1><p>Envía tu solicitud. Confirmaremos el horario según la disponibilidad real.</p><form id="form"><label>Nombre</label><input id="name" required><label>WhatsApp</label><input id="phone" required placeholder="+56 9…"><div class="row"><div><label>Servicio</label><select id="service" required></select></div><div><label>Profesional</label><select id="resource" required></select></div></div><label>Sede</label><select id="location"></select><label>Fecha y hora preferida</label><input id="starts" type="datetime-local" required><label>Comentario</label><textarea id="notes" rows="2"></textarea><button>Enviar solicitud</button><div id="result" class="note"></div></form></main><script>let data;async function load(){const r=await fetch('/api/agenda/public-catalog');const j=await r.json();if(!r.ok)throw Error(j.error);data=j;for(const [id,items] of Object.entries({service:data.catalog.services,resource:data.catalog.resources,location:data.catalog.locations})){const select=document.querySelector('#'+id);select.replaceChildren();for(const item of items){const option=document.createElement('option');option.value=String(item.name||'');option.textContent=String(item.name||'');select.append(option)}}}form.addEventListener('submit',async e=>{e.preventDefault();result.className='note';result.textContent='Enviando…';const r=await fetch('/api/agenda/appointments',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({source:'public_booking',customer_name:name.value,customer_phone:phone.value,service:service.value,resource:resource.value,location:location.value,starts_at:starts.value,notes:notes.value})});const j=await r.json();if(!r.ok){result.className='note error';result.textContent=j.error;return}result.className='result';result.textContent=`Solicitud ${j.appointment.reference||''} recibida. Te confirmaremos por WhatsApp.`;form.reset()});load().catch(e=>{result.className='note error';result.textContent='No se pudo cargar la agenda: '+e.message})</script></body></html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <title>Solicita una hora</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,450;9..144,600&display=swap" rel="stylesheet">
+  <style>
+    :root{--ink:#17221c;--muted:#657168;--line:#d9ded8;--paper:#f4f1e9;--surface:#fffdfa;--green:#174d38;--green-2:#277357;--soft:#e6eee8;--lime:#d9f99d;--danger:#9e3f3f;--warning:#9b6828;--shadow:0 24px 80px rgba(25,48,36,.11)}
+    *{box-sizing:border-box}html{background:var(--paper)}body{margin:0;min-width:320px;background:var(--paper);color:var(--ink);font-family:"DM Sans",sans-serif}button,input,select,textarea{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid rgba(39,115,87,.25);outline-offset:2px}
+    .page{min-height:100vh;display:grid;grid-template-columns:minmax(280px,.72fr) minmax(480px,1.28fr)}
+    .story{position:sticky;top:0;display:flex;min-height:100vh;flex-direction:column;justify-content:space-between;padding:clamp(30px,5vw,74px);background:var(--green);color:#f5f4ed;overflow:hidden}
+    .story:after{content:"";position:absolute;width:520px;height:520px;right:-310px;bottom:-210px;border:1px solid rgba(217,249,157,.28);border-radius:50%;box-shadow:0 0 0 70px rgba(217,249,157,.035),0 0 0 140px rgba(217,249,157,.025)}
+    .brand{position:relative;z-index:1;display:flex;align-items:center;gap:11px}.brand-mark{display:grid;place-items:center;width:42px;height:42px;border-radius:50%;background:var(--lime);color:#173124;font-weight:800;font-size:11px}.brand strong,.brand small{display:block}.brand strong{font-size:14px}.brand small{margin-top:2px;color:#a8c5b5;font-size:10px;letter-spacing:.08em;text-transform:uppercase}
+    .story-copy{position:relative;z-index:1;max-width:560px;margin:70px 0}.eyebrow{color:#b5d3c2;font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase}.story h1{margin:14px 0 20px;font:600 clamp(42px,5vw,75px)/.96 Fraunces,serif;letter-spacing:-.045em}.story h1 em{color:var(--lime);font-style:normal}.story-copy>p{max-width:500px;margin:0;color:#c4d7cc;font-size:15px;line-height:1.7}.trust{position:relative;z-index:1;display:flex;gap:20px;color:#a8c5b5;font-size:11px}.trust span{display:flex;align-items:center;gap:7px}.trust i{width:7px;height:7px;border-radius:50%;background:var(--lime)}
+    .booking-area{display:flex;align-items:center;justify-content:center;padding:clamp(22px,5vw,72px)}
+    .card{width:min(680px,100%);padding:clamp(25px,4vw,48px);border:1px solid var(--line);border-radius:22px;background:var(--surface);box-shadow:var(--shadow)}
+    .step{display:inline-flex;padding:6px 9px;border-radius:99px;background:var(--soft);color:var(--green-2);font-size:9px;font-weight:800;letter-spacing:.1em;text-transform:uppercase}.card h2{margin:15px 0 8px;font:600 clamp(30px,4vw,46px)/1.02 Fraunces,serif;letter-spacing:-.035em}.intro{margin:0 0 26px;color:var(--muted);font-size:14px;line-height:1.65}
+    form{display:grid;gap:16px}.field{display:grid;gap:7px}.field>span,.field-label{color:#4f5c54;font-size:11px;font-weight:700;letter-spacing:.02em}.field small,.selection-note{color:var(--muted);font-size:11px;line-height:1.45}input,select,textarea{width:100%;min-height:48px;border:1px solid var(--line);border-radius:11px;background:#fff;padding:0 13px;color:var(--ink)}textarea{min-height:82px;padding:12px 13px;resize:vertical}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.fixed-value{display:flex;align-items:center;min-height:48px;padding:0 13px;border:1px solid var(--line);border-radius:11px;background:var(--soft);font-size:13px;font-weight:700}
+    .service-meta{min-height:22px;padding:0 2px;color:var(--green-2);font-size:11px}.mode-note{padding:12px 14px;border-left:3px solid var(--green);border-radius:8px;background:var(--soft);color:#536159;font-size:12px;line-height:1.55}
+    .slot-picker{display:flex;flex-wrap:wrap;gap:7px}.slot-picker button{min-height:39px;padding:0 12px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);font-size:12px;font-weight:700}.slot-picker button.selected{border-color:var(--green);background:var(--green);color:#fff}.slot-state{color:var(--muted);font-size:11px}
+    .external-services{padding:13px 14px;border:1px solid #e5d5be;border-radius:10px;background:#fbf2e5}.external-services strong{display:block;color:var(--warning);font-size:11px}.external-services ul{margin:7px 0 0;padding-left:17px;color:#695b4a;font-size:11px;line-height:1.55}
+    .submit{min-height:52px;margin-top:3px;border:0;border-radius:11px;background:var(--green);color:#fff;font-weight:800}.submit:hover{background:#0f402d}.submit:disabled{cursor:not-allowed;opacity:.55}.privacy{margin:0;text-align:center;color:var(--muted);font-size:10px}.error{min-height:18px;margin:0;color:var(--danger);font-size:12px}.result{display:grid;gap:12px;padding:22px;border-radius:14px;background:var(--soft)}.result .result-icon{display:grid;place-items:center;width:42px;height:42px;border-radius:50%;background:var(--green);color:#fff;font-size:20px}.result h3{margin:0;font:600 28px Fraunces,serif}.result p{margin:0;color:#506057;font-size:13px;line-height:1.6}.result button{justify-self:start;min-height:42px;padding:0 14px;border:1px solid var(--green);border-radius:9px;background:transparent;color:var(--green);font-weight:700}
+    [hidden]{display:none!important}
+    @media(max-width:900px){.page{display:block}.story{position:relative;min-height:auto;padding:27px 22px 34px}.story-copy{margin:48px 0 34px}.story h1{font-size:48px}.trust{flex-wrap:wrap}.booking-area{padding:18px}.card{border-radius:17px;box-shadow:none}}
+    @media(max-width:560px){.story h1{font-size:40px}.story-copy>p{font-size:14px}.booking-area{padding:12px}.card{padding:23px 18px}.grid{grid-template-columns:1fr}.trust{display:grid;gap:8px}}
+    @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+  </style>
+</head>
+<body>
+  <main class="page">
+    <aside class="story">
+      <div class="brand"><span class="brand-mark" id="brand-mark">··</span><span><strong id="business-name">Agenda</strong><small>Reserva en línea</small></span></div>
+      <div class="story-copy"><span class="eyebrow">DISPONIBILIDAD REAL</span><h1>Elige con calma.<br><em>La agenda valida.</em></h1><p>Tu solicitud se cruza con servicios, equipo, horarios y bloqueos reales antes de quedar registrada.</p></div>
+      <div class="trust"><span><i></i> Sin dobles reservas</span><span><i></i> Estado claro al enviar</span><span><i></i> Datos protegidos</span></div>
+    </aside>
+
+    <section class="booking-area">
+      <div class="card">
+        <div id="form-view">
+          <span class="step">AGENDA</span>
+          <h2 id="form-title">Solicita una hora</h2>
+          <p class="intro" id="form-intro">Completa tus datos y elige una fecha preferida.</p>
+          <form id="booking-form" novalidate>
+            <div class="mode-note" id="mode-note">La hora quedará pendiente de confirmación.</div>
+            <div class="grid">
+              <label class="field"><span>Nombre</span><input id="name" autocomplete="name" required></label>
+              <label class="field"><span>Teléfono</span><input id="phone" type="tel" autocomplete="tel" required placeholder="+56 9…"></label>
+            </div>
+            <label class="field"><span>Correo <small>(opcional)</small></span><input id="email" type="email" autocomplete="email"></label>
+            <label class="field"><span>Servicio</span><select id="service" required></select><div class="service-meta" id="service-meta"></div></label>
+            <div class="grid">
+              <label class="field" id="resource-field"><span>Profesional o recurso</span><select id="resource" required></select></label>
+              <label class="field" id="location-field"><span>Sede</span><select id="location"></select></label>
+            </div>
+            <label class="field" id="address-field" hidden><span>Dirección de atención</span><input id="customer-address" autocomplete="street-address" placeholder="Calle, número, comuna"><small id="service-area-note"></small></label>
+            <div class="grid">
+              <label class="field"><span>Fecha preferida</span><input id="date" type="date" required></label>
+              <label class="field" id="time-field"><span>Hora preferida</span><input id="time" type="time" required step="900"><small>La validaremos contra la agenda al enviar.</small></label>
+            </div>
+            <div class="field" id="slots-field" hidden><span class="field-label">Horas disponibles</span><div class="slot-picker" id="slot-picker"></div><div class="slot-state" id="slot-state"></div></div>
+            <label class="field"><span>Comentario <small>(opcional)</small></span><textarea id="notes" rows="3" placeholder="Cuéntanos algo que debamos considerar"></textarea></label>
+            <div class="external-services" id="external-services" hidden></div>
+            <button class="submit" id="submit-button" type="submit">Enviar solicitud</button>
+            <p class="error" id="form-error" role="alert"></p>
+            <p class="privacy">Usaremos estos datos únicamente para gestionar esta solicitud.</p>
+          </form>
+        </div>
+        <section class="result" id="result-view" role="status" aria-live="polite" hidden>
+          <span class="result-icon">✓</span><h3 id="result-title">Solicitud recibida</h3><p id="result-copy"></p><button id="new-request" type="button">Solicitar otra hora</button>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const $=selector=>document.querySelector(selector);
+    const state={catalog:{services:[],resources:[],locations:[]},confirmationMode:'manual',slotsEndpoint:'',slotLookupActive:false,selectedSlot:'',slotRequestId:0};
+    const initials=name=>String(name||'Agenda').split(/\s+/).map(part=>part[0]).join('').slice(0,2).toUpperCase();
+    const bookable=service=>service?.active!==false&&service?.bookable!==false&&service?.delivery_mode!=='external';
+    const same=(a,b)=>String(a||'').localeCompare(String(b||''),undefined,{sensitivity:'base'})===0;
+    const supports=(resource,service)=>!Array.isArray(resource?.services)||!resource.services.length||resource.services.some(name=>same(name,service));
+    const allowedLocations=(service,locations)=>{const allowed=service?.locations||service?.location_names;return Array.isArray(allowed)&&allowed.length?locations.filter(location=>allowed.some(value=>same(value?.name||value,location.name))):locations};
+    const fill=(select,items)=>{select.replaceChildren(...items.map(item=>{const option=document.createElement('option');option.value=item.name;option.textContent=item.name;return option}))};
+    const localDate=value=>{const date=new Date(value),offset=date.getTimezoneOffset();return new Date(date.getTime()-offset*60000).toISOString().slice(0,10)};
+    const localDateTime=value=>{const date=new Date(value),offset=date.getTimezoneOffset();return new Date(date.getTime()-offset*60000).toISOString().slice(0,16)};
+    const money=value=>value==null?'':`$${Number(value).toLocaleString('es-CL')}`;
+    function priceCopy(service){const amount=service?.price_clp??service?.price;let price=amount==null?'':money(amount);if(price&&service?.price_type==='from')price=`Desde ${price}`;if(service?.price_type==='quote'&&!price)price='A cotizar';return [price,service?.price_note].filter(Boolean).join(' · ')}
+    const deliveryCopy=mode=>({mobile:'A domicilio',remote:'Atención remota'}[mode]||'');
+
+    function updateCatalogSelection(){
+      const services=state.catalog.services.filter(bookable),service=services.find(item=>item.name===$('#service').value)||services[0];
+      const resources=state.catalog.resources.filter(item=>supports(item,service?.name)),delivery=service?.delivery_mode||'onsite';
+      const locations=delivery==='onsite'?allowedLocations(service,state.catalog.locations||[]):[];
+      fill($('#resource'),resources);fill($('#location'),locations);
+      $('#resource-field').hidden=resources.length===1;$('#resource').required=resources.length>1;
+      $('#location-field').hidden=delivery!=='onsite'||!locations.length;$('#location').required=delivery==='onsite'&&locations.length>0;
+      const addressField=$('#address-field'),address=$('#customer-address');addressField.hidden=delivery!=='mobile';address.required=delivery==='mobile'&&service?.requires_customer_address!==false;$('#service-area-note').textContent=delivery==='mobile'?(service?.service_area_note||''):'';
+      const details=[];if(service?.duration_minutes)details.push(`${service.duration_minutes} min`);const price=priceCopy(service);if(price)details.push(price);const deliveryLabel=deliveryCopy(delivery);if(deliveryLabel)details.push(deliveryLabel);if(delivery==='mobile'&&service?.travel_buffer_minutes)details.push(`${service.travel_buffer_minutes} min de margen de traslado`);
+      $('#service-meta').textContent=details.join(' · ');
+      state.selectedSlot='';loadSlotsIfAvailable();
+    }
+    function renderExternalServices(){
+      const items=state.catalog.services.filter(item=>item.active!==false&&item.bookable===false),box=$('#external-services');box.hidden=!items.length;
+      if(items.length){box.innerHTML='<strong>Servicios que se coordinan por otro canal</strong>';const list=document.createElement('ul');items.forEach(item=>{const li=document.createElement('li');li.textContent=`${item.name}${item.redirect_note?`: ${item.redirect_note}`:''}`;list.append(li)});box.append(list)}
+    }
+    function setMode(){
+      const automatic=state.confirmationMode==='automatic';
+      $('#form-title').textContent=automatic?'Reserva una hora':'Solicita una hora';
+      $('#form-intro').textContent=automatic?'La hora quedará confirmada si sigue disponible al enviar.':'El equipo revisará la solicitud y te confirmará la hora por su canal habitual.';
+      $('#mode-note').textContent=automatic?'La agenda valida el cupo y confirma la reserva al enviar.':'Esta es una solicitud: la hora queda por confirmar hasta que el equipo la acepte.';
+      $('#submit-button').textContent=automatic?'Confirmar reserva':'Enviar solicitud';
+    }
+    async function loadSlotsIfAvailable(){
+      if(!state.slotsEndpoint)return;
+      const date=$('#date').value,service=$('#service').value,resource=$('#resource').value;if(!date||!service||!resource)return;
+      const field=$('#slots-field'),picker=$('#slot-picker'),status=$('#slot-state'),requestId=++state.slotRequestId;state.slotLookupActive=true;field.hidden=false;$('#time-field').hidden=true;$('#time').required=false;picker.replaceChildren();status.textContent='Consultando disponibilidad…';
+      try{const url=new URL(state.slotsEndpoint,location.origin);url.searchParams.set('date',date);url.searchParams.set('service',service);url.searchParams.set('resource',resource);if($('#location').value)url.searchParams.set('location',$('#location').value);const response=await fetch(url);const data=await response.json();if(requestId!==state.slotRequestId)return;if(!response.ok)throw new Error(data.error||'No se pudo consultar.');const slots=data.available_slots||data.slots||[];status.textContent=slots.length?'Elige una hora disponible.':'No hay horas publicadas para este día.';for(const raw of slots){const value=raw.at||raw.starts_at||raw;const button=document.createElement('button');button.type='button';button.dataset.slot=value;button.textContent=new Intl.DateTimeFormat('es-CL',{hour:'2-digit',minute:'2-digit'}).format(new Date(value));button.onclick=()=>{state.selectedSlot=value;[...picker.children].forEach(node=>node.classList.toggle('selected',node===button))};picker.append(button)}}catch(error){if(requestId!==state.slotRequestId)return;state.slotLookupActive=true;status.textContent=`No pudimos verificar la agenda: ${error.message}`;const retry=document.createElement('button');retry.type='button';retry.textContent='Reintentar';retry.onclick=loadSlotsIfAvailable;picker.replaceChildren(retry)}}
+    async function load(){
+      const [catalogResponse,healthResponse]=await Promise.all([fetch('/api/agenda/public-catalog'),fetch('/health').catch(()=>null)]);const data=await catalogResponse.json();if(!catalogResponse.ok)throw new Error(data.error||'No se pudo cargar la agenda.');const health=healthResponse?.ok?await healthResponse.json():{};
+      state.catalog=data.catalog||state.catalog;state.confirmationMode=data.confirmation_mode||'manual';state.slotsEndpoint=data.slots_endpoint||data.capabilities?.public_slots_endpoint||'';
+      const business=data.business_name||health.agent||'Agenda';$('#business-name').textContent=business;$('#brand-mark').textContent=initials(business);document.title=`${state.confirmationMode==='automatic'?'Reserva':'Solicita una hora'} · ${business}`;
+      const services=state.catalog.services.filter(bookable);fill($('#service'),services);$('#submit-button').disabled=!services.length;if(!services.length)$('#form-error').textContent='No hay servicios disponibles para reservar por este canal.';
+      const tomorrow=new Date(Date.now()+86400000);$('#date').min=localDate(new Date());$('#date').value=localDate(tomorrow);setMode();updateCatalogSelection();renderExternalServices();
+    }
+    $('#service').addEventListener('change',updateCatalogSelection);$('#date').addEventListener('change',()=>{state.selectedSlot='';loadSlotsIfAvailable()});$('#resource').addEventListener('change',()=>{state.selectedSlot='';loadSlotsIfAvailable()});$('#location').addEventListener('change',()=>{state.selectedSlot='';loadSlotsIfAvailable()});
+    $('#booking-form').addEventListener('submit',async event=>{
+      event.preventDefault();const form=event.currentTarget,error=$('#form-error'),button=$('#submit-button');error.textContent='';if(!form.reportValidity())return;
+      const startsAt=state.selectedSlot||`${$('#date').value}T${$('#time').value}`;if(state.slotLookupActive&&!state.selectedSlot){error.textContent='Elige una de las horas disponibles.';return}
+      button.disabled=true;button.textContent='Validando agenda…';
+      try{const response=await fetch('/api/agenda/appointments',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({source:'public_booking',customer_name:$('#name').value.trim(),customer_phone:$('#phone').value.trim(),customer_email:$('#email').value.trim(),customer_address:$('#address-field').hidden?'':$('#customer-address').value.trim(),service:$('#service').value,resource:$('#resource').value,location:$('#location-field').hidden?'':$('#location').value,starts_at:startsAt,notes:$('#notes').value.trim()})});const data=await response.json();if(!response.ok)throw new Error(data.error||'No se pudo registrar la solicitud.');const appointment=data.appointment||{},confirmed=appointment.status==='confirmed';$('#result-title').textContent=confirmed?'Hora confirmada':'Solicitud recibida';$('#result-copy').textContent=`${confirmed?'Tu reserva quedó confirmada.':'Tu solicitud quedó pendiente de confirmación.'}${appointment.reference?` Referencia: ${appointment.reference}.`:''}`;$('#form-view').hidden=true;$('#result-view').hidden=false}catch(reason){error.textContent=reason.message}finally{button.disabled=false;setMode()}
+    });
+    $('#new-request').addEventListener('click',()=>{$('#booking-form').reset();state.selectedSlot='';$('#result-view').hidden=true;$('#form-view').hidden=false;$('#date').value=localDate(new Date(Date.now()+86400000));updateCatalogSelection()});
+    load().catch(error=>{$('#form-error').textContent=error.message;$('#submit-button').disabled=true});
+  </script>
+</body>
+</html>

@@ -48,6 +48,7 @@ const wrongPhone = '+56900000000';
 const externalId = `qa-${suffix}`;
 let appointmentId = null;
 let outboxId = null;
+let blockId = null;
 
 const start = new Date(Date.now() + 14 * 86_400_000);
 start.setUTCHours(12, 0, 0, 0);
@@ -75,6 +76,25 @@ try {
   const appointment = Array.isArray(created) ? created[0] : created;
   appointmentId = appointment.id;
   assert.equal(appointment.status, 'pending_confirmation');
+  assert.ok(appointment.expires_at && new Date(appointment.expires_at) > new Date(), 'La solicitud manual no recibió expires_at.');
+
+  const exactRetryResult = await ok('/rest/v1/rpc/za_request_appointment', {
+    method: 'POST', body: {
+      p_customer_name: 'Cliente QA', p_customer_phone: phone, p_service_id: serviceId, p_resource_id: resourceId,
+      p_starts_at: start.toISOString(), p_source: 'staff', p_location_id: locationId,
+      p_confirmation_mode: 'manual', p_minimum_notice_hours: 2, p_maximum_advance_days: 60
+    }
+  });
+  assert.equal((Array.isArray(exactRetryResult) ? exactRetryResult[0] : exactRetryResult).id, appointmentId, 'Un retry exacto creó una segunda cita.');
+
+  const futureSessionResult = await ok('/rest/v1/rpc/za_request_appointment', {
+    method: 'POST', body: {
+      p_customer_name: 'Cliente QA', p_customer_phone: phone, p_service_id: serviceId, p_resource_id: resourceId,
+      p_starts_at: new Date(start.getTime() + 60 * 60_000).toISOString(), p_source: 'staff', p_location_id: locationId,
+      p_confirmation_mode: 'manual', p_minimum_notice_hours: 2, p_maximum_advance_days: 60
+    }
+  });
+  assert.notEqual((Array.isArray(futureSessionResult) ? futureSessionResult[0] : futureSessionResult).id, appointmentId, 'El anti-duplicado bloqueó una sesión futura distinta.');
 
   await mustFail('/rest/v1/rpc/za_request_appointment', {
     method: 'POST', body: {
@@ -84,6 +104,15 @@ try {
     }
   }, /Horario ya ocupado/i);
 
+  const blockRows = await ok('/rest/v1/za_availability_blocks', {
+    method: 'POST', prefer: 'return=representation', body: { resource_id: resourceId, starts_at: start.toISOString(), ends_at: new Date(start.getTime() + 60 * 60_000).toISOString(), reason: 'QA confirm invariant' }
+  });
+  blockId = blockRows[0].id;
+  await mustFail('/rest/v1/rpc/za_transition_appointment', {
+    method: 'POST', body: { p_appointment_id: appointmentId, p_new_status: 'confirmed', p_expected_status: 'pending_confirmation' }
+  }, /bloqueado/i);
+  await ok(`/rest/v1/za_availability_blocks?id=eq.${blockId}`, { method: 'DELETE', prefer: 'return=minimal' });
+  blockId = null;
   const confirmed = await ok('/rest/v1/rpc/za_transition_appointment', {
     method: 'POST', body: { p_appointment_id: appointmentId, p_new_status: 'confirmed', p_expected_status: 'pending_confirmation' }
   });
@@ -99,6 +128,28 @@ try {
   });
   assert.equal(new Date((Array.isArray(moved) ? moved[0] : moved).starts_at).toISOString(), moveTo.toISOString());
   assert.equal((Array.isArray(moved) ? moved[0] : moved).status, 'pending_confirmation', 'Un reagendamiento manual no puede auto-confirmarse.');
+
+  const expiringStart = new Date(start.getTime() + 4 * 60 * 60_000);
+  const expiringResult = await ok('/rest/v1/rpc/za_request_appointment', {
+    method: 'POST', body: {
+      p_customer_name: 'Expira QA', p_customer_phone: `${phone}2`, p_service_id: serviceId, p_resource_id: resourceId,
+      p_starts_at: expiringStart.toISOString(), p_source: 'staff', p_location_id: locationId,
+      p_confirmation_mode: 'manual', p_minimum_notice_hours: 2, p_maximum_advance_days: 60
+    }
+  });
+  const expiring = Array.isArray(expiringResult) ? expiringResult[0] : expiringResult;
+  await ok(`/rest/v1/za_appointments?id=eq.${expiring.id}`, { method: 'PATCH', prefer: 'return=minimal', body: { expires_at: new Date(Date.now() - 60_000).toISOString() } });
+  await mustFail('/rest/v1/rpc/za_transition_appointment', {
+    method: 'POST', body: { p_appointment_id: expiring.id, p_new_status: 'confirmed', p_expected_status: 'pending_confirmation' }
+  }, /venció/i);
+  const replacementResult = await ok('/rest/v1/rpc/za_request_appointment', {
+    method: 'POST', body: {
+      p_customer_name: 'Expira QA', p_customer_phone: `${phone}2`, p_service_id: serviceId, p_resource_id: resourceId,
+      p_starts_at: expiringStart.toISOString(), p_source: 'staff', p_location_id: locationId,
+      p_confirmation_mode: 'manual', p_minimum_notice_hours: 2, p_maximum_advance_days: 60
+    }
+  });
+  assert.notEqual((Array.isArray(replacementResult) ? replacementResult[0] : replacementResult).id, expiring.id, 'Una solicitud vencida siguió bloqueando la hora.');
 
   await ok('/rest/v1/za_conversations', { method: 'POST', prefer: 'return=minimal', body: { id: conversationId, channel: 'whatsapp', external_id: externalId } });
   const handoffResult = await ok('/rest/v1/rpc/za_request_handoff', {
@@ -117,9 +168,11 @@ try {
 } finally {
   const deletes = [
     outboxId && `/rest/v1/za_outbox_events?id=eq.${outboxId}`,
+    blockId && `/rest/v1/za_availability_blocks?id=eq.${blockId}`,
     `/rest/v1/za_conversations?id=eq.${conversationId}`,
     `/rest/v1/za_appointments?resource_id=eq.${resourceId}`,
     `/rest/v1/za_customers?phone=eq.${encodeURIComponent(phone)}`,
+    `/rest/v1/za_customers?phone=eq.${encodeURIComponent(`${phone}2`)}`,
     `/rest/v1/za_availability_rules?resource_id=eq.${resourceId}`,
     `/rest/v1/za_resource_services?resource_id=eq.${resourceId}`,
     `/rest/v1/za_resources?id=eq.${resourceId}`,

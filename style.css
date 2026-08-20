@@ -1836,3 +1836,20 @@ textarea {
 .overflow-y-auto { overflow-y: auto; }
 .text-xs { font-size: 0.72rem; }
 .text-sm { font-size: 0.8rem; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 0.8s linear infinite; }
+
+.checkbox-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 0.85rem; }
+.checkbox-row input { width: auto; }
+
+.niches-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; }
+.niche-card { background: var(--bg-card, #12161c); border: 1px solid rgba(255,255,255,.08); border-radius: var(--radius-md, 14px); padding: 20px; display: flex; flex-direction: column; gap: 10px; }
+.niche-card h4 { margin: 0; font-size: 1.05rem; }
+.niche-card p { margin: 0; color: var(--text-muted); font-size: .84rem; line-height: 1.5; }
+.niche-status { display: inline-flex; align-items: center; gap: 6px; font-size: .72rem; font-weight: 600; border-radius: 999px; padding: 4px 10px; width: fit-content; }
+.niche-status.built { background: rgba(16,185,129,.14); color: #6ee7b7; }
+.niche-status.designed { background: rgba(234,179,8,.14); color: #fde68a; }
+.niche-status.pending { background: rgba(148,163,184,.14); color: #cbd5e1; }
+.niche-vertical { font-size: .72rem; color: var(--text-muted); }
+.niche-card .btn { margin-top: auto; }

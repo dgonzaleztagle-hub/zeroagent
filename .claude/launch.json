@@ -1,0 +1,29 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "zeroagent-studio",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server.js"],
+      "port": 8080
+    },
+    {
+      "name": "franciskom-landing-preview",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["storage/client-landings/franciskom/_static-preview-server.mjs"],
+      "port": 5540
+    },
+    {
+      "name": "franciskom-runtime-preview",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--env-file=storage/agent-builds/franciskom/preview.env", "storage/agent-builds/franciskom/0.1.1-build-1785526969527/_local-preview-wrapper.mjs"],
+      "port": 4610
+    },
+    {
+      "name": "runtime-template-preview",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--env-file=runtime-template/.env.preview-bot-muted", "runtime-template/_local-preview-wrapper.mjs"],
+      "port": 4620
+    }
+  ]
+}

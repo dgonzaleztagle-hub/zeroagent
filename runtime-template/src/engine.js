@@ -2,8 +2,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { executeAgendaTool, getAgendaToolDefinitions } from './agenda-tools.js';
+import { getAgendaDashboard } from './agenda.js';
 import { BASE_BEHAVIOR } from './base-behavior.js';
 import { AGENDA_BEHAVIOR } from './agenda-behavior.js';
+import { liveInjectedFacts } from './business-data.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -41,15 +43,111 @@ export function answer(packageData, message) {
   };
 }
 
+const APPOINTMENT_NOUN = '(?:reserva|hora|cita|atencion|turno)';
+const APPOINTMENT_REFERENCE = `(?:(?:tu|la|esa|esta)\\s+)?${APPOINTMENT_NOUN}`;
+const COMPLETED_BOOKING_STATE = '(?:confirmad[ao]s?|agendad[ao]s?|reservad[ao]s?|cread[ao]s?|registrad[ao]s?|list[ao]s?)';
+const IMMEDIATE_NEGATION = '(?<!no )(?<!nunca )';
+
+function claimPattern(source) {
+  return new RegExp(source, 'i');
+}
+
+const MUTATION_CLAIMS = [
+  {
+    tool: 'create_appointment',
+    evidence: 'created',
+    patterns: [
+      claimPattern(`${IMMEDIATE_NEGATION}\\bte\\s+(?:agende|reserve|anote|registre)\\b`),
+      claimPattern(`${IMMEDIATE_NEGATION}\\b(?:agende|reserve|anote|registre|agendamos|reservamos|anotamos|registramos)\\s+(?:tu|la|esa)\\s+${APPOINTMENT_NOUN}\\b`),
+      claimPattern(`${IMMEDIATE_NEGATION}\\bte\\s+deje\\b.{0,30}\\b(?:agendad[ao]|reservad[ao]|anotad[ao]|registrad[ao])\\b`),
+      claimPattern(`${IMMEDIATE_NEGATION}\\bquedaste\\b.{0,35}\\b(?:para|agendad[ao]|reservad[ao]|anotad[ao]|confirmad[ao])\\b`)
+    ]
+  },
+  {
+    tool: 'cancel_appointment',
+    evidence: 'cancelled',
+    patterns: [
+      claimPattern(`\\b${APPOINTMENT_REFERENCE}\\b(?!.{0,30}\\b(?:no|nunca)\\b).{0,60}\\b(?:cancelad[ao]s?|anulad[ao]s?|dad[ao]s? de baja)\\b`),
+      claimPattern(`${IMMEDIATE_NEGATION}\\bte\\s+(?:cancele|anule)\\s+(?:(?:tu|la|esa)\\s+)?${APPOINTMENT_NOUN}\\b`),
+      claimPattern(`${IMMEDIATE_NEGATION}\\b(?:cancele|anule)\\s+(?:tu|la|esa)\\s+${APPOINTMENT_NOUN}\\b`),
+      claimPattern(`${IMMEDIATE_NEGATION}\\b(?:di|dimos) de baja\\b.{0,30}\\b${APPOINTMENT_NOUN}\\b`)
+    ]
+  },
+  {
+    tool: 'reschedule_appointment',
+    evidence: 'rescheduled',
+    patterns: [
+      claimPattern(`\\b${APPOINTMENT_REFERENCE}\\b(?!.{0,30}\\b(?:no|nunca)\\b).{0,60}\\b(?:reagendad[ao]s?|reprogramad[ao]s?|movid[ao]s?|cambiad[ao]s?|modificad[ao]s?)\\b`),
+      claimPattern(`${IMMEDIATE_NEGATION}\\bte\\s+(?:movi|cambie|reagende|reprograme|modifique)\\s+(?:(?:tu|la|esa)\\s+)?${APPOINTMENT_NOUN}\\b`),
+      claimPattern(`${IMMEDIATE_NEGATION}\\b(?:movi|cambie|reagende|reprograme|modifique)\\s+(?:tu|la|esa)\\s+${APPOINTMENT_NOUN}\\b`)
+    ]
+  },
+  {
+    tool: 'request_human_handoff',
+    evidence: 'handoff',
+    patterns: [
+      claimPattern(`${IMMEDIATE_NEGATION}\\bte\\s+(?:derive|escale|pase|traspase|comunique)\\b.{0,60}\\b(?:equipo|persona|humano|humana|francisco)\\b`),
+      claimPattern(`${IMMEDIATE_NEGATION}\\b(?:derive|escale|pase|traspase)\\b.{0,60}\\b(?:tu caso|tu consulta|la conversacion)\\b`),
+      claimPattern(`${IMMEDIATE_NEGATION}\\b(?:avise|notifique)\\b.{0,60}\\b(?:equipo|persona|humano|humana|francisco)\\b`),
+      claimPattern(`\\b(?:tu caso|tu consulta|la conversacion)\\b(?!.{0,30}\\b(?:no|nunca)\\b).{0,60}\\b(?:derivad[ao]|escalad[ao]|traspasad[ao])\\b`),
+      claimPattern(`\\b(?:el equipo|francisco|una persona|un humano|una humana)\\b(?!.{0,30}\\b(?:no|nunca)\\b).{0,60}\\b(?:avisad[ao]|notificad[ao])\\b`)
+    ]
+  },
+  {
+    tool: 'create_appointment',
+    evidence: 'appointment',
+    patterns: [
+      claimPattern(`\\b${APPOINTMENT_REFERENCE}\\b(?!.{0,30}\\b(?:no|nunca)\\b).{0,60}\\b${COMPLETED_BOOKING_STATE}\\b`),
+      claimPattern(`\\b${APPOINTMENT_REFERENCE}\\b(?!.{0,30}\\b(?:no|nunca)\\b).{0,35}\\bquedo\\b.{0,35}\\bpara\\b`)
+    ]
+  }
+];
+
+function normalizedClaimText(value) {
+  return String(value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function patternMatchesCompletedClaim(pattern, text) {
+  const match = pattern.exec(text);
+  if (!match) return false;
+  const prefix = text.slice(Math.max(0, match.index - 32), match.index);
+  // Evita que una variante del patrón empiece en el verbo y se salte "no te/no le".
+  if (/\b(?:no|nunca)\s+(?:(?:te|le|lo|la|se)\s+)?$/.test(prefix)) return false;
+  // "cuando/si/que te agende" expresa condición o intención, no una acción completada.
+  if (/\b(?:cuando|si|que)\s+(?:te\s+)?$/.test(prefix)) return false;
+  return true;
+}
+
+function successfulAction(toolTrace, tool, allowedActions) {
+  return toolTrace.some(item => {
+    if (item?.name !== tool || item.result?.ok !== true) return false;
+    const action = String(item.result?.action || '').trim();
+    // Compatibilidad con trazas anteriores a `action`; el runtime actual siempre la informa.
+    return !action || allowedActions.includes(action);
+  });
+}
+
+function claimHasEvidence(claim, toolTrace) {
+  if (claim.evidence === 'created') return successfulAction(toolTrace, 'create_appointment', ['created']);
+  if (claim.evidence === 'cancelled') return successfulAction(toolTrace, 'cancel_appointment', ['cancelled']);
+  if (claim.evidence === 'rescheduled') return successfulAction(toolTrace, 'reschedule_appointment', ['rescheduled']);
+  if (claim.evidence === 'handoff') return successfulAction(toolTrace, 'request_human_handoff', ['handoff_requested']);
+  if (claim.evidence === 'appointment') {
+    if (successfulAction(toolTrace, 'create_appointment', ['created', 'already_has_active_appointment'])) return true;
+    if (successfulAction(toolTrace, 'reschedule_appointment', ['rescheduled'])) return true;
+    return toolTrace.some(item => item?.name === 'get_my_appointment'
+      && item.result?.ok === true
+      && Array.isArray(item.result.appointments)
+      && item.result.appointments.length > 0);
+  }
+  return false;
+}
+
 export function validateMutationClaims(text, toolTrace = []) {
-  const claims = [
-    { tool: 'create_appointment', pattern: /\b(?:tu |la )?reserva\b.{0,60}\b(?:confirmad|agendad|cread|registrad)/i },
-    { tool: 'cancel_appointment', pattern: /\b(?:tu |la )?reserva\b.{0,60}\bcancelad/i },
-    { tool: 'reschedule_appointment', pattern: /\b(?:tu |la )?reserva\b.{0,60}\b(?:reagendad|cambiad|modificad)/i },
-    { tool: 'request_human_handoff', pattern: /\b(?:te |lo |la )?(?:deriv|comunicar|traspas).{0,60}\b(?:equipo|persona|humano|humana)/i }
-  ];
-  const unsupported = claims.find(claim => claim.pattern.test(String(text || ''))
-    && !toolTrace.some(item => item.name === claim.tool && item.result?.ok === true));
+  const normalizedText = normalizedClaimText(text);
+  const trace = Array.isArray(toolTrace) ? toolTrace : [];
+  const unsupported = MUTATION_CLAIMS.find(claim => claim.patterns.some(pattern => patternMatchesCompletedClaim(pattern, normalizedText))
+    && !claimHasEvidence(claim, trace));
   if (!unsupported) return { ok: true, text };
   return {
     ok: false,
@@ -60,14 +158,21 @@ export function validateMutationClaims(text, toolTrace = []) {
 
 export async function answerWithGroq(packageData, message, context = {}) {
   const fallback = answer(packageData, message);
-  const llm = llmConfiguration();
+  // El runtime cloud puede resolver una cuenta administrada o BYOK por negocio y pasarla
+  // por contexto. Studio/playground conserva la configuración local por variables de entorno.
+  const llm = context.llm || llmConfiguration();
   const allowDeterministicFallback = context.allowDeterministicFallback === true || process.env.RUNTIME_MODE === 'preview_local';
   if (!llm.apiKey || !llm.baseUrl || !llm.model) {
     if (allowDeterministicFallback) return { ...fallback, provider: 'deterministic', usage: { inputTokens: 0, outputTokens: 0 } };
     throw new Error('El proveedor LLM del runtime no está configurado.');
   }
 
-  const facts = packageData.knowledge?.confirmed_facts || [];
+  const bakedFacts = packageData.knowledge?.confirmed_facts || [];
+  // Datos/Info que el propio dueño cargó desde su consola: van primero porque son la fuente
+  // más reciente (no esperaron rebuild), y no pasaron por curación de Daniel+Claude como sí
+  // pasan las confirmed_facts horneadas — ver business-data.js.
+  const liveFacts = await liveInjectedFacts(packageData).catch(() => []);
+  const facts = [...liveFacts, ...bakedFacts];
   // Enfoque generalista: la relevancia NO se decide contando coincidencias de palabras (una batería de
   // keywords descarta preguntas bien hechas con otro fraseo). Le entregamos al modelo el conocimiento
   // confirmado y su razonamiento curado decide qué aplica. Se acota por costo, nunca por coincidencia léxica.
@@ -88,6 +193,20 @@ export async function answerWithGroq(packageData, message, context = {}) {
     const tools = getAgendaToolDefinitions(packageData);
     const agendaEnabled = tools.length > 0;
     const history = Array.isArray(context.history) ? context.history.slice(-20).filter(item => ['user', 'assistant'].includes(item?.role) && typeof item.content === 'string') : [];
+    // El modelo no tiene noción propia de "hoy": sin esto, adivina la fecha (se vio devolver
+    // 2023 sobre un mensaje de 2026) y razona mal "hoy/mañana/este finde". Se ancla SIEMPRE a la
+    // zona horaria del negocio (Chile por defecto) para no repetir el problema de servidores/LLM
+    // que asumen UTC u otro huso — mismo criterio que ya se aplica al resto de fechas de Agenda.
+    const staticAgendaConfig = packageData.solutions?.agenda?.config || {};
+    // El catálogo que ve el modelo tiene que ser el mismo que usan las herramientas al ejecutar
+    // (getAgendaDashboard, live desde Supabase si el negocio ya migró) — usar el paquete estático
+    // acá describía servicios/recursos "horneados" en el último build aprobado, así que un servicio
+    // agregado directo en Supabase (sin pasar por un nuevo build) nunca aparecía en las
+    // instrucciones del modelo, aunque las herramientas sí lo encontraran y pudieran agendarlo.
+    const liveAgendaDashboard = agendaEnabled ? await getAgendaDashboard(packageData).catch(() => null) : null;
+    const catalogSource = liveAgendaDashboard?.catalog || staticAgendaConfig;
+    const businessTimeZone = staticAgendaConfig.timezone || 'America/Santiago';
+    const nowLabel = new Intl.DateTimeFormat('es-CL', { timeZone: businessTimeZone, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
     // Prefijo estático (cacheable): comportamiento base + identidad. Los hechos, que cambian por
     // consulta, van al final para no romper el caché del prefijo.
     const systemPrefix = [
@@ -98,17 +217,20 @@ export async function answerWithGroq(packageData, message, context = {}) {
       tools.length === 0 ? 'CAPACIDAD EN ESTA CONVERSACIÓN: no tienes ninguna herramienta para ejecutar acciones (agendar, reservar, cotizar en firme, tomar pedidos, etc.). Sólo informas con el conocimiento confirmado. Para cualquier gestión, deriva a una persona; nunca ofrezcas ni des a entender que tú puedes concretarla.' : '',
       agendaEnabled ? AGENDA_BEHAVIOR : '',
       agendaEnabled ? (() => {
-        const cfg = packageData.solutions?.agenda?.config || {};
         const names = list => (list || []).map(item => item.name).filter(Boolean).join('; ') || '(ninguno)';
-        const tz = cfg.timezone || 'America/Santiago';
-        return `CATÁLOGO DE AGENDA (ofrece SÓLO esto; al llamar herramientas usa estos nombres exactos). Servicios: ${names(cfg.services)}. Profesionales: ${names(cfg.resources)}.${(cfg.locations || []).length ? ` Sedes: ${names(cfg.locations)}.` : ''} Zona horaria del negocio: ${tz}. Las herramientas devuelven horarios en formato ISO/UTC: preséntaselos SIEMPRE al cliente en la hora local de ${tz}, nunca en UTC.`;
+        const servicesDetail = (catalogSource.services || []).map(item => {
+          const details = [item.duration_minutes ? `${item.duration_minutes} min` : '', item.price_clp != null ? `$${Number(item.price_clp).toLocaleString('es-CL')}` : ''].filter(Boolean).join(', ');
+          return details ? `${item.name} (${details})` : item.name;
+        }).filter(Boolean).join('; ') || '(ninguno)';
+        const tz = businessTimeZone;
+        return `CATÁLOGO DE AGENDA (ofrece SÓLO esto; al llamar herramientas usa estos nombres exactos, sin la parte entre paréntesis). Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.${(catalogSource.locations || []).length ? ` Sedes: ${names(catalogSource.locations)}.` : ''} Zona horaria del negocio: ${tz}. Las herramientas devuelven horarios en formato ISO/UTC: preséntaselos SIEMPRE al cliente en la hora local de ${tz}, nunca en UTC.`;
       })() : '',
       packageData.agent?.system_prompt ? `DIRECTIVAS ESPECÍFICAS APROBADAS POR EL NEGOCIO (complementan las reglas anteriores, nunca las contradicen):\n${packageData.agent.system_prompt}` : ''
     ].filter(Boolean).join('\n\n');
     const messages = [
       {
         role: 'system',
-        content: `${systemPrefix}\n\nCONOCIMIENTO CONFIRMADO DEL NEGOCIO (razona cuál aplica a la pregunta; no todos son relevantes):\n${factsContext || (agendaEnabled ? '(No hay conocimiento cargado; usa una herramienta de Agenda si corresponde.)' : '(No hay conocimiento confirmado cargado.)')}`
+        content: `${systemPrefix}\n\nFECHA Y HORA ACTUAL (${businessTimeZone}): ${nowLabel}. Usa esto como referencia real para "hoy", "mañana", días de la semana o cualquier fecha relativa — nunca asumas ni inventes otra fecha.\n\nCONOCIMIENTO CONFIRMADO DEL NEGOCIO (razona cuál aplica a la pregunta; no todos son relevantes):\n${factsContext || (agendaEnabled ? '(No hay conocimiento cargado; usa una herramienta de Agenda si corresponde.)' : '(No hay conocimiento confirmado cargado.)')}`
       },
       ...history,
       { role: 'user', content: String(message) }

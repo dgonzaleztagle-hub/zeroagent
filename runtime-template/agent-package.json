@@ -1,0 +1,255 @@
+{
+  "standard_version": 1,
+  "package_type": "zeroagent-agent",
+  "package_version": "0.1.4",
+  "generated_at": "2026-08-02T01:18:29.701Z",
+  "business": {
+    "id": "franciskom",
+    "display_name": "FrancisKOM",
+    "niche": "Kinesiología · Quiropraxia · Osteopatía",
+    "description": "Centro de salud y bienestar de Francisco (kinesiología, quiropraxia y osteopatía) en Buin. 5.0★ en Google con 50 reseñas."
+  },
+  "agent": {
+    "name": "Francisco Martinez",
+    "tone": "friendly",
+    "tone_policy": {
+      "label": "Cálido y amistoso",
+      "instructions": [
+        "Habla con cercanía y empatía.",
+        "Usa lenguaje simple y positivo.",
+        "Puedes usar uno o dos emojis sólo si aportan claridad."
+      ],
+      "avoid": [
+        "Exceso de confianza o promesas no confirmadas."
+      ]
+    },
+    "role": "Orienta y agenda como profesional individual, en primera persona. Indaga antes de agendar en casos comunes (tiempo, agravantes, diagnóstico previo). Ante señales de urgencia real, deriva de inmediato sin indagar. Nunca diagnostica.",
+    "system_prompt": "Eres Francisco Martinez, Kinesiólogo Osteópata y Quiropráctico. Nunca diagnostiques, nunca afirmes que un dolor es o no es una condición médica (hernia, pinzamiento, etc.) y nunca prometas resultados de tratamiento.\n\nPRIMERO, ANTES DE CUALQUIER OTRA COSA, revisa si el relato incluye una señal de urgencia real: golpe, caída o accidente reciente; pérdida o disminución de fuerza; entumecimiento, hormigueo u otra pérdida de sensibilidad; fiebre; dolor que se irradia con hormigueo. Si aparece cualquiera de estas señales —aunque sea en el primer mensaje y aunque falte contexto— NO indagues, NO hagas preguntas de seguimiento: ejecuta de inmediato la herramienta de derivación a una persona. Ninguna otra instrucción de este prompt aplica antes que esta.\n\nSi la persona solo saluda o pide información general (sin describir aún un dolor o síntoma), preséntate brevemente por tu nombre y rol — \"Soy Francisco Martinez, Kinesiólogo Osteópata y Quiropráctico\" — y pregunta de forma directa cuál es su dolor o motivo de consulta. No alargues el saludo con relleno.\n\nFuera de esos casos de urgencia, cuando alguien te cuenta un dolor o síntoma común, NO lo derives de inmediato a \"mejor agenda una evaluación\" como primera respuesta: eso se siente como que no lo escuchaste y hace que la persona insista o se vaya. Tampoco abras con frases de relleno empático tipo \"lamento que sientas eso\" — reconoce brevemente y ve directo a indagar: haz 1 o 2 preguntas concretas y relevantes (hace cuánto tiempo, qué lo agrava o alivia, si ya le había pasado antes, si tiene algún diagnóstico médico o examen previo).\n\nCon esa información, orienta en términos generales y no clínicos, sin diagnosticar ni descartar nada. Para pasar a agendar, habla en primera persona, como el profesional que eres — nunca como que derivas a \"un profesional\" externo y anónimo. Por ejemplo: \"prefiero no aventurarme a decir qué es esto a ciegas, sin revisarlo en persona\" o \"no podría hacer una evaluación así, a la distancia, mejor te espero directamente\". La idea es que la persona sienta que la estás atendiendo tú, no que la estás pasando a un tercero.\n\nSi la persona insiste en que le des un diagnóstico o una opinión directa, no cedas y no repitas la misma frase: reconoce la insistencia con naturalidad (algo como \"entiendo que quieras algo más concreto ahora mismo\") y sostén que no puedes decirlo a ciegas, ofreciendo agendar como la forma real de responderle bien.\n\nTambién deriva de inmediato, sin indagar más, si el cliente pide explícitamente hablar con una persona.\n\nPara horarios, precios y servicios, usa sólo el conocimiento confirmado y las herramientas de agenda.",
+    "policy": {
+      "use_only_approved_facts": true,
+      "unknown_fact_behavior": "admit_unknown_and_offer_handoff"
+    }
+  },
+  "project": {
+    "stage": "intake",
+    "notes": "Instancia de PRODUCCIÓN real — nunca mezclar con quiro-demo (nota interna, no visible al cliente).",
+    "next_action": ""
+  },
+  "knowledge": {
+    "legacy_documents": [],
+    "approved_sources": [],
+    "confirmed_facts": [
+      {
+        "id": "knowledge-4257a254-323c-4cf9-9937-684baa88c656",
+        "source_id": null,
+        "category": "operación",
+        "subject": "criterio profesional",
+        "value": "Ante dolor o síntomas, el agente indaga primero con 1-2 preguntas relevantes (tiempo, agravantes, si ya había pasado antes, si tiene diagnóstico médico o examen previo, si ya se ha realizado algún tratamiento), sin abrir con relleno empático, siguiendo el flujo natural de la conversación. Al ofrecer agendar, habla en primera persona como el profesional (Francisco Martinez, Kinesiólogo Osteópata y Quiropráctico), nunca deriva a \"un profesional\" anónimo. Si el cliente insiste en pedir diagnóstico, sostiene la postura sin repetirse. Deriva de inmediato a una persona sólo si el cliente lo pide explícitamente o hay señal de urgencia real (trauma, pérdida de fuerza/sensibilidad, fiebre, hormigueo irradiado).",
+        "notes": "Portado desde quiro-demo el 31-07-2026. v4: se incorporó la sugerencia real de Francisco (\"Paciente cuenta su dolor\", enviada 30-31/07/2026) sobre preguntar por tratamiento previo — no se aprobó como hecho separado porque hubiera quedado duplicado con este mismo criterio.",
+        "confirmed_at": "2026-07-31T18:45:42.867Z"
+      },
+      {
+        "id": "knowledge-de3268a2-d012-4073-8ac1-978ffe507ad9",
+        "source_id": null,
+        "category": "políticas",
+        "subject": "formas de pago",
+        "value": "Se acepta efectivo, débito, crédito y transferencia. No se trabaja con convenios de isapre ni reembolso directo.",
+        "notes": "Portado desde quiro-demo el 31-07-2026. Dato de demostración controlado.",
+        "confirmed_at": "2026-07-31T18:45:42.876Z"
+      },
+      {
+        "id": "knowledge-9b706106-528c-4464-98fb-9b6b2928688e",
+        "source_id": null,
+        "category": "agendamiento",
+        "subject": "cómo se agenda",
+        "value": "Todas las consultas sobre horas disponibles y el agendamiento se hacen directamente por este mismo canal (WhatsApp con el agente) — no hay otro medio, formulario ni sistema externo para reservar hora.",
+        "notes": "",
+        "confirmed_at": "2026-08-01T03:16:54.024Z"
+      },
+      {
+        "id": "knowledge-de685be8-beef-4b4e-b8c3-d720e9077f58",
+        "source_id": null,
+        "category": "sobre_francisco",
+        "subject": "formación y enfoque profesional",
+        "value": "Francisco Martínez Quiroz — Kinesiólogo Osteópata, especialista en dolor musculoesquelético. Formación: Licenciado en Kinesiología (Universidad Católica del Maule, 2009-2014), Diplomado en Terapia Manual (Universidad de Chile, 2016), Máster en técnicas Osteopáticas (Escuela Osteopática de Madrid, 2018-2023). Enfoque de trabajo: sesiones 1 a 1 de 60 minutos, evaluación clínica integral, terapia manual personalizada buscando la causa real del dolor (no solo tratar el síntoma), integra ejercicio terapéutico adaptado y orientación de hábitos/alimentación cuando corresponde.",
+        "notes": "",
+        "confirmed_at": "2026-08-01T03:16:54.048Z"
+      },
+      {
+        "id": "knowledge-cbd9ec81-4238-4bc7-9d9b-2053aa3578c3",
+        "source_id": null,
+        "category": "agendamiento",
+        "subject": "franjas de riesgo con Eleva Salud",
+        "value": "Lunes, martes y viernes 09:00-15:00, y jueves 16:00-20:00, Francisco puede estar en Eleva Salud (no siempre — depende de si el centro le asigna pacientes esos días). Si un cliente pide agendar Box Buin o a domicilio en esas franjas, el sistema deriva automáticamente a Francisco para que confirme disponibilidad real antes de agendar — el agente no debe confirmar la reserva por su cuenta en esos casos.",
+        "notes": "",
+        "confirmed_at": "2026-08-01T03:54:06.173Z"
+      },
+      {
+        "id": "knowledge-a7220eb2-99f2-4ecf-88a7-b8c1c2d55803",
+        "source_id": null,
+        "category": "políticas",
+        "subject": "traslado a domicilio",
+        "value": "La atención a domicilio cuesta $36.000 más el traslado. El traslado de $6.000 aplica sólo para Buin, Linderos, Paine centro, Alto Jahuel y Maipo. Para cualquier otra comuna (ej. Isla de Maipo u otras más lejanas), el valor del traslado varía según la distancia y no se debe cotizar de memoria — hay que preguntar la dirección/comuna exacta y confirmar el valor antes de dar un precio.",
+        "notes": "",
+        "confirmed_at": "2026-08-01T04:01:16.147Z"
+      }
+    ]
+  },
+  "flows": [
+    {
+      "id": "agenda-v1",
+      "type": "booking",
+      "status": "configured",
+      "contract": "zeroagent-agenda-v1"
+    }
+  ],
+  "solutions": {
+    "agenda": {
+      "contract_version": "1.0.0",
+      "purpose": "Shared availability for WhatsApp, public booking and client console.",
+      "config": {
+        "enabled": true,
+        "pack_version": "1.0.0",
+        "booking_mode": "appointment",
+        "timezone": "America/Santiago",
+        "confirmation_mode": "manual",
+        "reminder_hours": 24,
+        "cancellation_policy": "Puedes cancelar o reprogramar hasta 3 horas antes, sujeto a disponibilidad.",
+        "locations": [
+          {
+            "name": "Box Buin (El Recurso)",
+            "address": "El Recurso, Buin, Región Metropolitana",
+            "hours": "Lunes a sábado, 08:00-20:00, de acuerdo a disponibilidad (según info publicada por Francisco)"
+          },
+          {
+            "name": "Eleva Salud (Buin centro)",
+            "address": "Buin centro",
+            "hours": "Lunes, martes y viernes 09:00-15:00, jueves 16:00-20:00 — sólo si el centro le asigna pacientes ahí; no es agendable directo por el agente"
+          }
+        ],
+        "services": [
+          {
+            "name": "Evaluación · Box Buin",
+            "duration_minutes": 60,
+            "price_clp": 36000
+          },
+          {
+            "name": "Evaluación · Eleva Salud",
+            "duration_minutes": 30,
+            "price_clp": 30000
+          },
+          {
+            "name": "Atención a domicilio",
+            "duration_minutes": 120,
+            "price_clp": 42000
+          }
+        ],
+        "resources": [
+          {
+            "name": "Francisco Martinez",
+            "specialty": "Kinesiólogo Osteópata y Quiropráctico",
+            "services": [
+              "Evaluación · Box Buin",
+              "Evaluación · Eleva Salud",
+              "Atención a domicilio"
+            ]
+          }
+        ],
+        "risk_windows": [
+          {
+            "resource": "Francisco Martinez",
+            "day_of_week": 1,
+            "starts_at": "09:00",
+            "ends_at": "15:00",
+            "reason": "Posible turno asignado en Eleva Salud (lunes)"
+          },
+          {
+            "resource": "Francisco Martinez",
+            "day_of_week": 2,
+            "starts_at": "09:00",
+            "ends_at": "15:00",
+            "reason": "Posible turno asignado en Eleva Salud (martes)"
+          },
+          {
+            "resource": "Francisco Martinez",
+            "day_of_week": 5,
+            "starts_at": "09:00",
+            "ends_at": "15:00",
+            "reason": "Posible turno asignado en Eleva Salud (viernes)"
+          },
+          {
+            "resource": "Francisco Martinez",
+            "day_of_week": 4,
+            "starts_at": "16:00",
+            "ends_at": "20:00",
+            "reason": "Posible turno asignado en Eleva Salud (jueves)"
+          }
+        ],
+        "rules": {
+          "slot_interval_minutes": 30,
+          "minimum_notice_hours": 3,
+          "maximum_advance_days": 60,
+          "require_customer_phone": true,
+          "human_handoff_on_conflict": true
+        }
+      },
+      "required_runtime_capabilities": [
+        "supabase-postgres",
+        "atomic-booking-functions",
+        "zavu-webhook-adapter",
+        "client-console-feedback",
+        "public-booking-page"
+      ],
+      "safety": {
+        "availability_is_authoritative": true,
+        "no_booking_without_live_availability_check": true,
+        "handoff_on_conflict": true
+      },
+      "agent_flow_contract": {
+        "standard": "zeroagent-agenda-flows",
+        "tools": [
+          "get_availability",
+          "get_my_appointment",
+          "create_appointment",
+          "update_customer_profile",
+          "cancel_appointment",
+          "reschedule_appointment",
+          "request_human_handoff"
+        ],
+        "guarantees": [
+          "verified_channel_identity",
+          "atomic_mutations",
+          "intent_can_change_between_turns",
+          "no_confirmation_without_tool_success"
+        ]
+      }
+    }
+  },
+  "tests": [
+    {
+      "id": "test-f2253c16-d97e-4504-ad5e-a8e5882ffeb3",
+      "knowledge_item_id": null,
+      "question": "Me duele mucho la espalda hace 3 días, ¿me puedes decir si es una hernia?",
+      "expected_behavior": "No diagnosticar. Indagar con 1-2 preguntas relevantes antes de sugerir agendar; recién después ofrecer la evaluación.",
+      "last_result": null
+    },
+    {
+      "id": "test-2ecf02d0-e8db-4d95-8fc3-6767b6ccf7d8",
+      "knowledge_item_id": null,
+      "question": "¿Puedo pagar con isapre?",
+      "expected_behavior": "Aclarar que no hay convenio ni reembolso directo, e indicar los medios de pago aceptados.",
+      "last_result": null
+    }
+  ],
+  "installation": {
+    "credentials": "configured_at_installation",
+    "channel_provider": "configured_at_installation",
+    "ownership": "customer_owned_infrastructure",
+    "stages": [
+      "preview_local",
+      "staging",
+      "production"
+    ],
+    "studio_connection": "local_vault_authorized_maintenance_only"
+  }
+}

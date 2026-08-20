@@ -34,9 +34,51 @@ const TONE_TEMPLATES = {
   persuasive: { title: "Persuasivo / ventas", text: "Conecta beneficios confirmados con la necesidad y propone un siguiente paso; nunca inventa urgencia ni descuentos." }
 };
 
+// Nichos semi-curados: investigación de mercado (WhatsApp AI 2026, Meta exige bots acotados a
+// un caso de uso declarado desde enero 2026, no genéricos) cruzada contra las verticales de
+// Prospección ya existentes (agenda/leads/sales/support). "status" refleja si la base (contrato)
+// ya existe, está diseñada pero no construida, o falta diseñarla — no inventar progreso.
+const NICHES = [
+  { name: "Salud y clínicas", examples: "Kinesiología, dental, psicología, centros médicos", why: "Admisión, agenda, resguardo de datos declarados y derivación clínica.", vertical: "agenda", packKey: "salud-clinica", status: "built", statusLabel: "Base construida" },
+  { name: "Spa y estética", examples: "Spa, masajes, manicure, centros estéticos", why: "Tratamientos por cabina o profesional, restricciones y preparación previa.", vertical: "agenda", packKey: "spa-estetica", status: "built", statusLabel: "Base construida" },
+  { name: "Barberías y peluquerías", examples: "Barberías, peluquerías y salones", why: "Servicios recurrentes, elección de profesional y agenda rápida por WhatsApp.", vertical: "agenda", packKey: "barberia", status: "built", statusLabel: "Base construida" },
+  { name: "Servicios con agenda", examples: "Asesorías, talleres y centros de atención", why: "Base neutra para cualquier negocio que venda tiempo y necesite reservas.", vertical: "agenda", packKey: "agenda-general", status: "built", statusLabel: "Base construida" },
+  { name: "Restaurantes / comida / delivery", examples: "Pedidos por WhatsApp, carta, delivery", why: "Caso confirmado en Chile: conversión a venta cerrada automatizando pedidos y reservas.", vertical: "sales", status: "designed", statusLabel: "Diseñada, falta construir" },
+  { name: "Inmobiliarias / corretaje", examples: "Arriendo, venta, corretaje de propiedades", why: '"Speed-to-lead": quien responde primero agenda la visita; el resto pierde el lead.', vertical: "leads", status: "pending", statusLabel: "Por diseñar" },
+  { name: "Servicios técnicos a domicilio", examples: "Electricistas, gasfitería, cerrajería, técnicos", why: "Casos reales chilenos confirmados: el cliente describe el problema, el agente cotiza o deriva.", vertical: "support", status: "pending", statusLabel: "Por diseñar" },
+  { name: "Retail / tiendas con catálogo", examples: "Consulta de stock y precio, sin carrito completo", why: "Vertical de ventas conversacionales ya definida en Prospección; comparte catálogo con Pedidos.", vertical: "sales", status: "pending", statusLabel: "Por diseñar" },
+  { name: "Seguros / asesorías profesionales", examples: "Corredoras de seguros, consultorías, asesorías", why: "Calificación de leads: ahorra la mayor parte del tiempo del equipo filtrando curiosos de serios.", vertical: "leads", status: "pending", statusLabel: "Por diseñar" }
+];
+
+function renderNiches() {
+  const container = document.getElementById("niches-grid");
+  if (!container) return;
+  container.innerHTML = NICHES.map(niche => `
+    <div class="niche-card">
+      <span class="niche-status ${niche.status}">${escapeHTML(niche.statusLabel)}</span>
+      <h4>${escapeHTML(niche.name)}</h4>
+      <p><strong>Ejemplos:</strong> ${escapeHTML(niche.examples)}</p>
+      <p>${escapeHTML(niche.why)}</p>
+      <span class="niche-vertical">Vertical: ${escapeHTML(niche.vertical)}</span>
+      <button type="button" class="btn btn-outline btn-sm btn-use-niche" data-niche="${escapeHTML(niche.name)}" data-pack="${escapeHTML(niche.packKey || 'custom')}" data-desc="${escapeHTML(niche.why)}">Crear cliente con este rubro</button>
+    </div>
+  `).join("");
+  container.querySelectorAll(".btn-use-niche").forEach(button => {
+    button.addEventListener("click", () => {
+      document.getElementById("new-client-niche").value = button.dataset.niche;
+      document.getElementById("new-client-vertical").value = button.dataset.pack || "custom";
+      document.getElementById("new-client-desc").value = "";
+      document.getElementById("new-client-name").value = "";
+      document.getElementById("modal-new-client").classList.add("active");
+      document.getElementById("new-client-name").focus();
+    });
+  });
+}
+
 // ESTADO GLOBAL DE LA APLICACIÓN
 let state = {
   clients: [],
+  verticalPacks: [],
   activeClientId: ""
 };
 
@@ -51,8 +93,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 async function initializeApp() {
-  // Cargar clientes desde la API del servidor
-  await fetchClients();
+  // El catálogo vertical viene del backend para que el formulario y el paquete usen
+  // exactamente el mismo contrato, sin duplicar presets en el navegador.
+  await Promise.all([fetchClients(), fetchVerticalPacks()]);
 
   // Seleccionar cliente por defecto
   const lastActive = localStorage.getItem("za_active_client");
@@ -63,6 +106,20 @@ async function initializeApp() {
   }
 
   syncGlobalUI();
+}
+
+async function fetchVerticalPacks() {
+  try {
+    const response = await fetch('/api/vertical-packs');
+    if (!response.ok) throw new Error('No se pudieron cargar las verticales.');
+    state.verticalPacks = (await response.json()).packs || [];
+    const select = document.getElementById('new-client-vertical');
+    if (select) select.innerHTML = state.verticalPacks.map(pack =>
+      `<option value="${escapeHTML(pack.key)}">${escapeHTML(pack.label)}${pack.status === 'ready' ? ' · lista' : ''}</option>`
+    ).join('');
+  } catch (error) {
+    console.error('Error al cargar verticales:', error);
+  }
 }
 
 async function fetchClients() {
@@ -133,6 +190,7 @@ function updateHeaderInfo(view) {
     overview: { title: "Portafolio", subtitle: "Clientes, agentes y próximas acciones en un solo lugar" },
     activity: { title: "Actividad", subtitle: "Lo que cambió y requiere una decisión" },
     prospecting: { title: "Prospección", subtitle: "Radar local, pipeline y seguimiento comercial" },
+    niches: { title: "Nichos", subtitle: "Rubros semi-curados con su base lista o en camino" },
     project: { title: "Resumen del proyecto", subtitle: "Avance, bloqueos, versiones e instalación" },
     editor: { title: "Solución", subtitle: "Identidad, comportamiento y módulos contratados" },
     agenda: { title: "Agenda", subtitle: "Configura la solución de reservas que viajará al cliente" },
@@ -200,6 +258,10 @@ function syncViewContent(view) {
 
     case "prospecting":
       window.dispatchEvent(new CustomEvent("zeroagent:render-prospecting"));
+      break;
+
+    case "niches":
+      renderNiches();
       break;
 
     case "project": {
@@ -277,6 +339,8 @@ function syncViewContent(view) {
         document.getElementById("knowledge-client-name").textContent = activeClient.name;
         renderKnowledgeFactsList(activeClient);
         loadGapQuestions(activeClient.id);
+        loadRemoteKnowledgeSuggestions(activeClient.id);
+        loadRemoteDirectData(activeClient.id);
       }
       break;
 
@@ -301,10 +365,12 @@ function syncViewContent(view) {
       if (!activeClient) {
         simWarning.style.display = "flex";
         simContent.style.display = "none";
+        document.getElementById("remote-corrections-panel").style.display = "none";
       } else {
         simWarning.style.display = "none";
         simContent.style.display = "flex";
-        
+        loadRemoteCorrections(activeClient.id);
+
         // Cargar cabecera del chat
         document.getElementById("wa-agent-name").textContent = activeClient.agent?.name || "Agente";
         
@@ -486,6 +552,142 @@ async function loadGapQuestions(clientId) {
   }
 }
 
+async function loadRemoteKnowledgeSuggestions(clientId) {
+  const panel = document.getElementById("remote-suggestions-panel");
+  const container = document.getElementById("remote-suggestions-list");
+  if (!panel || !container) return;
+  try {
+    const infraRes = await fetch(`/api/clients/${clientId}/infrastructure`);
+    const infra = infraRes.ok ? await infraRes.json() : null;
+    if (!infra?.vault_configured) { panel.style.display = "none"; return; }
+    const res = await fetch(`/api/clients/${clientId}/remote-inbox`);
+    if (!res.ok) { panel.style.display = "none"; return; }
+    const { suggestions } = await res.json();
+    if (!suggestions?.length) {
+      panel.style.display = "none";
+      return;
+    }
+    panel.style.display = "block";
+    container.innerHTML = suggestions.map(item => `
+      <div class="gap-question" data-suggestion-id="${escapeHTML(item.id)}">
+        <span>${escapeHTML(item.category)}</span>
+        <strong>${escapeHTML(item.subject)}</strong>
+        <p>${escapeHTML(item.value)}</p>
+        <button type="button" class="btn btn-emerald btn-xs btn-approve-suggestion">Aprobar</button>
+      </div>
+    `).join("");
+    container.querySelectorAll(".btn-approve-suggestion").forEach(button => {
+      button.addEventListener("click", async () => {
+        const row = button.closest("[data-suggestion-id]");
+        const suggestionId = row.dataset.suggestionId;
+        button.disabled = true;
+        button.textContent = "Aprobando…";
+        try {
+          const approveRes = await fetch(`/api/clients/${clientId}/remote-inbox/suggestions/${suggestionId}/approve`, { method: "POST" });
+          const data = await approveRes.json().catch(() => ({}));
+          if (!approveRes.ok) throw new Error(data.error || "No se pudo aprobar la sugerencia.");
+          await fetchClients();
+          syncGlobalUI();
+          syncViewContent("knowledge");
+        } catch (err) {
+          alert(err.message);
+          button.disabled = false;
+          button.textContent = "Aprobar";
+        }
+      });
+    });
+  } catch {
+    panel.style.display = "none";
+  }
+}
+
+// Sólo lectura: Datos/Info que el cliente cargó directo, sin pasar por aprobación de Daniel.
+// Existe únicamente para que quede visible/auditable, no para actuar sobre ello.
+async function loadRemoteDirectData(clientId) {
+  const panel = document.getElementById("remote-direct-data-panel");
+  const container = document.getElementById("remote-direct-data-list");
+  if (!panel || !container) return;
+  try {
+    const infraRes = await fetch(`/api/clients/${clientId}/infrastructure`);
+    const infra = infraRes.ok ? await infraRes.json() : null;
+    if (!infra?.vault_configured) { panel.style.display = "none"; return; }
+    const res = await fetch(`/api/clients/${clientId}/remote-inbox`);
+    if (!res.ok) { panel.style.display = "none"; return; }
+    const { businessData, businessInfo } = await res.json();
+    if (!businessData?.length && !businessInfo?.length) { panel.style.display = "none"; return; }
+    panel.style.display = "block";
+    container.innerHTML = [
+      ...(businessData || []).map(item => `
+        <div class="gap-question">
+          <span>DATO · ${escapeHTML(item.category || "general")}</span>
+          <strong>${escapeHTML(item.label)}</strong>
+          <p>${escapeHTML(item.value)}</p>
+        </div>
+      `),
+      ...(businessInfo || []).map(item => `
+        <div class="gap-question">
+          <span>INFO</span>
+          <p>${escapeHTML(item.text)}</p>
+        </div>
+      `)
+    ].join("");
+  } catch {
+    panel.style.display = "none";
+  }
+}
+
+async function loadRemoteCorrections(clientId) {
+  const panel = document.getElementById("remote-corrections-panel");
+  const container = document.getElementById("remote-corrections-list");
+  if (!panel || !container) return;
+  try {
+    const infraRes = await fetch(`/api/clients/${clientId}/infrastructure`);
+    const infra = infraRes.ok ? await infraRes.json() : null;
+    if (!infra?.vault_configured) { panel.style.display = "none"; return; }
+    const res = await fetch(`/api/clients/${clientId}/remote-inbox`);
+    if (!res.ok) { panel.style.display = "none"; return; }
+    const { corrections } = await res.json();
+    if (!corrections?.length) { panel.style.display = "none"; return; }
+    panel.style.display = "block";
+    container.innerHTML = corrections.map(item => `
+      <div class="knowledge-fact-item" data-correction-id="${escapeHTML(item.id)}" style="margin-bottom:12px;">
+        ${item.question ? `<div class="knowledge-fact-header"><span class="knowledge-fact-subject">Preguntó</span></div><div class="knowledge-fact-value">${escapeHTML(item.question)}</div>` : ""}
+        ${item.reply ? `<div class="knowledge-fact-header"><span class="knowledge-fact-subject">Respondió el agente</span></div><div class="knowledge-fact-value">${escapeHTML(item.reply)}</div>` : ""}
+        <div class="knowledge-fact-header"><span class="knowledge-fact-subject">Corrección del dueño</span><span class="k-doc-tag">${escapeHTML(item.status)}</span></div>
+        <div class="knowledge-fact-notes">${escapeHTML(item.correction_text || "Sin detalle adicional.")}</div>
+        <div class="knowledge-fact-footer">
+          <button type="button" class="btn btn-outline btn-xs btn-correction-status" data-status="reviewing">En revisión</button>
+          <button type="button" class="btn btn-emerald btn-xs btn-correction-status" data-status="resolved">Ya lo arreglamos</button>
+        </div>
+      </div>
+    `).join("");
+    container.querySelectorAll(".btn-correction-status").forEach(button => {
+      button.addEventListener("click", async () => {
+        const row = button.closest("[data-correction-id]");
+        const correctionId = row.dataset.correctionId;
+        const status = button.dataset.status;
+        button.disabled = true;
+        try {
+          const patchRes = await fetch(`/api/clients/${clientId}/remote-inbox/corrections/${correctionId}/status`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status })
+          });
+          const data = await patchRes.json().catch(() => ({}));
+          if (!patchRes.ok) throw new Error(data.error || "No se pudo actualizar la corrección.");
+          await loadRemoteCorrections(clientId);
+          window.dispatchEvent(new CustomEvent("zeroagent:render-activity"));
+        } catch (err) {
+          alert(err.message);
+          button.disabled = false;
+        }
+      });
+    });
+  } catch {
+    panel.style.display = "none";
+  }
+}
+
 function escapeHTML(value = "") {
   return String(value)
     .replace(/&/g, "&amp;")
@@ -541,13 +743,20 @@ function renderProjectReadiness(client) {
   const agendaEnabled = Boolean(agenda.enabled);
   const agendaCatalogReady = !agendaEnabled || Boolean(agenda.services?.length && agenda.resources?.length);
 
+  const infra = client.infrastructure || {};
+
   const items = [
     { ready: hasAgentIdentity, text: hasAgentIdentity ? "Identidad y directivas configuradas" : "Falta configurar identidad y directivas" },
     { ready: sources.length > 0, text: sources.length ? `${sources.length} fuente(s) registrada(s)` : "Falta registrar una fuente original" },
     { ready: approvedSources > 0, text: approvedSources ? `${approvedSources} fuente(s) aprobada(s)` : "Falta revisar y aprobar información" },
     { ready: pendingJobs === 0, text: pendingJobs ? `${pendingJobs} tarea(s) pendiente(s) para IDE` : "No hay tareas pendientes para IDE" },
     { ready: agendaCatalogReady, text: !agendaEnabled ? "Agenda v1 no aplica a este agente" : agendaCatalogReady ? `Agenda v1 preparada: ${agenda.services.length} servicio(s) y ${agenda.resources.length} recurso(s)` : "Agenda v1 activa pero falta catálogo de servicios o recursos" },
-    { ready: hasVersion, text: hasVersion ? "Existe al menos una versión del agente" : "Aún no existe un paquete versionado" }
+    { ready: hasVersion, text: hasVersion ? "Existe al menos una versión del agente" : "Aún no existe un paquete versionado" },
+    { ready: infra.connected, text: infra.connected ? "Vault Supabase conectado y verificado" : "Falta configurar y verificar el vault Supabase del cliente" },
+    { ready: infra.migrationApplied, text: infra.migrationApplied ? "Migración SQL aplicada" : "Falta ejecutar agenda-v1.sql + extras en el Supabase del cliente" },
+    { ready: infra.catalogSeeded, text: infra.catalogSeeded ? "Catálogo sembrado en Supabase" : "Falta sembrar el catálogo (npm run setup:agenda)" },
+    { ready: Boolean(infra.vercelProjectUrl), text: infra.vercelProjectUrl ? `Desplegado en Vercel: ${infra.vercelProjectUrl}` : "Falta desplegar el proyecto en Vercel" },
+    { ready: infra.envVarsSet, text: infra.envVarsSet ? "Variables de entorno configuradas en Vercel" : "Falta configurar las variables de entorno en Vercel" }
   ];
 
   container.innerHTML = `
@@ -802,6 +1011,10 @@ async function loadInfrastructure(client) {
     document.getElementById('infra-secret-key').value = '';
     const detail = infra.vault_configured ? `Vault local configurado (${infra.credential_hint || 'clave protegida'}) · ${infra.connection_status}` : 'Sin credencial configurada.';
     document.getElementById('infra-vault-status').textContent = detail;
+    document.getElementById('checklist-vercel-url').value = infra.vercel_project_url || '';
+    document.getElementById('checklist-migration').checked = Boolean(infra.migration_applied);
+    document.getElementById('checklist-catalog').checked = Boolean(infra.catalog_seeded);
+    document.getElementById('checklist-envvars').checked = Boolean(infra.env_vars_set);
   } catch (error) { document.getElementById('infra-vault-status').textContent = `Error: ${error.message}`; }
 }
 
@@ -824,9 +1037,9 @@ function renderAgendaConfig(client) {
   document.getElementById('agenda-slot').value = rules.slot_interval_minutes ?? 15;
   document.getElementById('agenda-notice').value = rules.minimum_notice_hours ?? 2;
   document.getElementById('agenda-policy').value = agenda.cancellation_policy || '';
-  document.getElementById('agenda-locations').value = formatAgendaLines(agenda.locations, item => [item.name, item.address, item.hours].filter(Boolean).join(' | '));
-  document.getElementById('agenda-services').value = formatAgendaLines(agenda.services, item => [item.name, item.duration_minutes, item.price_clp].filter(value => value !== undefined && value !== null && value !== '').join(' | '));
-  document.getElementById('agenda-resources').value = formatAgendaLines(agenda.resources, item => [item.name, item.specialty, Array.isArray(item.services) ? item.services.join(', ') : item.services].filter(Boolean).join(' | '));
+  document.getElementById('agenda-locations').value = formatAgendaLines(agenda.locations, item => [item.name, item.address, item.hours, item.kind || 'premise', item.area_note].filter(Boolean).join(' | '));
+  document.getElementById('agenda-services').value = formatAgendaLines(agenda.services, item => [item.name, item.duration_minutes, item.price_clp ?? '', item.delivery_mode || 'onsite', Array.isArray(item.locations) ? item.locations.join(', ') : '', item.price_type || 'fixed', item.price_note || item.service_area_note || ''].join(' | ').replace(/(?:\s*\|\s*)+$/, ''));
+  document.getElementById('agenda-resources').value = formatAgendaLines(agenda.resources, item => [item.name, item.specialty, Array.isArray(item.services) ? item.services.join(', ') : item.services, Array.isArray(item.locations) && item.locations.length ? item.locations.join(', ') : item.location].filter(Boolean).join(' | '));
   updateAgendaContractStatus(agenda);
   loadStudioAgendaFeedback(client);
   lucide.createIcons();
@@ -865,17 +1078,24 @@ function readAgendaForm() {
     reminder_hours: toNumber('agenda-reminder', 24),
     cancellation_policy: document.getElementById('agenda-policy').value.trim(),
     locations: splitAgendaLines(document.getElementById('agenda-locations').value, line => {
-      const [name, address = '', hours = ''] = line.split('|').map(part => part.trim());
-      return name ? { name, address, hours } : null;
+      const [name, address = '', hours = '', kind = 'premise', area_note = ''] = line.split('|').map(part => part.trim());
+      return name ? { name, address, hours, kind, area_note } : null;
     }),
     services: splitAgendaLines(document.getElementById('agenda-services').value, line => {
-      const [name, duration, price = ''] = line.split('|').map(part => part.trim());
+      const [name, duration, price = '', delivery_mode = 'onsite', locations = '', price_type = 'fixed', note = ''] = line.split('|').map(part => part.trim());
       if (!name) return null;
-      return { name, duration_minutes: Number(duration) || 30, price_clp: price ? Number(String(price).replace(/[^0-9]/g, '')) || null : null };
+      return {
+        name, duration_minutes: Number(duration) || 30, price_clp: price ? Number(String(price).replace(/[^0-9]/g, '')) || null : null,
+        delivery_mode, locations: locations.split(',').map(item => item.trim()).filter(Boolean), price_type,
+        price_note: note, service_area_note: delivery_mode === 'mobile' ? note : '',
+        requires_customer_address: delivery_mode === 'mobile', bookable: delivery_mode !== 'external',
+        redirect_note: delivery_mode === 'external' ? note : ''
+      };
     }),
     resources: splitAgendaLines(document.getElementById('agenda-resources').value, line => {
-      const [name, specialty = '', services = ''] = line.split('|').map(part => part.trim());
-      return name ? { name, specialty, services: services.split(',').map(item => item.trim()).filter(Boolean) } : null;
+      const [name, specialty = '', services = '', locations = ''] = line.split('|').map(part => part.trim());
+      const locationList = locations.split(',').map(item => item.trim()).filter(Boolean);
+      return name ? { name, specialty, services: services.split(',').map(item => item.trim()).filter(Boolean), locations: locationList, location: locationList.length === 1 ? locationList[0] : undefined } : null;
     }),
     rules: {
       slot_interval_minutes: toNumber('agenda-slot', 15),
@@ -883,7 +1103,11 @@ function readAgendaForm() {
       maximum_advance_days: 60,
       require_customer_phone: true,
       human_handoff_on_conflict: true
-    }
+    },
+    // No hay UI todavía para editar franjas de riesgo desde Studio — preservar lo que ya
+    // existía en vez de omitirlo, porque el backend reemplaza el arreglo completo al guardar
+    // (normalizeAgendaConfig) y omitirlo lo deja en [] silenciosamente.
+    risk_windows: state.clients.find(item => item.id === state.activeClientId)?.agenda?.risk_windows || []
   };
 }
 
@@ -933,6 +1157,7 @@ function initEventListeners() {
     const name = document.getElementById("new-client-name").value.trim();
     const niche = document.getElementById("new-client-niche").value.trim();
     const desc = document.getElementById("new-client-desc").value.trim();
+    const verticalKey = document.getElementById("new-client-vertical").value;
     
     const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 
@@ -946,6 +1171,7 @@ function initEventListeners() {
       name,
       niche,
       desc,
+      verticalKey,
       agent: {
         name: `Asistente de ${name}`,
         tone: "friendly",
@@ -1050,11 +1276,47 @@ function initEventListeners() {
     const client = state.clients.find(c => c.id === state.activeClientId); if (!client || !confirm(`¿Olvidar la credencial local de ${client.name}?`)) return;
     try { const res = await fetch(`/api/clients/${client.id}/infrastructure`, {method:'DELETE'}); if (!res.ok) throw new Error((await res.json()).error); await loadInfrastructure(client); } catch (error) { alert(error.message); }
   });
+  document.getElementById('deployment-checklist-form').addEventListener('submit', async (e) => {
+    e.preventDefault(); const client = state.clients.find(c => c.id === state.activeClientId); if (!client) return;
+    try {
+      const res = await fetch(`/api/clients/${client.id}/deployment-checklist`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({
+        vercelProjectUrl: document.getElementById('checklist-vercel-url').value,
+        migrationApplied: document.getElementById('checklist-migration').checked,
+        catalogSeeded: document.getElementById('checklist-catalog').checked,
+        envVarsSet: document.getElementById('checklist-envvars').checked
+      }) });
+      if (!res.ok) throw new Error((await res.json()).error);
+      await fetchClients(); syncGlobalUI(); syncViewContent("project");
+    } catch (error) { alert(`No se pudo guardar el checklist: ${error.message}`); }
+  });
 
   document.getElementById('agenda-config-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     try { await saveAgendaConfig(); alert('Configuración de Agenda v1 guardada.'); }
     catch (error) { alert(error.message); }
+  });
+  document.getElementById('btn-config-drift').addEventListener('click', async () => {
+    const client = state.clients.find(c => c.id === state.activeClientId);
+    const result = document.getElementById('config-drift-result');
+    if (!client) return;
+    result.textContent = 'Comparando…';
+    try {
+      const res = await fetch(`/api/clients/${client.id}/config-drift`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'No se pudo comparar.');
+      const groups = [
+        ['Sedes', data.locations], ['Servicios', data.services], ['Profesionales/recursos', data.resources]
+      ];
+      const lines = [];
+      for (const [label, diff] of groups) {
+        if (diff.missingInSupabase.length) lines.push(`${label}: falta sembrar en Supabase → ${diff.missingInSupabase.map(item => item.name).join(', ')}`);
+        if (diff.onlyInSupabase.length) lines.push(`${label}: existen en Supabase pero no en Studio → ${diff.onlyInSupabase.map(item => item.name).join(', ')}`);
+        if (diff.mismatched.length) lines.push(`${label}: datos distintos → ${diff.mismatched.map(item => `${item.name} (${item.fields.join(', ')})`).join('; ')}`);
+      }
+      result.innerHTML = lines.length
+        ? `<strong class="text-orange">Diferencias encontradas:</strong><br>${lines.map(escapeHTML).join('<br>')}`
+        : '<strong class="text-emerald">Sin diferencias. El catálogo local coincide con el Supabase real.</strong>';
+    } catch (error) { result.textContent = `Error: ${error.message}`; }
   });
   document.getElementById('agenda-catalog-form').addEventListener('submit', async (e) => {
     e.preventDefault();

@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { colorIdForLocation, createGoogleCalendarEvent, deleteGoogleCalendarEvent, getGoogleCalendarBusyIntervals, updateGoogleCalendarEventTime } from './google-calendar.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 function statePathFor(packageData) {
@@ -140,6 +141,72 @@ function overlaps(aStart, aDuration, bStart, bDuration) {
   return aStart < bEnd && bStart < aEnd;
 }
 
+// Nunca deja que una falla de Google Calendar rompa el flujo real de agenda (crear/cancelar/
+// reagendar una cita) — sync best-effort, se loguea (logs del runtime en Vercel) y se sigue.
+async function syncGoogleCalendarBestEffort(action) {
+  try { await action(); } catch (error) { console.error('[google-calendar] sync falló:', error.message); }
+}
+
+// Sólo se usa para filtrar disponibilidad — si Google falla, se ofrecen los horarios sin
+// filtrar por Calendar en vez de tumbar la consulta completa (mejor mostrar de más que trabarse).
+async function excludeGoogleCalendarBusySlots(slots, durationMinutes, date, timeZone) {
+  if (!slots.length) return slots;
+  let busy = [];
+  try {
+    const rangeStart = zonedDateTimeToUtc(date, '00:00', timeZone).toISOString();
+    const rangeEnd = zonedDateTimeToUtc(date, '23:59', timeZone).toISOString();
+    busy = await getGoogleCalendarBusyIntervals(rangeStart, rangeEnd);
+  } catch (error) {
+    console.error('[google-calendar] freebusy falló, se ofrecen horarios sin filtrar por Calendar:', error.message);
+    return slots;
+  }
+  if (!busy.length) return slots;
+  return slots.filter(iso => {
+    const start = new Date(iso).getTime();
+    const end = start + durationMinutes * 60_000;
+    return !busy.some(interval => start < new Date(interval.end).getTime() && new Date(interval.start).getTime() < end);
+  });
+}
+
+// excludeGoogleCalendarBusySlots sólo protege a quien primero consulta disponibilidad
+// (bot de WhatsApp, widget público) — la reserva manual de staff en la consola (PC y móvil)
+// postea un horario escrito a mano directo a createAgendaAppointment sin pasar por ahí antes.
+// Este chequeo corre DENTRO de createAgendaAppointment mismo para cubrir cualquier origen por
+// igual, presente o futuro, en vez de parchar cada diálogo del frontend uno por uno.
+async function assertNotBusyOnGoogleCalendar(startIso, endIso) {
+  let busy;
+  try {
+    busy = await getGoogleCalendarBusyIntervals(startIso, endIso);
+  } catch (error) {
+    console.error('[google-calendar] freebusy check en creación falló, se permite la reserva sin verificar:', error.message);
+    return;
+  }
+  const start = new Date(startIso).getTime();
+  const end = new Date(endIso).getTime();
+  const clash = busy.some(interval => start < new Date(interval.end).getTime() && new Date(interval.start).getTime() < end);
+  if (clash) throw new Error('Ese horario quedó ocupado en el Google Calendar conectado. Elige otro horario.');
+}
+
+const ACTIVE_APPOINTMENT_STATUSES = new Set(['pending_confirmation', 'confirmed']);
+
+export function isActiveAgendaAppointment(appointment, now = Date.now()) {
+  if (!appointment || !ACTIVE_APPOINTMENT_STATUSES.has(appointment.status)) return false;
+  if (appointment.status !== 'pending_confirmation' || !appointment.expires_at) return true;
+  const expiresAt = new Date(appointment.expires_at).getTime();
+  return !Number.isFinite(expiresAt) || expiresAt > now;
+}
+
+function pendingConfirmationTtlMinutes(config) {
+  const configured = Number(config?.rules?.pending_confirmation_ttl_minutes ?? config?.rules?.pending_ttl_minutes ?? 120);
+  return Math.max(5, Math.min(10_080, Number.isFinite(configured) ? Math.round(configured) : 120));
+}
+
+function pendingExpiresAt(config, status, from = Date.now()) {
+  return status === 'pending_confirmation'
+    ? new Date(from + pendingConfirmationTtlMinutes(config) * 60_000).toISOString()
+    : null;
+}
+
 function zonedParts(timestamp, timeZone) {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', weekday: 'short', hourCycle: 'h23'
@@ -206,7 +273,7 @@ export async function getAgendaDashboard(packageData) {
       agendaSupabaseRequest('/rest/v1/za_services?active=eq.true&select=id,name,duration_minutes,price_clp,bookable,redirect_note'),
       agendaSupabaseRequest('/rest/v1/za_resources?active=eq.true&select=id,name,specialty,location_id'),
       agendaSupabaseRequest('/rest/v1/za_resource_services?select=resource_id,service_id'),
-      fetchAllAgendaRows('/rest/v1/za_appointments?select=id,reference,status,source,starts_at,ends_at,notes,za_customers(full_name,phone,email),za_services(name,duration_minutes),za_resources(name),za_locations(name)&order=starts_at.asc'),
+      fetchAllAgendaRows('/rest/v1/za_appointments?select=id,reference,status,source,starts_at,ends_at,expires_at,notes,za_customers(full_name,phone,email),za_services(name,duration_minutes),za_resources(name),za_locations(name)&order=starts_at.asc'),
       agendaSupabaseRequest('/rest/v1/za_availability_rules?select=id,resource_id,day_of_week,starts_at,ends_at,active&order=day_of_week.asc,starts_at.asc'),
       agendaSupabaseRequest('/rest/v1/za_availability_blocks?select=id,resource_id,starts_at,ends_at,reason&order=starts_at.asc'),
       agendaSupabaseRequest('/rest/v1/za_feedback_items?select=id,rating,question,reply,correction_text,status,created_at&order=created_at.desc&limit=30')
@@ -223,7 +290,8 @@ export async function getAgendaDashboard(packageData) {
       config: { timezone: config.timezone, confirmation_mode: config.confirmation_mode, reminder_hours: config.reminder_hours, cancellation_policy: config.cancellation_policy, rules: config.rules },
       catalog: { locations, services, resources: resourceCatalog },
       appointments: appointments.map(item => ({
-        id: item.id, reference: item.reference, status: item.status, source: item.source, starts_at: item.starts_at,
+        id: item.id, reference: item.reference, status: item.status, source: item.source, starts_at: item.starts_at, expires_at: item.expires_at,
+        is_expired: item.status === 'pending_confirmation' && Boolean(item.expires_at) && new Date(item.expires_at).getTime() <= Date.now(),
         duration_minutes: item.za_services?.duration_minutes, notes: item.notes, customer_name: item.za_customers?.full_name,
         customer_phone: item.za_customers?.phone, customer_email: item.za_customers?.email, service: item.za_services?.name, resource: item.za_resources?.name, location: item.za_locations?.name
       })),
@@ -275,13 +343,13 @@ export async function appendAgendaFeedbackLocal(packageData, item) {
 
 // El segmento nunca baja solo: el dueño lo puede bajar a mano, pero el sistema
 // sólo lo sube (frio → caliente → cliente) ante señales reales de avance.
-const SEGMENT_ORDER = { frio: 0, caliente: 1, cliente: 2 };
+const SEGMENT_ORDER = { revisar: -1, frio: 0, caliente: 1, cliente: 2 };
 async function bumpCustomerSegment(customerId, minSegment) {
   if (!customerId || !supabaseSettings()) return;
   try {
     const rows = await agendaSupabaseRequest(`/rest/v1/za_customers?id=eq.${encodeURIComponent(customerId)}&select=id,segment`);
     const current = rows?.[0]?.segment || 'frio';
-    if (SEGMENT_ORDER[current] >= SEGMENT_ORDER[minSegment]) return;
+    if ((SEGMENT_ORDER[current] ?? 0) >= SEGMENT_ORDER[minSegment]) return;
     await agendaSupabaseRequest(`/rest/v1/za_customers?id=eq.${encodeURIComponent(customerId)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ segment: minSegment }) });
   } catch (error) { console.warn('No se pudo actualizar el segmento del cliente:', error.message); }
 }
@@ -300,6 +368,8 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
   // clientes distintos en vez de uno.
   const customerPhone = normalizeChilePhone(cleanText(input.customer_phone, 40)) || cleanText(input.customer_phone, 40);
   const customerEmail = cleanText(input.customer_email, 254);
+  const customerRut = cleanText(input.customer_rut, 20);
+  const customerAddress = cleanText(input.customer_address, 300);
   const customerAge = Number.isInteger(Number(input.customer_age)) && Number(input.customer_age) > 0 ? Number(input.customer_age) : null;
   const customerOccupation = cleanText(input.customer_occupation, 120);
   const customerMedicalHistory = cleanText(input.customer_medical_history, 800);
@@ -308,6 +378,8 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
   const service = dashboard.catalog.services.find(item => item.name === serviceName);
   const resource = dashboard.catalog.resources.find(item => item.name === resourceName);
   if (!service || !resource) throw new Error('El servicio o profesional seleccionado no existe en este paquete.');
+  if (customerEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail)) throw new Error('El correo informado no es válido.');
+  if (!(resource.services || []).includes(service.name)) throw new Error('El profesional no realiza ese servicio.');
   // Servicio no gestionado por este negocio (ej. atención en un centro de terceros): nunca se
   // agenda por ningún canal, sin importar el origen (reserva pública, consola, WhatsApp).
   if (service.bookable === false) throw new Error(service.redirect_note || `"${service.name}" no se agenda por este canal.`);
@@ -317,39 +389,75 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
   if (new Date(startsAt).getTime() < Date.now()) throw new Error('No se pueden crear reservas en el pasado.');
   const minimumNotice = Number(config.rules?.minimum_notice_hours || 0) * 3_600_000;
   if (new Date(startsAt).getTime() - Date.now() < minimumNotice) throw new Error('El horario no cumple el aviso mínimo configurado.');
-  const maximumAdvance = Number(config.rules?.maximum_advance_days || 730) * 86_400_000;
+  const maximumAdvance = Number(config.rules?.maximum_advance_days ?? 730) * 86_400_000;
   if (new Date(startsAt).getTime() - Date.now() > maximumAdvance) throw new Error('El horario supera la anticipación máxima configurada.');
   // La franja de riesgo aplica acá, no sólo en la tool del agente de WhatsApp: cualquier
-  // origen (reserva pública, consola, staff) puede crear un cruce que Francisco no controla
+  // origen (reserva pública, consola, staff) puede crear un cruce que el equipo no controla
   // del todo. Nunca auto-confirmamos ese horario, sin importar el confirmation_mode del negocio.
   const riskWindow = findRiskWindow(packageData, resourceName, startsAt);
   const effectiveConfirmationMode = riskWindow ? 'manual' : config.confirmation_mode;
   const riskNote = riskWindow ? `[Franja de riesgo] ${riskWindow.reason || 'Posible compromiso del profesional en otro lugar a esta hora.'} Confirmar disponibilidad real antes de aceptar.` : '';
   const notesWithRisk = [cleanText(input.notes, 800), riskNote].filter(Boolean).join(' — ').slice(0, 800);
+  const checkDurationMinutes = Number(service.duration_minutes) || 30;
+  await assertNotBusyOnGoogleCalendar(startsAt, new Date(new Date(startsAt).getTime() + checkDurationMinutes * 60_000).toISOString());
   if (supabaseSettings()) {
-    const location = dashboard.catalog.locations.find(item => item.name === cleanText(input.location));
+    const explicitLocation = dashboard.catalog.locations.find(item => item.name === cleanText(input.location));
+    // La sede real de la cita puede venir del recurso (resource.location_id) cuando la reserva
+    // no manda `location` explícito (típico del bot de WhatsApp) — usar sólo `explicitLocation`
+    // acá dejaba el evento de Calendar sin color pese a que la cita sí tenía sede conocida.
+    const location = explicitLocation || dashboard.catalog.locations.find(item => item.id === resource.location_id) || null;
     const result = await agendaSupabaseRequest('/rest/v1/rpc/za_request_appointment', {
       method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({
         p_customer_name: customerName, p_customer_phone: customerPhone, p_service_id: service.id, p_resource_id: resource.id,
         p_starts_at: startsAt, p_source: source, p_location_id: location?.id || resource.location_id || null,
         p_notes: notesWithRisk, p_confirmation_mode: effectiveConfirmationMode,
         p_minimum_notice_hours: Number(config.rules?.minimum_notice_hours || 0),
-        p_maximum_advance_days: Number(config.rules?.maximum_advance_days || 730),
+        p_maximum_advance_days: Number(config.rules?.maximum_advance_days ?? 730),
+        p_pending_ttl_minutes: pendingConfirmationTtlMinutes(config),
         p_customer_email: customerEmail || null, p_customer_age: customerAge,
         p_customer_occupation: customerOccupation || null, p_customer_medical_history: customerMedicalHistory || null,
-        p_customer_extra_symptoms: customerExtraSymptoms || null
+        p_customer_extra_symptoms: customerExtraSymptoms || null, p_customer_rut: customerRut || null,
+        p_customer_address: customerAddress || null
       })
     });
     const appointment = Array.isArray(result) ? result[0] : result;
     await bumpCustomerSegment(appointment.customer_id, 'caliente');
-    return { ...appointment, customer_name: customerName, customer_phone: customerPhone, customer_email: customerEmail, service: serviceName, resource: resourceName, location: location?.name || '', risk_window: riskWindow || null };
+    await syncGoogleCalendarBestEffort(async () => {
+      // za_request_appointment dedupea reintentos devolviendo la fila existente — si ya tiene
+      // event_id, un reintento acá crearía un segundo evento y una segunda invitación por correo.
+      if (appointment.google_calendar_event_id) return;
+      const eventId = await createGoogleCalendarEvent({
+        summary: `${serviceName} — ${customerName}`,
+        description: [`Servicio: ${serviceName}`, `Teléfono: ${customerPhone}`, notesWithRisk].filter(Boolean).join('\n'),
+        startIso: appointment.starts_at, endIso: appointment.ends_at,
+        attendeeEmail: customerEmail || null, colorId: colorIdForLocation(location?.name || '')
+      });
+      if (!eventId) return;
+      // Ventana angosta pero real: si un cancelar llegó mientras Google creaba el evento (dos
+      // llamadas de red), no dejar el evento vivo en Calendar para una cita ya cancelada acá.
+      const freshRows = await agendaSupabaseRequest(`/rest/v1/za_appointments?id=eq.${encodeURIComponent(appointment.id)}&select=status`);
+      if (['cancelled', 'rejected'].includes(freshRows?.[0]?.status)) {
+        await deleteGoogleCalendarEvent(eventId);
+        return;
+      }
+      await agendaSupabaseRequest(`/rest/v1/za_appointments?id=eq.${encodeURIComponent(appointment.id)}`, {
+        method: 'PATCH', body: JSON.stringify({ google_calendar_event_id: eventId })
+      });
+      appointment.google_calendar_event_id = eventId;
+    });
+    return { ...appointment, customer_name: customerName, customer_phone: customerPhone, customer_email: customerEmail, customer_rut: customerRut, customer_address: customerAddress, service: serviceName, resource: resourceName, location: location?.name || '', risk_window: riskWindow || null };
   }
   const duration = Number(service.duration_minutes) || 30;
   const startTime = new Date(startsAt).getTime();
+  const exactExisting = state.appointments.find(item => isActiveAgendaAppointment(item)
+    && item.resource === resourceName && item.service === serviceName
+    && normalizeChilePhone(item.customer_phone) === customerPhone
+    && new Date(item.starts_at).getTime() === startTime);
+  if (exactExisting) return { ...exactExisting, duplicate: true };
   if (!isWithinLocalAvailability(state, resourceName, startsAt, duration, config.timezone || 'America/Santiago')) {
     throw new Error('Horario fuera de disponibilidad. Define horarios explícitos para este profesional antes de reservar.');
   }
-  const conflict = state.appointments.find(item => item.resource === resourceName && !['cancelled', 'rejected'].includes(item.status)
+  const conflict = state.appointments.find(item => item.resource === resourceName && isActiveAgendaAppointment(item)
     && overlaps(startTime, duration, new Date(item.starts_at).getTime(), Number(item.duration_minutes) || 30));
   if (conflict) throw new Error('Ese profesional ya tiene una reserva que se cruza con el horario solicitado.');
   const endTime = startTime + duration * 60_000;
@@ -362,16 +470,22 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
     created_at: new Date().toISOString(),
     source,
     status: effectiveConfirmationMode === 'automatic' ? 'confirmed' : 'pending_confirmation',
+    expires_at: pendingExpiresAt(config, effectiveConfirmationMode === 'automatic' ? 'confirmed' : 'pending_confirmation'),
     customer_name: customerName,
     customer_phone: customerPhone,
     customer_email: customerEmail,
+    customer_rut: customerRut,
+    customer_address: customerAddress,
     customer_age: customerAge,
     customer_occupation: customerOccupation,
     customer_medical_history: customerMedicalHistory,
     customer_extra_symptoms: customerExtraSymptoms,
     service: serviceName,
     resource: resourceName,
-    location: cleanText(input.location) || state.catalog.locations[0]?.name || '',
+    // Mismo fallback que la rama Supabase (resource.location_id): si la reserva no manda
+    // `location` explícito, usar la sede propia del recurso (`resource.location`, nombre —
+    // este catálogo local no tiene ids de Supabase) antes de caer al primer catálogo genérico.
+    location: cleanText(input.location) || resource.location || state.catalog.locations[0]?.name || '',
     starts_at: startsAt,
     duration_minutes: duration,
     notes: notesWithRisk,
@@ -379,10 +493,32 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
   };
   state.appointments.push(appointment);
   await saveAgendaState(packageData, state);
+  await syncGoogleCalendarBestEffort(async () => {
+    const eventId = await createGoogleCalendarEvent({
+      summary: `${serviceName} — ${customerName}`,
+      description: [`Servicio: ${serviceName}`, `Teléfono: ${customerPhone}`, notesWithRisk].filter(Boolean).join('\n'),
+      startIso: appointment.starts_at, endIso: new Date(endTime).toISOString(),
+      attendeeEmail: customerEmail || null, colorId: colorIdForLocation(appointment.location)
+    });
+    if (!eventId) return;
+    // Misma ventana angosta que en la rama Supabase: si un cancelar llegó mientras Google creaba
+    // el evento, no dejar el evento vivo en Calendar para una cita ya cancelada acá.
+    const freshState = await loadAgendaState(packageData);
+    const freshAppointment = freshState.appointments.find(item => item.id === appointment.id);
+    if (!freshAppointment || ['cancelled', 'rejected'].includes(freshAppointment.status)) {
+      await deleteGoogleCalendarEvent(eventId);
+      return;
+    }
+    appointment.google_calendar_event_id = eventId;
+    freshAppointment.google_calendar_event_id = eventId;
+    await saveAgendaState(packageData, freshState);
+  });
   return appointment;
 }
 
 export async function updateAgendaAppointment(packageData, id, status) {
+  const config = agendaConfig(packageData);
+  if (!config) throw new Error('Agenda v1 no está habilitada en este paquete.');
   const allowed = ['pending_confirmation', 'confirmed', 'cancelled', 'completed', 'no_show', 'rejected'];
   if (!allowed.includes(status)) throw new Error('Estado de reserva inválido.');
   if (supabaseSettings()) {
@@ -395,6 +531,9 @@ export async function updateAgendaAppointment(packageData, id, status) {
     });
     const appointment = Array.isArray(result) ? result[0] : result;
     if (['confirmed', 'completed'].includes(status)) await bumpCustomerSegment(appointment.customer_id, 'cliente');
+    if (['cancelled', 'rejected'].includes(status) && appointment.google_calendar_event_id) {
+      await syncGoogleCalendarBestEffort(() => deleteGoogleCalendarEvent(appointment.google_calendar_event_id));
+    }
     return appointment;
   }
   const state = await loadAgendaState(packageData);
@@ -407,14 +546,31 @@ export async function updateAgendaAppointment(packageData, id, status) {
   };
   if (appointment.status !== status && !transitions[appointment.status]?.includes(status)) throw new Error('Transición de estado no permitida.');
   if (status === 'confirmed') {
+    if (appointment.status === 'pending_confirmation' && !isActiveAgendaAppointment(appointment)) {
+      throw new Error('La solicitud pendiente venció; crea una nueva reserva para confirmar ese horario.');
+    }
+    const duration = Number(appointment.duration_minutes) || 30;
+    const start = new Date(appointment.starts_at).getTime();
+    const end = start + duration * 60_000;
+    if (!isWithinLocalAvailability(state, appointment.resource, appointment.starts_at, duration, config.timezone || 'America/Santiago')) {
+      throw new Error('El horario ya no está dentro de la disponibilidad del profesional.');
+    }
+    if ((state.blocks || []).some(block => block.resource === appointment.resource
+      && start < new Date(block.ends_at).getTime() && new Date(block.starts_at).getTime() < end)) {
+      throw new Error('El horario fue bloqueado y ya no se puede confirmar.');
+    }
     const conflict = state.appointments.find(item => item.id !== appointment.id && item.resource === appointment.resource
-      && !['cancelled', 'rejected'].includes(item.status)
-      && overlaps(new Date(appointment.starts_at).getTime(), Number(appointment.duration_minutes) || 30, new Date(item.starts_at).getTime(), Number(item.duration_minutes) || 30));
+      && isActiveAgendaAppointment(item)
+      && overlaps(start, duration, new Date(item.starts_at).getTime(), Number(item.duration_minutes) || 30));
     if (conflict) throw new Error('El horario ya fue ocupado por otra reserva.');
   }
   appointment.status = status;
+  if (status !== 'pending_confirmation') appointment.expires_at = null;
   appointment.updated_at = new Date().toISOString();
   await saveAgendaState(packageData, state);
+  if (['cancelled', 'rejected'].includes(status) && appointment.google_calendar_event_id) {
+    await syncGoogleCalendarBestEffort(() => deleteGoogleCalendarEvent(appointment.google_calendar_event_id));
+  }
   return appointment;
 }
 
@@ -424,16 +580,41 @@ export async function updateAgendaAppointment(packageData, id, status) {
 export async function getAvailableSlots(packageData, { service, resource, date }) {
   const config = agendaConfig(packageData);
   if (!config) throw new Error('Agenda v1 no está habilitada en este paquete.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) throw new Error('Fecha inválida; usa YYYY-MM-DD.');
+  if (supabaseSettings()) {
+    // Consulta puntual en vez de getAgendaDashboard() completo: el dashboard trae TODAS las
+    // citas históricas paginadas (miles de filas en clientes con actividad real) sólo para
+    // validar un servicio/recurso — este es el chequeo de mayor frecuencia de todo Calendar
+    // (cada consulta de disponibilidad del bot/widget lo paga), así que el ahorro es real.
+    const serviceName = cleanText(service);
+    const resourceName = cleanText(resource);
+    const [services, resources] = await Promise.all([
+      agendaSupabaseRequest(`/rest/v1/za_services?name=eq.${encodeURIComponent(serviceName)}&select=id,name,duration_minutes,bookable,redirect_note&limit=1`),
+      agendaSupabaseRequest(`/rest/v1/za_resources?name=eq.${encodeURIComponent(resourceName)}&select=id,name&limit=1`)
+    ]);
+    const svc = services?.[0];
+    const res = resources?.[0];
+    if (!svc || !res) throw new Error('Servicio o profesional no configurado.');
+    if (svc.bookable === false) throw new Error(svc.redirect_note || 'Ese servicio no se agenda por este canal.');
+    const links = await agendaSupabaseRequest(`/rest/v1/za_resource_services?resource_id=eq.${encodeURIComponent(res.id)}&service_id=eq.${encodeURIComponent(svc.id)}&select=resource_id&limit=1`);
+    if (!links?.length) throw new Error('El profesional no realiza ese servicio.');
+    const slots = await agendaSupabaseRequest('/rest/v1/rpc/za_available_slots', {
+      method: 'POST', body: JSON.stringify({
+        p_service_id: svc.id, p_resource_id: res.id, p_date: date,
+        p_interval_minutes: config.rules?.slot_interval_minutes || 15,
+        p_minimum_notice_hours: Number(config.rules?.minimum_notice_hours || 0),
+        p_maximum_advance_days: Number(config.rules?.maximum_advance_days ?? 730)
+      })
+    });
+    const isoSlots = (slots || []).map(item => item.starts_at);
+    return excludeGoogleCalendarBusySlots(isoSlots, Number(svc.duration_minutes) || 30, date, config.timezone || 'America/Santiago');
+  }
   const dashboard = await getAgendaDashboard(packageData);
   const svc = dashboard.catalog.services.find(item => item.name === cleanText(service));
   const res = dashboard.catalog.resources.find(item => item.name === cleanText(resource));
   if (!svc || !res) throw new Error('Servicio o profesional no configurado.');
-  if (supabaseSettings()) {
-    const slots = await agendaSupabaseRequest('/rest/v1/rpc/za_available_slots', {
-      method: 'POST', body: JSON.stringify({ p_service_id: svc.id, p_resource_id: res.id, p_date: date, p_interval_minutes: config.rules?.slot_interval_minutes || 15 })
-    });
-    return (slots || []).map(item => item.starts_at);
-  }
+  if (svc.bookable === false) throw new Error(svc.redirect_note || 'Ese servicio no se agenda por este canal.');
+  if (!(res.services || []).includes(svc.name)) throw new Error('El profesional no realiza ese servicio.');
   const state = await loadAgendaState(packageData);
   const timeZone = config.timezone || 'America/Santiago';
   const day = localDayOfWeek(zonedDateTimeToUtc(date, '12:00', timeZone), timeZone);
@@ -441,8 +622,9 @@ export async function getAvailableSlots(packageData, { service, resource, date }
   const duration = Number(svc.duration_minutes) || 30;
   const interval = Number(config.rules?.slot_interval_minutes) || 15;
   const minimumNotice = Number(config.rules?.minimum_notice_hours || 0) * 3_600_000;
+  const maximumAdvance = Number(config.rules?.maximum_advance_days ?? 730) * 86_400_000;
   const now = Date.now();
-  const busy = state.appointments.filter(item => item.resource === res.name && !['cancelled', 'rejected'].includes(item.status));
+  const busy = state.appointments.filter(item => item.resource === res.name && isActiveAgendaAppointment(item, now));
   const slots = [];
   for (const rule of rules) {
     const [sh, sm] = String(rule.starts_at).split(':').map(Number);
@@ -452,46 +634,97 @@ export async function getAvailableSlots(packageData, { service, resource, date }
     while (cursor.getTime() + duration * 60_000 <= windowEnd.getTime()) {
       const slotStart = cursor.getTime();
       const clashes = busy.some(item => overlaps(slotStart, duration, new Date(item.starts_at).getTime(), Number(item.duration_minutes) || 30));
-      if (!clashes && slotStart > now && slotStart - now >= minimumNotice) slots.push(new Date(slotStart).toISOString());
+      const slotEnd = slotStart + duration * 60_000;
+      const blocked = (state.blocks || []).some(block => block.resource === res.name
+        && slotStart < new Date(block.ends_at).getTime() && new Date(block.starts_at).getTime() < slotEnd);
+      if (!clashes && !blocked && slotStart > now && slotStart - now >= minimumNotice && slotStart - now <= maximumAdvance) slots.push(new Date(slotStart).toISOString());
       cursor.setTime(cursor.getTime() + interval * 60_000);
     }
   }
-  return slots;
+  return excludeGoogleCalendarBusySlots([...new Set(slots)].sort(), duration, date, timeZone);
 }
 
-export async function rescheduleAgendaAppointment(packageData, { id, new_starts_at }) {
+export async function rescheduleAgendaAppointment(packageData, { id, new_starts_at, requester_phone = null }) {
   const config = agendaConfig(packageData);
   if (!config) throw new Error('Agenda v1 no está habilitada en este paquete.');
   const startsAt = asIso(new_starts_at, config.timezone || 'America/Santiago');
   if (!startsAt) throw new Error('Fecha/hora nueva inválida.');
   if (supabaseSettings()) {
+    // Consulta puntual en vez de getAgendaDashboard() completo: el dashboard trae TODAS las
+    // citas históricas paginadas sólo para leer una fila — franciskom ya pasó 1000+ citas, así
+    // que esto ya estaba degradando cada reagendamiento en producción.
+    const currentRows = await agendaSupabaseRequest(`/rest/v1/za_appointments?id=eq.${encodeURIComponent(id)}&select=id,starts_at,status,google_calendar_event_id,za_resources(name),za_services(duration_minutes)`);
+    const current = currentRows?.[0];
+    if (!current) throw new Error('Reserva no encontrada.');
+    const currentResourceName = current.za_resources?.name || '';
+    // Si la nueva hora es igual a la actual (reintento/doble-click), no tiene sentido consultar
+    // freebusy contra el propio evento de Calendar de esta misma cita (se vería a sí mismo como
+    // "ocupado") ni mandar el correo de "tu cita cambió" más abajo — no cambió nada.
+    const sameTime = new Date(startsAt).getTime() === new Date(current.starts_at).getTime();
+    if (!sameTime) {
+      const durationMinutes = Number(current.za_services?.duration_minutes) || 30;
+      const endsAtForCheck = new Date(new Date(startsAt).getTime() + durationMinutes * 60_000).toISOString();
+      await assertNotBusyOnGoogleCalendar(startsAt, endsAtForCheck);
+    }
+    const riskWindow = findRiskWindow(packageData, currentResourceName, startsAt);
+    const effectiveConfirmationMode = riskWindow ? 'manual' : (config.confirmation_mode || 'manual');
+    const riskNote = riskWindow ? `[Franja de riesgo] ${riskWindow.reason || 'Posible compromiso del profesional en otro lugar a esta hora.'} Confirmar disponibilidad real antes de aceptar.` : '';
     const result = await agendaSupabaseRequest('/rest/v1/rpc/za_reschedule_appointment', {
       method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({
         p_appointment_id: id, p_new_starts_at: startsAt,
+        p_requester_phone: requester_phone || null,
         p_minimum_notice_hours: Number(config.rules?.minimum_notice_hours || 0),
-        p_maximum_advance_days: Number(config.rules?.maximum_advance_days || 730),
-        p_confirmation_mode: config.confirmation_mode || 'manual'
+        p_maximum_advance_days: Number(config.rules?.maximum_advance_days ?? 730),
+        p_confirmation_mode: effectiveConfirmationMode,
+        p_pending_ttl_minutes: pendingConfirmationTtlMinutes(config),
+        p_risk_note: riskNote
       })
     });
-    return Array.isArray(result) ? result[0] : result;
+    const appointment = Array.isArray(result) ? result[0] : result;
+    if (appointment.google_calendar_event_id && !sameTime) {
+      await syncGoogleCalendarBestEffort(() => updateGoogleCalendarEventTime(appointment.google_calendar_event_id, { startIso: appointment.starts_at, endIso: appointment.ends_at }));
+    }
+    return { ...appointment, risk_window: riskWindow || null };
   }
   const state = await loadAgendaState(packageData);
   const appointment = state.appointments.find(item => item.id === id);
   if (!appointment) throw new Error('Reserva no encontrada.');
   if (['cancelled', 'rejected', 'completed', 'no_show'].includes(appointment.status)) throw new Error('Esa reserva ya no se puede reagendar.');
+  if (appointment.status === 'pending_confirmation' && !isActiveAgendaAppointment(appointment)) throw new Error('La solicitud pendiente venció y ya no se puede reagendar.');
   const target = new Date(startsAt).getTime();
   if (target < Date.now()) throw new Error('No se puede reagendar al pasado.');
   if (target - Date.now() < Number(config.rules?.minimum_notice_hours || 0) * 3_600_000) throw new Error('El nuevo horario no cumple el aviso mínimo configurado.');
-  if (target - Date.now() > Number(config.rules?.maximum_advance_days || 730) * 86_400_000) throw new Error('El nuevo horario supera la anticipación máxima configurada.');
+  if (target - Date.now() > Number(config.rules?.maximum_advance_days ?? 730) * 86_400_000) throw new Error('El nuevo horario supera la anticipación máxima configurada.');
   const duration = Number(appointment.duration_minutes) || 30;
+  if (!isWithinLocalAvailability(state, appointment.resource, startsAt, duration, config.timezone || 'America/Santiago')) {
+    throw new Error('Horario fuera de disponibilidad.');
+  }
+  const targetEnd = target + duration * 60_000;
+  if ((state.blocks || []).some(block => block.resource === appointment.resource
+    && target < new Date(block.ends_at).getTime() && new Date(block.starts_at).getTime() < targetEnd)) {
+    throw new Error('Ese horario está bloqueado para este profesional.');
+  }
   const conflict = state.appointments.find(item => item.id !== appointment.id && item.resource === appointment.resource
-    && !['cancelled', 'rejected'].includes(item.status)
+    && isActiveAgendaAppointment(item)
     && overlaps(target, duration, new Date(item.starts_at).getTime(), Number(item.duration_minutes) || 30));
   if (conflict) throw new Error('Ese profesional ya tiene una reserva que se cruza con el nuevo horario.');
+  // Mismo criterio que la rama Supabase: hora nueva = hora actual no consulta freebusy (se vería
+  // a sí misma como "ocupada") ni dispara el correo de "tu cita cambió" más abajo.
+  const sameTime = target === new Date(appointment.starts_at).getTime();
+  if (!sameTime) await assertNotBusyOnGoogleCalendar(startsAt, new Date(targetEnd).toISOString());
+  const riskWindow = findRiskWindow(packageData, appointment.resource, startsAt);
+  const effectiveConfirmationMode = riskWindow ? 'manual' : (config.confirmation_mode || 'manual');
+  const riskNote = riskWindow ? `[Franja de riesgo] ${riskWindow.reason || 'Posible compromiso del profesional en otro lugar a esta hora.'} Confirmar disponibilidad real antes de aceptar.` : '';
   appointment.starts_at = startsAt;
-  appointment.status = config.confirmation_mode === 'automatic' ? 'confirmed' : 'pending_confirmation';
+  appointment.status = effectiveConfirmationMode === 'automatic' ? 'confirmed' : 'pending_confirmation';
+  appointment.expires_at = pendingExpiresAt(config, appointment.status);
+  if (riskNote && !String(appointment.notes || '').includes(riskNote)) appointment.notes = [appointment.notes, riskNote].filter(Boolean).join(' — ').slice(0, 800);
+  appointment.risk_window = riskWindow || null;
   appointment.updated_at = new Date().toISOString();
   await saveAgendaState(packageData, state);
+  if (appointment.google_calendar_event_id && !sameTime) {
+    await syncGoogleCalendarBestEffort(() => updateGoogleCalendarEventTime(appointment.google_calendar_event_id, { startIso: appointment.starts_at, endIso: new Date(targetEnd).toISOString() }));
+  }
   return appointment;
 }
 
@@ -501,45 +734,92 @@ export async function seedAgendaCatalog(packageData) {
   const config = agendaConfig(packageData);
   if (!config) throw new Error('Agenda v1 no está habilitada en este paquete.');
   if (!agendaUsesSupabase()) throw new Error('Configura SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY antes de sembrar Agenda.');
-  const [existingLocations, existingServices, existingResources] = await Promise.all([
-    agendaSupabaseRequest('/rest/v1/za_locations?select=id,name'),
-    agendaSupabaseRequest('/rest/v1/za_services?select=id,name'),
-    agendaSupabaseRequest('/rest/v1/za_resources?select=id,name')
+  const [existingLocations, existingServices, existingResources, existingLinks] = await Promise.all([
+    agendaSupabaseRequest('/rest/v1/za_locations?select=id,name,address,timezone,active'),
+    agendaSupabaseRequest('/rest/v1/za_services?select=id,name,duration_minutes,price_clp,bookable,redirect_note,active'),
+    agendaSupabaseRequest('/rest/v1/za_resources?select=id,name,specialty,location_id,active'),
+    agendaSupabaseRequest('/rest/v1/za_resource_services?select=resource_id,service_id')
   ]);
-  const byName = list => new Map((list || []).map(item => [item.name, item]));
+  const keyForName = value => String(value || '').trim().toLocaleLowerCase('es').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const byName = list => new Map((list || []).map(item => [keyForName(item.name), item]));
   const locations = byName(existingLocations); const services = byName(existingServices); const resources = byName(existingResources);
-  let createdLocations = 0; let createdServices = 0; let createdResources = 0;
+  const changed = (row, patch) => Object.entries(patch).some(([key, value]) => (row?.[key] ?? null) !== (value ?? null));
+  const counters = {
+    created: { locations: 0, services: 0, resources: 0, links: 0 },
+    updated: { locations: 0, services: 0, resources: 0 },
+    removed: { links: 0 }
+  };
   for (const item of config.locations || []) {
-    if (!item?.name || locations.has(item.name)) continue;
-    const rows = await agendaSupabaseRequest('/rest/v1/za_locations', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ name: item.name, address: item.address || '', timezone: config.timezone }) });
-    locations.set(item.name, rows[0]); createdLocations++;
+    if (!item?.name) continue;
+    const key = keyForName(item.name);
+    const patch = { name: cleanText(item.name), address: cleanText(item.address, 500), timezone: config.timezone || 'America/Santiago', active: item.active !== false };
+    const existing = locations.get(key);
+    if (!existing) {
+      const rows = await agendaSupabaseRequest('/rest/v1/za_locations', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(patch) });
+      locations.set(key, rows[0]); counters.created.locations++;
+    } else if (changed(existing, patch)) {
+      const rows = await agendaSupabaseRequest(`/rest/v1/za_locations?id=eq.${encodeURIComponent(existing.id)}`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(patch) });
+      locations.set(key, rows[0]); counters.updated.locations++;
+    }
   }
   for (const item of config.services || []) {
-    if (!item?.name || services.has(item.name)) continue;
-    const rows = await agendaSupabaseRequest('/rest/v1/za_services', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ name: item.name, duration_minutes: Number(item.duration_minutes) || 30, price_clp: item.price_clp ?? null, bookable: item.bookable !== false, redirect_note: item.redirect_note || '' }) });
-    services.set(item.name, rows[0]); createdServices++;
+    if (!item?.name) continue;
+    const key = keyForName(item.name);
+    const patch = { name: cleanText(item.name), duration_minutes: Number(item.duration_minutes) || 30, price_clp: item.price_clp ?? null, bookable: item.bookable !== false, redirect_note: cleanText(item.redirect_note, 800), active: item.active !== false };
+    const existing = services.get(key);
+    if (!existing) {
+      const rows = await agendaSupabaseRequest('/rest/v1/za_services', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(patch) });
+      services.set(key, rows[0]); counters.created.services++;
+    } else if (changed(existing, patch)) {
+      const rows = await agendaSupabaseRequest(`/rest/v1/za_services?id=eq.${encodeURIComponent(existing.id)}`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(patch) });
+      services.set(key, rows[0]); counters.updated.services++;
+    }
   }
+  const configuredLocationRows = (config.locations || []).map(item => locations.get(keyForName(item?.name))).filter(Boolean);
   for (const item of config.resources || []) {
-    if (!item?.name || resources.has(item.name)) continue;
+    if (!item?.name) continue;
     // No adivinar sede: un profesional que atiende en varias sedes (o a domicilio) no tiene
     // una sede fija, y forzarle la primera rompe la reserva en cualquier otra (la RPC la
     // rechaza). Sólo se asigna sede fija si el recurso la declara explícitamente, o si el
     // negocio entero tiene una sola sede (ahí sí es inequívoco).
-    const declaredLocation = item.location ? locations.get(item.location) : null;
-    const singleLocation = locations.size === 1 ? locations.values().next().value : null;
+    const configuredLocationName = item.location || (config.locations || []).find(location => location.id && location.id === item.location_id)?.name;
+    const declaredLocation = configuredLocationName ? locations.get(keyForName(configuredLocationName)) : null;
+    const singleLocation = configuredLocationRows.length === 1 ? configuredLocationRows[0] : null;
     const resourceLocationId = declaredLocation?.id || singleLocation?.id || null;
-    const rows = await agendaSupabaseRequest('/rest/v1/za_resources', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ name: item.name, specialty: item.specialty || '', location_id: resourceLocationId }) });
-    resources.set(item.name, rows[0]); createdResources++;
-  }
-  for (const item of config.resources || []) {
-    const resource = resources.get(item.name);
-    for (const serviceName of item.services || []) {
-      const service = services.get(serviceName);
-      if (!resource || !service) continue;
-      await agendaSupabaseRequest('/rest/v1/za_resource_services?on_conflict=resource_id,service_id', { method: 'POST', headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' }, body: JSON.stringify({ resource_id: resource.id, service_id: service.id }) });
+    const key = keyForName(item.name);
+    const patch = { name: cleanText(item.name), specialty: cleanText(item.specialty, 300), location_id: resourceLocationId, active: item.active !== false };
+    const existing = resources.get(key);
+    if (!existing) {
+      const rows = await agendaSupabaseRequest('/rest/v1/za_resources', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(patch) });
+      resources.set(key, rows[0]); counters.created.resources++;
+    } else if (changed(existing, patch)) {
+      const rows = await agendaSupabaseRequest(`/rest/v1/za_resources?id=eq.${encodeURIComponent(existing.id)}`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(patch) });
+      resources.set(key, rows[0]); counters.updated.resources++;
     }
   }
-  return { locations: locations.size, services: services.size, resources: resources.size, created: { locations: createdLocations, services: createdServices, resources: createdResources } };
+  const existingLinkKeys = new Set((existingLinks || []).map(link => `${link.resource_id}:${link.service_id}`));
+  const desiredLinkKeys = new Set();
+  const configuredResourceIds = new Set();
+  for (const item of config.resources || []) {
+    const resource = resources.get(keyForName(item.name));
+    if (resource) configuredResourceIds.add(resource.id);
+    for (const serviceName of item.services || []) {
+      const service = services.get(keyForName(serviceName));
+      if (!resource || !service) continue;
+      const linkKey = `${resource.id}:${service.id}`;
+      desiredLinkKeys.add(linkKey);
+      if (existingLinkKeys.has(linkKey)) continue;
+      await agendaSupabaseRequest('/rest/v1/za_resource_services?on_conflict=resource_id,service_id', { method: 'POST', headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' }, body: JSON.stringify({ resource_id: resource.id, service_id: service.id }) });
+      counters.created.links++;
+    }
+  }
+  for (const link of existingLinks || []) {
+    const linkKey = `${link.resource_id}:${link.service_id}`;
+    if (!configuredResourceIds.has(link.resource_id) || desiredLinkKeys.has(linkKey)) continue;
+    await agendaSupabaseRequest(`/rest/v1/za_resource_services?resource_id=eq.${encodeURIComponent(link.resource_id)}&service_id=eq.${encodeURIComponent(link.service_id)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } });
+    counters.removed.links++;
+  }
+  return { locations: locations.size, services: services.size, resources: resources.size, ...counters };
 }
 
 export async function createAgendaAvailabilityRule(packageData, input = {}) {
@@ -638,6 +918,30 @@ export async function updateAgendaFeedback(packageData, feedbackId, status) {
   return rows[0];
 }
 
+// Agrega un contacto a mano, sin que haya reservado ni escrito todavía — necesario para poder
+// marcar "no contestar" a alguien ANTES de su primer mensaje (ej. un familiar del dueño). Si el
+// teléfono ya existe, no se pisa nada: se devuelve la ficha existente tal cual.
+export async function createManualCustomer(packageData, input = {}) {
+  if (!agendaConfig(packageData)) throw new Error('Agenda v1 no está habilitada en este paquete.');
+  const phone = normalizeChilePhone(cleanText(input.phone, 40)) || cleanText(input.phone, 40);
+  if (!phone) throw new Error('Teléfono requerido.');
+  const fullName = cleanText(input.full_name, 120) || phone;
+  if (!agendaUsesSupabase()) return { id: phone, full_name: fullName, phone, segment: 'frio', bot_muted: false };
+  // on_conflict=phone es obligatorio para que Postgrest use la unique(phone) real como objetivo del
+  // upsert — sin eso, "resolution=ignore-duplicates" sólo mira la primary key (id, siempre nueva en
+  // un insert), así que un teléfono repetido rompería contra la constraint en vez de ignorarse.
+  // ignore-duplicates (no merge): si el contacto ya existe con datos reales de una reserva, agregarlo
+  // "a mano" con solo nombre/teléfono no debe pisar esa ficha — sólo importa dejarlo disponible para
+  // marcarlo como silenciado, no sobrescribir lo que ya tenía.
+  await agendaSupabaseRequest('/rest/v1/za_customers?on_conflict=phone', {
+    method: 'POST', headers: { Prefer: 'resolution=ignore-duplicates' },
+    body: JSON.stringify({ full_name: fullName, phone })
+  });
+  const rows = await agendaSupabaseRequest(`/rest/v1/za_customers?phone=eq.${encodeURIComponent(phone)}&select=*`);
+  if (!rows?.[0]) throw new Error('No se pudo crear el contacto.');
+  return rows[0];
+}
+
 // ── CRM ligero: control interno de contactos ──
 // Sin Supabase no existe una tabla de clientes separada (cada cita local guarda el
 // nombre/teléfono directo), así que se agrupa por teléfono como "cliente virtual".
@@ -645,7 +949,7 @@ export async function listCustomers(packageData) {
   if (!agendaConfig(packageData)) throw new Error('Agenda v1 no está habilitada en este paquete.');
   if (agendaUsesSupabase()) {
     const [customers, appointments] = await Promise.all([
-      fetchAllAgendaRows('/rest/v1/za_customers?select=id,full_name,phone,email,segment,created_at&order=full_name.asc'),
+      fetchAllAgendaRows('/rest/v1/za_customers?select=id,full_name,phone,email,segment,bot_muted,created_at&order=full_name.asc'),
       fetchAllAgendaRows('/rest/v1/za_appointments?select=id,customer_id,starts_at,status&order=starts_at.desc')
     ]);
     return (customers || []).map(customer => {
@@ -658,7 +962,7 @@ export async function listCustomers(packageData) {
   for (const appointment of state.appointments) {
     const key = appointment.customer_phone;
     if (!key) continue;
-    if (!byPhone.has(key)) byPhone.set(key, { id: key, full_name: appointment.customer_name, phone: key, email: null, segment: 'caliente', created_at: appointment.created_at, appointments: [] });
+    if (!byPhone.has(key)) byPhone.set(key, { id: key, full_name: appointment.customer_name, phone: key, email: null, segment: 'caliente', bot_muted: false, created_at: appointment.created_at, appointments: [] });
     byPhone.get(key).appointments.push(appointment);
   }
   return [...byPhone.values()].map(customer => {
@@ -687,16 +991,42 @@ export async function getCustomerDetail(packageData, customerId) {
   if (!own.length) throw new Error('Cliente no encontrado.');
   const sorted = [...own].sort((a, b) => b.starts_at.localeCompare(a.starts_at));
   return {
-    customer: { id: customerId, full_name: own[0].customer_name, phone: own[0].customer_phone, email: null, segment: 'caliente' },
+    customer: { id: customerId, full_name: own[0].customer_name, phone: own[0].customer_phone, email: null, segment: 'caliente', bot_muted: false },
     appointments: sorted.map(item => ({ id: item.id, reference: item.reference, status: item.status, starts_at: item.starts_at, notes: item.notes, service: item.service, resource: item.resource }))
   };
 }
 
-export async function updateCustomerSegment(packageData, customerId, segment) {
-  if (!['frio', 'caliente', 'cliente'].includes(segment)) throw new Error('Segmento inválido.');
-  if (!agendaUsesSupabase()) return { id: customerId, segment };
+// Actualiza varios contactos de una vez (ej. "silenciar seleccionados" desde la categoría
+// "revisar") — un solo PATCH con id=in.(...) en vez de N requests, importante cuando la selección
+// puede ser de cientos de filas (import masivo de agenda personal).
+export async function bulkUpdateCustomers(packageData, ids, patch = {}) {
+  if (!Array.isArray(ids) || !ids.length) throw new Error('Selección vacía.');
+  const update = {};
+  if (patch.segment !== undefined) {
+    if (!['frio', 'caliente', 'cliente', 'revisar'].includes(patch.segment)) throw new Error('Segmento inválido.');
+    update.segment = patch.segment;
+  }
+  if (patch.bot_muted !== undefined) update.bot_muted = Boolean(patch.bot_muted);
+  if (!Object.keys(update).length) throw new Error('Nada que actualizar.');
+  if (!agendaUsesSupabase()) return { updated: ids.length };
+  const idList = ids.map(id => encodeURIComponent(String(id).slice(0, 80))).join(',');
+  const rows = await agendaSupabaseRequest(`/rest/v1/za_customers?id=in.(${idList})`, {
+    method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(update)
+  });
+  return { updated: rows?.length || 0 };
+}
+
+export async function updateCustomerSettings(packageData, customerId, patch = {}) {
+  const update = {};
+  if (patch.segment !== undefined) {
+    if (!['frio', 'caliente', 'cliente', 'revisar'].includes(patch.segment)) throw new Error('Segmento inválido.');
+    update.segment = patch.segment;
+  }
+  if (patch.bot_muted !== undefined) update.bot_muted = Boolean(patch.bot_muted);
+  if (!Object.keys(update).length) throw new Error('Nada que actualizar.');
+  if (!agendaUsesSupabase()) return { id: customerId, ...update };
   const rows = await agendaSupabaseRequest(`/rest/v1/za_customers?id=eq.${encodeURIComponent(customerId)}`, {
-    method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ segment })
+    method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(update)
   });
   if (!rows?.[0]) throw new Error('Cliente no encontrado.');
   return rows[0];
@@ -713,6 +1043,7 @@ export async function updateCustomerProfile(packageData, phone, fields = {}) {
   if (fields.email) patch.email = String(fields.email).trim();
   if (Number.isInteger(Number(fields.age)) && Number(fields.age) > 0) patch.age = Number(fields.age);
   if (fields.occupation) patch.occupation = String(fields.occupation).trim().slice(0, 120);
+  if (fields.rut) patch.rut = String(fields.rut).trim().slice(0, 20);
   if (fields.medical_history) patch.medical_history = String(fields.medical_history).trim().slice(0, 800);
   if (fields.extra_symptoms) patch.extra_symptoms = String(fields.extra_symptoms).trim().slice(0, 500);
   if (!Object.keys(patch).length) throw new Error('No hay datos nuevos que guardar.');
@@ -741,7 +1072,7 @@ export function normalizeChilePhone(value) {
 // formato de origen (vCard, CSV, futuro Google Contacts) — solo espera {full_name, phone, email?}.
 // No pisa el email ya guardado de un cliente existente (p.ej. capturado en una reserva real) si el
 // contacto importado no trae uno.
-const SEGMENT_RANK = { frio: 0, caliente: 1, cliente: 2 };
+const SEGMENT_RANK = { revisar: -1, frio: 0, caliente: 1, cliente: 2 };
 
 export async function importAgendaCustomers(packageData, contacts) {
   if (!agendaConfig(packageData)) throw new Error('Agenda v1 no está habilitada en este paquete.');

@@ -6,9 +6,14 @@
   "dependencies": {
     "@zavudev/sdk": "^0.38.0"
   },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.4"
+  },
   "scripts": {
-    "start": "node src/server.js",
+    "start": "node _local-preview-wrapper.mjs",
     "test": "node src/run-tests.js",
+    "test:zavu-delivery": "node src/verify-zavu-delivery.js",
+    "test:supabase-migrations": "node src/verify-supabase-migrations.js",
     "setup:agenda": "node src/setup-agenda.js",
     "dispatch:outbox": "node src/dispatch-outbox.js"
   }

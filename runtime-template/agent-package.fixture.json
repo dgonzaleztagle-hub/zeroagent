@@ -1,0 +1,38 @@
+{
+  "standard_version": 1,
+  "package_type": "zeroagent-agent",
+  "package_version": "0.0.0-fixture",
+  "business": { "id": "fixture", "display_name": "Negocio de prueba", "niche": "servicios", "description": "Fixture mínimo para correr npm test en la plantilla sin un cliente real construido." },
+  "agent": {
+    "name": "Agente de prueba", "tone": "friendly", "role": "Responder consultas de prueba.",
+    "system_prompt": "", "policy": { "use_only_approved_facts": true, "unknown_fact_behavior": "admit_unknown_and_offer_handoff" }
+  },
+  "knowledge": { "legacy_documents": [], "approved_sources": [], "confirmed_facts": [
+    { "id": "fact-1", "category": "info", "subject": "horario", "value": "Atendemos de lunes a viernes de 9 a 18 horas." }
+  ] },
+  "flows": [ { "id": "agenda-v1", "type": "booking", "status": "configured", "contract": "zeroagent-agenda-v1" } ],
+  "solutions": {
+    "agenda": {
+      "contract_version": "1.0.0",
+      "config": {
+        "enabled": true, "pack_version": "1.0.0", "booking_mode": "appointment", "timezone": "America/Santiago",
+        "confirmation_mode": "manual", "reminder_hours": 24, "cancellation_policy": "Prueba.",
+        "locations": [], "services": [{ "name": "Servicio de prueba", "duration_minutes": 30, "price_clp": 10000 }],
+        "resources": [{ "name": "Profesional de prueba", "services": ["Servicio de prueba"] }],
+        "risk_windows": [],
+        "rules": { "slot_interval_minutes": 15, "minimum_notice_hours": 2, "maximum_advance_days": 60, "require_customer_phone": true, "human_handoff_on_conflict": true }
+      },
+      "required_runtime_capabilities": ["supabase-postgres", "atomic-booking-functions", "zavu-webhook-adapter", "client-console-feedback", "public-booking-page"],
+      "safety": { "availability_is_authoritative": true, "no_booking_without_live_availability_check": true, "handoff_on_conflict": true },
+      "agent_flow_contract": {
+        "standard": "zeroagent-agenda-flows",
+        "tools": ["get_availability", "get_my_appointment", "create_appointment", "cancel_appointment", "reschedule_appointment", "update_customer_profile", "request_human_handoff"],
+        "guarantees": ["verified_channel_identity", "atomic_mutations", "intent_can_change_between_turns", "no_confirmation_without_tool_success"]
+      }
+    }
+  },
+  "tests": [
+    { "id": "test-1", "knowledge_item_id": "fact-1", "question": "¿Cuál es el horario de atención?", "expected_behavior": "Debe mencionar horario lunes a viernes de 9 a 18 horas." }
+  ],
+  "installation": { "credentials": "configured_at_installation", "channel_provider": "configured_at_installation", "ownership": "customer_owned_infrastructure", "stages": ["preview_local", "staging", "production"], "studio_connection": "local_vault_authorized_maintenance_only" }
+}

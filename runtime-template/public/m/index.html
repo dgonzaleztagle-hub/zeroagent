@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Operación · ZeroAgent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/m/m.css">
+</head>
+<body>
+  <style>body>*{visibility:hidden}#za-auth-gate{visibility:visible}html.za-ready body>*{visibility:visible}</style>
+  <script src="/auth-gate.js"></script>
+  <header class="topbar">
+    <div class="topbar-id">
+      <span class="brand-mark" id="brand-mark">··</span>
+      <div><strong id="business-name">Negocio</strong><small id="agent-state-label">Cargando…</small></div>
+    </div>
+    <button class="pill-toggle" id="agent-toggle" aria-label="Pausar o activar el agente">
+      <i class="dot"></i><span id="agent-toggle-label">Activo</span>
+    </button>
+  </header>
+
+  <main class="screens">
+    <!-- HOY -->
+    <section class="screen active" id="screen-hoy" role="tabpanel" aria-labelledby="tab-hoy">
+      <div class="pull-refresh" id="hoy-refresh">Actualizar ↻</div>
+      <h1 class="screen-title" id="hoy-greeting">Hola</h1>
+      <p class="screen-sub" id="hoy-date"></p>
+
+      <div class="stat-row" id="hoy-stats">
+        <div class="stat"><strong id="stat-today">—</strong><span>hoy</span></div>
+        <div class="stat"><strong id="stat-pending">—</strong><span>por confirmar</span></div>
+        <div class="stat"><strong id="stat-overdue">—</strong><span>vencidas</span></div>
+        <div class="stat"><strong id="stat-attention">—</strong><span>atención humana</span></div>
+      </div>
+
+      <div id="hoy-actions" hidden>
+        <div class="section-label">Requiere acción</div>
+        <div class="list" id="hoy-action-list"></div>
+      </div>
+      <div class="section-label">Próximas atenciones</div>
+      <div class="list" id="hoy-list"><div class="empty">Cargando agenda…</div></div>
+      <p class="powered-mobile">Tecnología por ZeroAgent · un producto <a href="https://hojacero.cl" target="_blank" rel="noopener">hojacero.cl</a></p>
+    </section>
+
+    <!-- AGENDA -->
+    <section class="screen" id="screen-agenda" role="tabpanel" aria-labelledby="tab-agenda">
+      <h1 class="screen-title">Agenda</h1>
+      <div class="day-strip" id="day-strip"></div>
+      <div class="list" id="agenda-list"><div class="empty">Elige un día.</div></div>
+
+      <div class="section-label">Bloqueos (turno en otro centro, traslado, etc.)</div>
+      <button type="button" class="ghost full" id="new-block">Bloquear horario</button>
+      <div class="list" id="blocks-list"></div>
+
+      <button class="fab" id="new-booking" aria-label="Nueva reserva">＋</button>
+    </section>
+
+    <!-- CLIENTES (CRM ligero) -->
+    <section class="screen" id="screen-clientes" role="tabpanel" aria-labelledby="tab-clientes">
+      <h1 class="screen-title" id="customers-title">Clientes</h1>
+      <p class="screen-sub" id="customers-copy">Contactos y datos de admisión reunidos desde la conversación y la agenda.</p>
+      <button type="button" class="ghost" id="open-new-customer" style="margin-bottom:10px">+ Agregar contacto</button>
+      <input id="clientes-search" placeholder="Buscar por nombre o teléfono…" style="margin-bottom:10px">
+      <div class="segment-pills" id="segment-pills">
+        <button class="segment-pill active" data-segment-filter="todos">Todos</button>
+        <button class="segment-pill" data-segment-filter="frio">Frío</button>
+        <button class="segment-pill" data-segment-filter="caliente">Caliente</button>
+        <button class="segment-pill" data-segment-filter="cliente">Cliente</button>
+        <button class="segment-pill" data-segment-filter="revisar">Revisar</button>
+      </div>
+      <div class="bulk-bar" id="clientes-bulk-bar" hidden><span id="clientes-bulk-count"></span><div><button type="button" class="ghost" id="clientes-bulk-clear">Cancelar</button><button type="button" class="primary" id="clientes-bulk-mute">🔇 Silenciar</button></div></div>
+      <div class="list" id="clientes-list"><div class="empty">Cargando…</div></div>
+    </section>
+
+    <!-- BANDEJA -->
+    <section class="screen" id="screen-bandeja" role="tabpanel" aria-labelledby="tab-bandeja">
+      <h1 class="screen-title">Bandeja</h1>
+      <p class="screen-sub">Casos que el agente derivó a una persona.</p>
+      <div class="list" id="bandeja-list"><div class="empty">Cargando…</div></div>
+    </section>
+
+    <!-- ENTRENAR -->
+    <section class="screen" id="screen-entrenar" role="tabpanel" aria-labelledby="tab-entrenar">
+      <h1 class="screen-title">Entrenar al agente</h1>
+      <p class="screen-sub">Lo que sabe hoy, y lo que le falta.</p>
+
+      <div class="segment-pills" id="entrenar-subtabs">
+        <button class="segment-pill active" data-entrenar-tab="sugerir">Sugerir dato</button>
+        <button class="segment-pill" data-entrenar-tab="sueltos">Datos sueltos</button>
+        <button class="segment-pill" data-entrenar-tab="negocio">Datos del negocio</button>
+        <button class="segment-pill" data-entrenar-tab="ia">IA y plan</button>
+      </div>
+
+      <div class="entrenar-panel" data-entrenar-panel="sugerir">
+        <div class="section-label">Correcciones pendientes</div>
+        <div class="list" id="correcciones-list"><div class="empty">Cargando…</div></div>
+
+        <div class="section-label">Sugerir un dato nuevo</div>
+        <form class="knowledge-form" id="suggestion-form">
+          <label>Categoría<input id="sugg-category" required placeholder="Ej: políticas, servicios…"></label>
+          <label>Asunto<input id="sugg-subject" required placeholder="Ej: convenio isapre"></label>
+          <label>Dato completo<textarea id="sugg-value" rows="3" required placeholder="Escribe el dato tal como quieres que el agente lo use…"></textarea></label>
+          <p class="sheet-error" id="suggestion-error"></p>
+          <button type="submit" class="primary full">Enviar sugerencia</button>
+        </form>
+        <p class="note-inline" id="suggestions-note"></p>
+        <div class="list" id="suggestions-list"></div>
+
+        <div class="section-label">Lo que el agente sabe hoy</div>
+        <div class="list" id="facts-list"><div class="empty">Cargando…</div></div>
+      </div>
+
+      <div class="entrenar-panel" data-entrenar-panel="sueltos" hidden>
+        <div class="section-label">Info suelta (se usa de inmediato)</div>
+        <p class="note-inline">Sin revisión — el agente la usa en la próxima respuesta.</p>
+        <form class="knowledge-form" id="business-info-form">
+          <label>Información<textarea id="business-info-text" rows="3" required placeholder="Ej: Estamos en zona rural; enviamos un link de Google Maps para llegar directo…"></textarea></label>
+          <p class="sheet-error" id="business-info-error"></p>
+          <button type="submit" class="primary full">Guardar info</button>
+        </form>
+        <div class="list" id="business-info-list"></div>
+      </div>
+
+      <div class="entrenar-panel" data-entrenar-panel="negocio" hidden>
+        <div class="section-label">Datos del negocio (se usan de inmediato)</div>
+        <p class="note-inline">Precios, direcciones, teléfonos, horarios. Sin revisión — el agente los usa en la próxima respuesta.</p>
+        <form class="knowledge-form" id="business-data-form">
+          <label>Nombre del dato<input id="business-data-label" required placeholder="Ej: Precio evaluación general"></label>
+          <label>Valor<input id="business-data-value" required placeholder="Ej: $36.000 · 45-60 min"></label>
+          <label>Categoría (opcional)<input id="business-data-category" placeholder="Ej: precios, ubicación, contacto…"></label>
+          <p class="sheet-error" id="business-data-error"></p>
+          <button type="submit" class="primary full">Guardar dato</button>
+        </form>
+        <div class="list" id="business-data-list"></div>
+      </div>
+
+      <div class="entrenar-panel" data-entrenar-panel="ia" hidden>
+        <div class="section-label">IA del negocio</div>
+        <p id="mobile-ai-action-status" class="sheet-error" role="status" aria-live="polite"></p>
+        <div class="ai-plan-card">
+          <span class="status-pill" id="mobile-ai-status">No configurado</span>
+          <h2 id="mobile-ai-name">Sin datos publicados</h2>
+          <p id="mobile-ai-detail">El runtime todavía no informa proveedor ni modelo.</p>
+        </div>
+        <div class="ai-plan-card">
+          <strong>Clave propia · BYOK</strong>
+          <p id="mobile-byok-copy">La clave se cifra en el servidor y no vuelve al navegador.</p>
+          <form id="mobile-ai-byok-form" class="ai-config-form"><label>Proveedor<select id="mobile-ai-byok-provider"><option value="openai">OpenAI</option><option value="groq">Groq</option><option value="compatible">Compatible con OpenAI</option></select></label><label>Modelo<input id="mobile-ai-byok-model" required autocomplete="off" placeholder="Identificador del modelo"></label><label id="mobile-ai-byok-base-row" hidden>URL base HTTPS<input id="mobile-ai-byok-base" type="url" inputmode="url" autocomplete="off" placeholder="https://api.proveedor.com/v1"></label><label>API key<input id="mobile-ai-byok-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="Se enviará una sola vez"></label><p id="mobile-ai-byok-key-state" class="form-note"></p><button type="submit" class="primary full">Activar clave propia</button></form>
+        </div>
+        <div class="ai-plan-card">
+          <span class="status-pill" id="mobile-google-status">—</span>
+          <strong>Google Calendar</strong>
+          <p id="mobile-google-copy">Cargando estado…</p>
+          <a class="primary full" id="mobile-google-connect" href="/auth/google?return_to=/m/">Conectar Google Calendar</a>
+          <button type="button" class="ghost full" id="mobile-google-disconnect" hidden>Desconectar</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- PROBAR -->
+    <section class="screen" id="screen-probar" role="tabpanel" aria-labelledby="tab-probar">
+      <div class="chat-head">
+        <h1 class="screen-title">Prueba el agente</h1>
+        <p class="screen-sub">Escríbele como si fueras un cliente real.</p>
+      </div>
+      <div class="chat-log" id="chat-log">
+        <div class="bubble agent"><p id="chat-welcome">Hola, ¿en qué te puedo ayudar?</p></div>
+      </div>
+      <form class="composer" id="chat-form">
+        <textarea id="chat-input" rows="1" placeholder="Escribe un mensaje…" required></textarea>
+        <button type="submit" aria-label="Enviar">↑</button>
+      </form>
+    </section>
+  </main>
+
+  <nav class="tabbar" aria-label="Navegación">
+    <button class="tab active" data-screen="hoy" id="tab-hoy"><i>●</i><span>Hoy</span></button>
+    <button class="tab" data-screen="agenda" id="tab-agenda"><i>▤</i><span>Agenda</span></button>
+    <button class="tab" data-screen="clientes" id="tab-clientes"><i>◎</i><span>Clientes</span></button>
+    <button class="tab" data-screen="bandeja" id="tab-bandeja"><i>◈</i><span>Bandeja</span><span class="tab-badge" id="bandeja-badge" hidden>0</span></button>
+    <button class="tab" data-screen="entrenar" id="tab-entrenar"><i>◐</i><span>Entrenar</span></button>
+    <button class="tab" data-screen="probar" id="tab-probar"><i>◔</i><span>Probar</span></button>
+  </nav>
+
+  <!-- Bottom sheet: detalle de reserva -->
+  <dialog class="sheet" id="detail-sheet">
+    <button type="button" class="sheet-close" data-close-sheet="detail-sheet" aria-label="Cerrar">×</button>
+    <div class="sheet-handle"></div>
+    <div class="sheet-body" id="detail-body"></div>
+  </dialog>
+
+  <!-- Bottom sheet: conversación real (hilo completo, calificar, tomar caso) -->
+  <dialog class="sheet" id="conversation-sheet">
+    <button type="button" class="sheet-close" data-close-sheet="conversation-sheet" aria-label="Cerrar">×</button>
+    <div class="sheet-handle"></div>
+    <div class="sheet-body" id="conversation-body"></div>
+  </dialog>
+
+  <!-- Bottom sheet: nueva reserva -->
+  <dialog class="sheet" id="booking-sheet">
+    <button type="button" class="sheet-close" data-close-sheet="booking-sheet" aria-label="Cerrar">×</button>
+    <div class="sheet-handle"></div>
+    <form class="sheet-body" id="booking-form">
+      <h2>Nueva reserva</h2>
+      <p class="booking-mode-note" id="booking-mode-note"></p>
+      <label>Cliente<input id="booking-name" required placeholder="Nombre"></label>
+      <label>WhatsApp<input id="booking-phone" required placeholder="+56 9…"></label>
+      <label>Correo (datos de admisión)<input id="booking-email" type="email" placeholder="opcional"></label>
+      <label>Sede<select id="booking-location"></select></label>
+      <label>Servicio<select id="booking-service" required></select></label>
+      <label id="booking-resource-label">Profesional<select id="booking-resource" required></select></label>
+      <label>Fecha y hora<input id="booking-starts" type="datetime-local" required></label>
+      <label>Nota<textarea id="booking-notes" rows="2"></textarea></label>
+      <p class="sheet-error" id="booking-error"></p>
+      <div class="sheet-actions">
+        <button type="button" class="ghost" data-close-sheet="booking-sheet">Cancelar</button>
+        <button type="submit" class="primary" id="booking-submit">Crear solicitud</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Bottom sheet: bloquear horario (turno en otro centro, traslado, etc.) -->
+  <dialog class="sheet" id="block-sheet">
+    <button type="button" class="sheet-close" data-close-sheet="block-sheet" aria-label="Cerrar">×</button>
+    <div class="sheet-handle"></div>
+    <form class="sheet-body" id="block-form">
+      <h2>Bloquear horario</h2>
+      <label id="block-resource-label">Profesional<select id="block-resource" required></select></label>
+      <label>Motivo<input id="block-reason" required placeholder="Ej: compromiso externo"></label>
+      <label>Desde<input id="block-starts" type="datetime-local" required></label>
+      <label>Hasta<input id="block-ends" type="datetime-local" required></label>
+      <p class="sheet-error" id="block-error"></p>
+      <div class="sheet-actions">
+        <button type="button" class="ghost" data-close-sheet="block-sheet">Cancelar</button>
+        <button type="submit" class="primary">Bloquear</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Bottom sheet: ficha de cliente -->
+  <dialog class="sheet" id="new-customer-sheet">
+    <button type="button" class="sheet-close" data-close-sheet="new-customer-sheet" aria-label="Cerrar">×</button>
+    <div class="sheet-handle"></div>
+    <form class="sheet-body" id="new-customer-form">
+      <h2>Agregar contacto</h2>
+      <p class="screen-sub">Úsalo para dejar listo a alguien que todavía no reserva ni escribe — por ejemplo, para poder marcarlo como "no contestar" antes de su primer mensaje.</p>
+      <label>Nombre (opcional)<input id="new-customer-name" placeholder="Si no lo sabes, se usa el teléfono"></label>
+      <label>Teléfono<input id="new-customer-phone" required placeholder="+56 9…"></label>
+      <p class="sheet-error" id="new-customer-error"></p>
+      <div class="sheet-actions">
+        <button type="button" class="ghost" data-close-sheet="new-customer-sheet">Cancelar</button>
+        <button type="submit" class="primary" id="new-customer-submit">Agregar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="sheet" id="customer-sheet">
+    <button type="button" class="sheet-close" data-close-sheet="customer-sheet" aria-label="Cerrar">×</button>
+    <div class="sheet-handle"></div>
+    <div class="sheet-body" id="customer-body"></div>
+  </dialog>
+
+  <div class="operation-toast" id="operation-toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="/m/m.js"></script>
+</body>
+</html>

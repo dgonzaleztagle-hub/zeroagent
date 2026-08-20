@@ -44,6 +44,10 @@
           <i data-lucide="radar"></i>
           <span>Prospección</span><b class="nav-count" id="prospecting-nav-count">0</b>
         </a>
+        <a href="#niches" class="menu-item" data-view="niches">
+          <i data-lucide="layout-grid"></i>
+          <span>Nichos</span>
+        </a>
         <span class="menu-group-label">Cliente activo</span>
         <a href="#project" class="menu-item" data-view="project">
           <i data-lucide="layout-template"></i>
@@ -177,6 +181,12 @@
             <h3>Lo que requiere tu atención, sin ruido.</h3>
             <p>Onboarding, fuentes, correcciones, versiones e infraestructura de todos tus clientes.</p>
           </div>
+          <div class="activity-sweep-bar" style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
+            <button type="button" id="btn-sweep-clients" class="btn btn-emerald btn-sm">
+              <i data-lucide="refresh-cw"></i> Barrer clientes ahora
+            </button>
+            <span id="sweep-status" class="text-xs text-muted"></span>
+          </div>
           <div class="activity-layout">
             <div class="activity-feed" id="global-activity-feed"></div>
             <aside class="attention-summary" id="global-attention-summary"></aside>
@@ -293,6 +303,16 @@
           </div>
         </section>
 
+        <!-- VISTA: NICHOS -->
+        <section id="view-niches" class="app-view">
+          <div class="editorial-intro">
+            <span class="eyebrow">CATÁLOGO DE NICHOS</span>
+            <h3>Rubros semi-curados, con su base lista o en camino.</h3>
+            <p>Antes de prospectar o construir desde cero, revisa si ya existe un contrato probado para este rubro.</p>
+          </div>
+          <div class="niches-grid" id="niches-grid"></div>
+        </section>
+
         <!-- VISTA: PROYECTO -->
         <section id="view-project" class="app-view">
           <div class="no-client-warning" id="project-no-client">
@@ -371,6 +391,16 @@
                   <div class="form-group"><label for="infra-secret-key">Secret key (se cifra localmente)</label><input id="infra-secret-key" type="password" autocomplete="off" placeholder="sb_secret_... (dejar vacío para mantener)"></div>
                   <p id="infra-vault-status" class="form-help-text">Sin credencial configurada.</p>
                   <div class="flex-row gap-md"><button class="btn btn-primary" type="submit">Guardar vault</button><button id="infra-test-btn" class="btn btn-outline" type="button">Probar conexión</button><button id="infra-forget-btn" class="btn btn-danger-outline" type="button">Olvidar</button></div>
+                </form>
+                <div class="form-separator"></div>
+                <h4 class="project-version-title"><i data-lucide="list-checks"></i> Checklist de despliegue</h4>
+                <p class="text-sm text-muted mb-md">Pasos externos del procedimiento de 9 pasos que Studio no ejecuta solo — márcalos a medida que los completas para este cliente.</p>
+                <form id="deployment-checklist-form">
+                  <div class="form-group"><label for="checklist-vercel-url">URL del proyecto Vercel</label><input id="checklist-vercel-url" type="text" placeholder="https://xxxxx.vercel.app"></div>
+                  <label class="checkbox-row"><input type="checkbox" id="checklist-migration"> Migración SQL aplicada (agenda-v1.sql + extras)</label>
+                  <label class="checkbox-row"><input type="checkbox" id="checklist-catalog"> Catálogo sembrado (setup:agenda)</label>
+                  <label class="checkbox-row"><input type="checkbox" id="checklist-envvars"> Variables de entorno configuradas en Vercel</label>
+                  <button type="submit" class="btn btn-outline btn-full mt-md">Guardar checklist</button>
                 </form>
               </div>
             </div>
@@ -523,12 +553,15 @@ Reglas obligatorias:
               </div>
               <div class="card-body">
                 <form id="agenda-catalog-form">
-                  <div class="form-group"><label for="agenda-locations">Sedes</label><textarea id="agenda-locations" rows="3" placeholder="Casa Matriz | Av. Ejemplo 123 | Lunes a sábado 09:00–19:00"></textarea><span class="form-help-text">Formato: nombre | dirección | horario</span></div>
-                  <div class="form-group"><label for="agenda-services">Servicios</label><textarea id="agenda-services" rows="4" placeholder="Corte clásico | 45 | 18000&#10;Corte + barba | 75 | 28000"></textarea><span class="form-help-text">Formato: servicio | duración en minutos | precio CLP</span></div>
-                  <div class="form-group"><label for="agenda-resources">Profesionales / recursos</label><textarea id="agenda-resources" rows="3" placeholder="Camila | Estilista | Corte clásico, Corte + barba"></textarea><span class="form-help-text">Formato: nombre | especialidad | servicios que realiza</span></div>
+                  <div class="form-group"><label for="agenda-locations">Sedes y áreas</label><textarea id="agenda-locations" rows="3" placeholder="Casa Matriz | Av. Ejemplo 123 | Lunes a sábado 09:00–19:00 | premise&#10;Domicilio | | | service_area | Buin y comunas cercanas"></textarea><span class="form-help-text">Formato: nombre | dirección | horario | premise/service_area/remote | detalle de zona</span></div>
+                  <div class="form-group"><label for="agenda-services">Servicios</label><textarea id="agenda-services" rows="4" placeholder="Corte clásico | 45 | 18000 | onsite | Casa Matriz | fixed&#10;Visita a domicilio | 90 | 30000 | mobile | Domicilio | from | Desde $30.000 según zona"></textarea><span class="form-help-text">Formato: servicio | minutos | precio | onsite/mobile/remote/external | sedes/áreas (coma) | fixed/from/quote | nota o redirección</span></div>
+                  <div class="form-group"><label for="agenda-resources">Profesionales / recursos</label><textarea id="agenda-resources" rows="3" placeholder="Camila | Estilista | Corte clásico, Corte + barba | Casa Matriz"></textarea><span class="form-help-text">Formato: nombre | especialidad | servicios que realiza | sede fija (opcional — déjalo vacío si atiende en más de una sede o a domicilio)</span></div>
                   <div class="agenda-contract" id="agenda-contract-status"></div>
                   <button type="submit" class="btn btn-primary btn-full"><i data-lucide="package-check"></i> Guardar catálogo para empaquetar</button>
                 </form>
+                <div class="form-separator"></div>
+                <button type="button" id="btn-config-drift" class="btn btn-outline btn-full"><i data-lucide="git-compare"></i> Comparar con Supabase real</button>
+                <div id="config-drift-result" class="form-help-text" style="margin-top:10px;"></div>
               </div>
             </div>
           </div>
@@ -605,6 +638,16 @@ Zonas de reparto: Centro y Providencia." required></textarea>
                   <button type="submit" class="btn btn-emerald btn-full mt-md"><i data-lucide="shield-check"></i> Guardar dato confirmado</button>
                 </form>
                 <div id="knowledge-facts-list" class="knowledge-facts-list"></div>
+                <div class="gap-questions-panel" id="remote-suggestions-panel" style="display:none;">
+                  <div class="gap-questions-header"><strong>Sugerencias del cliente</strong></div>
+                  <p class="text-xs text-muted">Datos que el propio cliente envió desde su consola en producción. Aprobar crea un dato confirmado local; no toca el agente hasta la próxima versión.</p>
+                  <div id="remote-suggestions-list" class="gap-questions-list"></div>
+                </div>
+                <div class="gap-questions-panel" id="remote-direct-data-panel" style="display:none;">
+                  <div class="gap-questions-header"><strong>Datos e Info cargados por el cliente</strong></div>
+                  <p class="text-xs text-muted">Esto NO pasó por tu revisión — el cliente lo cargó directo desde su consola y el agente ya lo está usando. Solo visibilidad/auditoría, no requiere acción.</p>
+                  <div id="remote-direct-data-list" class="gap-questions-list"></div>
+                </div>
                 <div class="gap-questions-panel">
                   <div class="gap-questions-header"><strong>Vacíos por confirmar</strong><button id="btn-refresh-gap-questions" type="button" class="btn btn-outline btn-xs">Detectar</button></div>
                   <p class="text-xs text-muted">Sugerencias locales basadas en el rubro y los datos confirmados. No modifican el agente.</p>
@@ -700,8 +743,19 @@ Zonas de reparto: Centro y Providencia." required></textarea>
             <p>Selecciona un cliente en la cabecera o en la lista de inicio para chatear con su agente.</p>
           </div>
           
+          <!-- CORRECCIONES DE CLIENTES REALES: casos de producción marcados con rating negativo.
+               Revisión propia (Daniel + Claude); ajustar prompt/conocimiento localmente y luego
+               marcar aquí. No se auto-aplica nada a partir de estos casos. -->
+          <div class="card card-glass" id="remote-corrections-panel" style="display:none; margin-bottom: 16px;">
+            <div class="card-header">
+              <h3><i data-lucide="message-circle-warning"></i> Correcciones de clientes reales</h3>
+              <p class="text-muted">Casos de conversaciones reales que el dueño marcó como incorrectas. Revísalos, ajusta el prompt en Solución o un dato en Conocimiento, y marca el estado acá.</p>
+            </div>
+            <div class="card-body" id="remote-corrections-list"></div>
+          </div>
+
           <div class="simulator-layout" id="simulator-content" style="display: none;">
-            
+
             <!-- PANEL DEL CHAT DE WHATSAPP -->
             <div class="phone-mockup">
               <div class="whatsapp-screen">
@@ -876,6 +930,13 @@ Zonas de reparto: Centro y Providencia." required></textarea>
           <div class="form-group">
             <label for="new-client-name">Nombre de la Empresa / Cliente</label>
             <input type="text" id="new-client-name" placeholder="Ej. Delicias R&S" required>
+          </div>
+          <div class="form-group">
+            <label for="new-client-vertical">Vertical semi-curada</label>
+            <select id="new-client-vertical" required>
+              <option value="custom">Configuración a medida</option>
+            </select>
+            <small>Aplica capacidades, terminología, preguntas de onboarding y reglas base; nunca inventa servicios ni precios.</small>
           </div>
           <div class="form-group">
             <label for="new-client-niche">Rubro o Nicho de Negocio</label>

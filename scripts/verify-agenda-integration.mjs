@@ -18,7 +18,7 @@ if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
 }
 
 const importFrom = (relativePath) => import(pathToFileURL(path.join(root, relativePath)).href);
-const { agendaSupabaseRequest, createAgendaAppointment, updateCustomerProfile, getAvailableSlots } = await importFrom('runtime-template/src/agenda.js');
+const { agendaSupabaseRequest, createAgendaAppointment, updateCustomerProfile, getAvailableSlots, seedAgendaCatalog } = await importFrom('runtime-template/src/agenda.js');
 const { executeAgendaTool } = await importFrom('runtime-template/src/agenda-tools.js');
 const { getOrCreateConversation } = await importFrom('runtime-template/src/conversations.js');
 
@@ -33,7 +33,10 @@ const packageData = {
   business: { id: `integration-qa-${suffix}` },
   solutions: { agenda: { config: {
     enabled: true, timezone: 'America/Santiago', confirmation_mode: 'manual',
-    rules: { minimum_notice_hours: 1, maximum_advance_days: 60, require_customer_phone: true, human_handoff_on_conflict: true }
+    rules: { minimum_notice_hours: 1, maximum_advance_days: 60, pending_confirmation_ttl_minutes: 30, require_customer_phone: true, human_handoff_on_conflict: true },
+    locations: [{ name: `QA Loc ${suffix}`, address: `QA Dirección ${suffix}` }],
+    services: [{ name: `QA Servicio ${suffix}`, duration_minutes: 30, price_clp: 12345 }],
+    resources: [{ name: `QA Prof ${suffix}`, specialty: `QA Especialidad ${suffix}`, services: [`QA Servicio ${suffix}`] }]
   } } }
 };
 
@@ -48,14 +51,33 @@ try {
   await agendaSupabaseRequest('/rest/v1/za_services', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ id: otherServiceId, name: `QA Servicio Ajeno ${suffix}`, duration_minutes: 30, price_clp: 10000 }) });
   await agendaSupabaseRequest('/rest/v1/za_resources', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ id: resourceId, location_id: locationId, name: `QA Prof ${suffix}` }) });
   await agendaSupabaseRequest('/rest/v1/za_resource_services', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ resource_id: resourceId, service_id: serviceId }) });
-  // OJO: otherServiceId a propósito NO se vincula al recurso — es para el flujo 5.
+  // Vínculo obsoleto intencional: el seed reconciliable debe quitarlo porque no está en el paquete.
+  await agendaSupabaseRequest('/rest/v1/za_resource_services', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ resource_id: resourceId, service_id: otherServiceId }) });
   await agendaSupabaseRequest('/rest/v1/za_availability_rules', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ resource_id: resourceId, day_of_week: start.getUTCDay(), starts_at: '09:00', ends_at: '20:00' }) });
   created = true;
+
+  // Flujo 0: setup idempotente también actualiza catálogo y elimina vínculos obsoletos.
+  const seeded = await seedAgendaCatalog(packageData);
+  assert.ok(seeded.updated.locations >= 1 && seeded.updated.services >= 1 && seeded.updated.resources >= 1, `El seed no actualizó el catálogo existente: ${JSON.stringify(seeded)}`);
+  const [seededLocation, seededService, seededResource, staleLinks] = await Promise.all([
+    agendaSupabaseRequest(`/rest/v1/za_locations?id=eq.${locationId}&select=address`),
+    agendaSupabaseRequest(`/rest/v1/za_services?id=eq.${serviceId}&select=price_clp`),
+    agendaSupabaseRequest(`/rest/v1/za_resources?id=eq.${resourceId}&select=specialty`),
+    agendaSupabaseRequest(`/rest/v1/za_resource_services?resource_id=eq.${resourceId}&service_id=eq.${otherServiceId}&select=resource_id`)
+  ]);
+  assert.equal(seededLocation[0].address, `QA Dirección ${suffix}`);
+  assert.equal(seededService[0].price_clp, 12345);
+  assert.equal(seededResource[0].specialty, `QA Especialidad ${suffix}`);
+  assert.equal(staleLinks.length, 0, 'El seed dejó un vínculo resource-service que ya no existe en el paquete.');
+  console.log('PASS · Flujo 0: el seed reconcilia inserts, updates y vínculos obsoletos.');
 
   // Flujo 1: primer mensaje de un paciente nuevo -> reserva -> conversación vinculada EN EL MISMO TURNO.
   const conv1 = await getOrCreateConversation('whatsapp', phone);
   assert.equal(conv1.customer_id, null, 'La conversación no debería tener cliente antes de la primera reserva.');
-  await createAgendaAppointment(packageData, { customer_name: `QA Cliente ${suffix}`, customer_phone: phone, service: `QA Servicio ${suffix}`, resource: `QA Prof ${suffix}`, starts_at: start.toISOString() }, 'whatsapp');
+  const firstAppointment = await createAgendaAppointment(packageData, { customer_name: `QA Cliente ${suffix}`, customer_phone: phone, service: `QA Servicio ${suffix}`, resource: `QA Prof ${suffix}`, starts_at: start.toISOString() }, 'whatsapp');
+  assert.ok(firstAppointment.expires_at, 'La solicitud manual no recibió expires_at en Supabase.');
+  const exactRetry = await createAgendaAppointment(packageData, { customer_name: `QA Cliente ${suffix}`, customer_phone: phone, service: `QA Servicio ${suffix}`, resource: `QA Prof ${suffix}`, starts_at: start.toISOString() }, 'whatsapp');
+  assert.equal(exactRetry.id, firstAppointment.id, 'El retry exacto creó una segunda fila en Supabase.');
   const conv1b = await getOrCreateConversation('whatsapp', phone);
   assert.ok(conv1b.customer_id, 'El vínculo conversación-cliente debe completarse en el mismo turno de la reserva, no esperar al siguiente mensaje.');
   console.log('PASS · Flujo 1: primer mensaje -> reserva -> conversación vinculada en el mismo turno.');
@@ -66,6 +88,22 @@ try {
   assert.equal(customerRow.age, 40);
   assert.equal(customerRow.occupation, `QA Ocupación ${suffix}`);
   console.log('PASS · Flujo 2: datos de ficha entregados después de agendar quedan en la misma ficha.');
+
+  // Flujo 2b: una nueva sesión futura es válida, pero la reserva pública no pisa la ficha existente.
+  const nextSession = await createAgendaAppointment(packageData, {
+    customer_name: 'Nombre público adulterado', customer_phone: phone,
+    customer_email: 'ataque@example.invalid', customer_age: 99, customer_occupation: 'Sobrescritura',
+    customer_medical_history: 'Sobrescritura', customer_extra_symptoms: 'Sobrescritura',
+    service: `QA Servicio ${suffix}`, resource: `QA Prof ${suffix}`, starts_at: new Date(start.getTime() + 60 * 60_000).toISOString()
+  }, 'public_booking');
+  assert.notEqual(nextSession.id, firstAppointment.id, 'El anti-duplicado bloqueó una sesión futura distinta.');
+  const [preserved] = await agendaSupabaseRequest(`/rest/v1/za_customers?id=eq.${encodeURIComponent(conv1b.customer_id)}&select=full_name,email,age,occupation,medical_history,extra_symptoms`);
+  assert.equal(preserved.full_name, `QA Cliente ${suffix}`);
+  assert.equal(preserved.age, 40);
+  assert.equal(preserved.occupation, `QA Ocupación ${suffix}`);
+  assert.equal(preserved.medical_history, 'Sin antecedentes relevantes (QA)');
+  assert.notEqual(preserved.email, 'ataque@example.invalid');
+  console.log('PASS · Flujo 2b: sesiones futuras permitidas y reserva pública incapaz de pisar la ficha.');
 
   // Flujo 3: dos eventos de webhook simultáneos con el mismo event_id -> sólo uno gana el reclamo.
   const eventId = `qa-evt-${suffix}`;
@@ -97,7 +135,7 @@ try {
   await assert.rejects(() => createAgendaAppointment(packageData, { customer_name: 'QA Rechazo', customer_phone: phone, service: `QA Servicio Ajeno ${suffix}`, resource: `QA Prof ${suffix}`, starts_at: start.toISOString() }, 'whatsapp'), /no realiza ese servicio/i, 'create_appointment (RPC) también debe rechazar un servicio no ofrecido por el recurso.');
   console.log('PASS · Flujo 5: servicio no asignado al recurso -> disponibilidad y reserva rechazadas en ambas capas.');
 
-  console.log('PASS · Integración real de agenda: los 5 flujos de la auditoría pasan contra Supabase real.');
+  console.log('PASS · Integración real de agenda: catálogo, CRM, deduplicación e invariantes pasan contra Supabase real.');
 } finally {
   if (created) {
     await agendaSupabaseRequest(`/rest/v1/za_conversations?external_id=eq.${encodeURIComponent(phone)}`, { method: 'DELETE' }).catch(() => {});
