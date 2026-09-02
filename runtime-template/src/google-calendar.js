@@ -319,11 +319,17 @@ async function calendarContext() {
 // agent-package.json → locations → "no es agendable directo por el agente"), así que este
 // mapeo nunca puede generar un evento para esa sede.
 const LOCATION_COLOR_IDS = {
-  'Box Buin (El Recurso)': '10', // Basil (verde)
-  'Atención a domicilio': '5'    // Banana (amarillo)
+  'Box Buin (El Recurso)': '10' // Basil (verde)
 };
+// Un servicio a domicilio nunca resuelve a una fila de za_locations (no tiene sede física propia),
+// así que colorear por nombre de sede siempre le daba null — quedaba con el azul por defecto de
+// Google, indistinguible de cualquier otra cosa. delivery_mode='mobile' sí lo identifica sin
+// depender de sede, y ya se activa junto con el resto del tratamiento especial de domicilio
+// (buffer de traslado, dirección obligatoria).
+const DOMICILIO_COLOR_ID = '5'; // Banana (amarillo)
 
-export function colorIdForLocation(locationName) {
+export function colorIdForBooking({ locationName = '', deliveryMode = '' } = {}) {
+  if (deliveryMode === 'mobile') return DOMICILIO_COLOR_ID;
   return LOCATION_COLOR_IDS[locationName] || null;
 }
 
