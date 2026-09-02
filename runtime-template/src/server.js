@@ -17,7 +17,8 @@ import { getNotificationSettings, updateNotificationSettings } from './notificat
 import { findOperatorByPin, operatorSessionFromRequest, sessionSetCookieHeader, setOperatorPin, signSession, verifyPinHash } from './auth.js';
 import { getPublicAiAccount, resolveRuntimeLlmConfig, updateAiSelection } from './ai-account.js';
 import { appendCustomerRecordEntry, listCustomerRecord } from './customer-records.js';
-import { buildGoogleAuthUrl, completeGoogleCalendarConnection, disconnectGoogleCalendar, getGoogleCalendarStatus, signGoogleOAuthState, verifyGoogleOAuthState } from './google-calendar.js';
+import { buildGoogleAuthUrl, completeGoogleCalendarConnection, disconnectGoogleCalendar, getGoogleCalendarStatus, refreshGoogleCalendarList, setGoogleCalendarBuffer, setGoogleCalendarTarget, signGoogleOAuthState, verifyGoogleOAuthState } from './google-calendar.js';
+import { syncGoogleContacts } from './google-contacts.js';
 
 // Capturar errores de inicialización en vez de dejar que el módulo falle al
 // importarse: en Vercel eso da un FUNCTION_INVOCATION_FAILED opaco en cada
@@ -138,24 +139,24 @@ function aiDashboardView(account) {
   };
 }
 
-async function readJson(req, maxBytes = 256 * 1024) {
-  let raw = ''; let size = 0;
+async function readRaw(req, maxBytes = 256 * 1024) {
+  // Acumular Buffers y decodificar UTF-8 una sola vez al final — concatenar strings chunk a chunk
+  // (`raw += chunk`) decodifica cada chunk por separado, y un caracter multibyte (á/é/í/ó/ñ, muy
+  // común en español) que caiga justo en el borde entre dos chunks de red se corrompe en U+FFFD de
+  // forma silenciosa e irrecuperable — encontrado en vivo probando franciskom (texto con tildes
+  // guardado como "ca�" en Supabase). Afecta también la verificación de firma del webhook de Zavu,
+  // que usa este mismo raw body para el HMAC.
+  const chunks = []; let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
     if (size > maxBytes) throw new Error(`El cuerpo de la solicitud supera el máximo de ${Math.floor(maxBytes / 1024)} KB.`);
-    raw += chunk;
+    chunks.push(chunk);
   }
-  return JSON.parse(raw || '{}');
+  return Buffer.concat(chunks).toString('utf8');
 }
 
-async function readRaw(req, maxBytes = 256 * 1024) {
-  let raw = ''; let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > maxBytes) throw new Error(`El cuerpo de la solicitud supera el máximo de ${Math.floor(maxBytes / 1024)} KB.`);
-    raw += chunk;
-  }
-  return raw;
+async function readJson(req, maxBytes = 256 * 1024) {
+  return JSON.parse((await readRaw(req, maxBytes)) || '{}');
 }
 
 async function readBuffer(req, maxBytes = 15 * 1024 * 1024) {
@@ -232,9 +233,13 @@ async function completeZavuEvent(eventId, leaseToken, status = 'completed', repl
   return true;
 }
 
-function previewAuthorized(req, body = {}) {
+async function previewAuthorized(req, body = {}) {
   if (runtimeMode === 'preview_local' && !previewKey) return true;
-  return secretMatches(req.headers['x-preview-key'] || body.accessKey, previewKey);
+  if (secretMatches(req.headers['x-preview-key'] || body.accessKey, previewKey)) return true;
+  // Un cliente ya autenticado en su dashboard no debería toparse con una segunda clave
+  // desconocida sólo por abrir la pestaña "Probar" — esa clave de preview es para compartir
+  // el link sin dar acceso al dashboard completo, no para gatear una función interna del dashboard.
+  return dashboardAuthorized(req, body);
 }
 
 async function dashboardAuthorized(req, body = {}) {
@@ -449,6 +454,25 @@ export async function handleRequest(req, res) {
     if (!(await dashboardAuthorized(req))) return json(res, 401, { error: 'Acceso al dashboard no autorizado.' });
     try { await disconnectGoogleCalendar(); return json(res, 200, { ok: true }); }
     catch (error) { return json(res, 502, { error: error.message }); }
+  }
+  if (req.method === 'POST' && pathname === '/api/client/google-calendar/refresh-calendars') {
+    if (!(await dashboardAuthorized(req))) return json(res, 401, { error: 'Acceso al dashboard no autorizado.' });
+    try { return json(res, 200, { calendars: await refreshGoogleCalendarList() }); }
+    catch (error) { return json(res, 502, { error: error.message }); }
+  }
+  if (req.method === 'PATCH' && pathname === '/api/client/google-calendar') {
+    try {
+      const body = await readJson(req);
+      if (!(await dashboardAuthorized(req, body))) return json(res, 401, { error: 'Acceso al dashboard no autorizado.' });
+      if (body.calendarId !== undefined) await setGoogleCalendarTarget(body.calendarId);
+      if (body.bufferMinutes !== undefined) await setGoogleCalendarBuffer(body.bufferMinutes);
+      return json(res, 200, await getGoogleCalendarStatus());
+    } catch (error) { return json(res, 422, { error: error.message }); }
+  }
+  if (req.method === 'POST' && pathname === '/api/client/google-contacts/sync') {
+    if (!(await dashboardAuthorized(req))) return json(res, 401, { error: 'Acceso al dashboard no autorizado.' });
+    try { return json(res, 200, { result: await syncGoogleContacts(packageData) }); }
+    catch (error) { return json(res, 422, { error: error.message }); }
   }
   // Estas dos rutas viven en /auth (no /api/client) porque Google redirige al navegador ahí
   // directo — no son llamadas fetch() del frontend, son navegación de página completa. Al
@@ -701,6 +725,26 @@ export async function handleRequest(req, res) {
     try { return json(res, 200, await dispatchAgendaOutbox(packageData)); }
     catch (error) { return json(res, 502, { error: error.message }); }
   }
+  // Vercel Cron llama esta ruta cada hora en punto (UTC) — nunca fijamos una hora UTC fija acá
+  // porque Chile cambia de horario dos veces al año (America/Santiago: UTC-4 en invierno, UTC-3
+  // en verano) y una hora UTC fija quedaría desfasada 1h medio año. En cambio, se recalcula la
+  // hora de Chile en cada invocación y solo se sincroniza cuando da las 7am — así el cron se
+  // autoajusta solo en cada cambio de horario, sin tener que tocar vercel.json dos veces al año.
+  if (req.method === 'GET' && pathname === '/api/agenda/google-contacts/cron') {
+    const secret = process.env.CRON_SECRET;
+    if (!secret || req.headers.authorization !== `Bearer ${secret}`) return json(res, 401, { error: 'No autorizado.' });
+    const chileHour = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Santiago', hour: 'numeric', hour12: false }).format(new Date()));
+    if (chileHour !== 7) return json(res, 200, { ran: false, reason: 'not_the_hour', chileHour });
+    try {
+      const result = await syncGoogleContacts(packageData);
+      return json(res, 200, { ran: true, result });
+    } catch (error) {
+      // Best-effort: el cron no debe quedar "rojo" en Vercel por un fallo de Google (token
+      // vencido, red, etc.) — se loguea para poder revisarlo, el próximo día se reintenta solo.
+      console.error('cron google-contacts sync falló:', error.message);
+      return json(res, 200, { ran: true, error: error.message });
+    }
+  }
   if (req.method === 'PATCH' && pathname.startsWith('/api/agenda/appointments/')) {
     try {
       const body = await readJson(req);
@@ -820,7 +864,7 @@ export async function handleRequest(req, res) {
   if (req.method === 'POST' && pathname === '/api/preview/chat') {
     try {
       const body = await readJson(req);
-      if (!previewAuthorized(req, body)) return json(res, 401, { error: 'Acceso de preview no autorizado.' });
+      if (!(await previewAuthorized(req, body))) return json(res, 401, { error: 'Acceso de preview no autorizado.' });
       if (!body.message?.trim()) return json(res, 400, { error: 'Escribe un mensaje para probar el agente.' });
       const agentControl = await getAgentControl();
       if (agentControl.control.mode === 'paused') return json(res, 409, { error: 'El agente está pausado por el dueño.' });
@@ -836,7 +880,7 @@ export async function handleRequest(req, res) {
   if (req.method === 'POST' && pathname === '/api/preview/feedback') {
     try {
       const body = await readJson(req);
-      if (!previewAuthorized(req, body)) return json(res, 401, { error: 'Acceso de preview no autorizado.' });
+      if (!(await previewAuthorized(req, body))) return json(res, 401, { error: 'Acceso de preview no autorizado.' });
       if (!['up', 'down'].includes(body.rating)) return json(res, 400, { error: 'Feedback inválido.' });
       const feedback = await recordFeedback({
         agent_id: packageData.business?.id, package_version: packageData.package_version,

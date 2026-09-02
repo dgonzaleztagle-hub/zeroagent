@@ -31,7 +31,8 @@ async function api(url, options = {}) {
 
 async function previewApi(url, body) {
   const key = sessionStorage.getItem('zeroagent-preview-key') || '';
-  const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-preview-key': key }, body: JSON.stringify(body) });
+  const dashboardKey = sessionStorage.getItem('zeroagent-dashboard-key') || '';
+  const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-preview-key': key, 'x-dashboard-key': dashboardKey }, body: JSON.stringify(body) });
   const data = await response.json().catch(() => ({}));
   if (response.status === 401) {
     const entered = prompt('Clave de preview:');
@@ -168,7 +169,7 @@ function renderAiPlan() {
 }
 async function loadGoogleCalendarStatus() { try { state.googleCalendar = await api('/api/client/google-calendar'); } catch (error) { state.googleCalendar = { connected: false }; } renderGoogleCalendar(); return state.googleCalendar; }
 function renderGoogleCalendar() {
-  const info = state.googleCalendar || {}, status = $('#mobile-google-status'), copy = $('#mobile-google-copy'), connectLink = $('#mobile-google-connect'), disconnectButton = $('#mobile-google-disconnect');
+  const info = state.googleCalendar || {}, status = $('#mobile-google-status'), copy = $('#mobile-google-copy'), connectLink = $('#mobile-google-connect'), disconnectButton = $('#mobile-google-disconnect'), refreshButton = $('#mobile-google-refresh-list'), targetWrap = $('#mobile-google-target-wrap'), targetSelect = $('#mobile-google-target'), bufferWrap = $('#mobile-google-buffer-wrap'), bufferInput = $('#mobile-google-buffer'), busyCopy = $('#mobile-google-busy-copy');
   if (!status) return;
   status.textContent = info.connected ? 'Conectado' : 'Pendiente';
   status.classList.toggle('ok', Boolean(info.connected));
@@ -176,6 +177,16 @@ function renderGoogleCalendar() {
   copy.textContent = info.connected ? `Conectado como ${info.accountEmail}.` : 'Conecta tu Google Calendar para verlo reflejado desde el negocio.';
   if (connectLink) connectLink.hidden = Boolean(info.connected);
   if (disconnectButton) disconnectButton.hidden = !info.connected;
+  if (refreshButton) refreshButton.hidden = !info.connected;
+  const calendars = info.calendars || [];
+  if (targetWrap) targetWrap.hidden = !info.connected || !calendars.length;
+  if (targetSelect && calendars.length) targetSelect.innerHTML = calendars.map(cal => `<option value="${esc(cal.id)}" ${cal.id === info.targetCalendarId ? 'selected' : ''}>${esc(cal.summary || cal.id)}</option>`).join('');
+  if (bufferWrap) bufferWrap.hidden = !info.connected || !calendars.length;
+  if (bufferInput && document.activeElement !== bufferInput) bufferInput.value = info.travelBufferMinutes || 0;
+  if (busyCopy) {
+    busyCopy.hidden = !info.connected;
+    busyCopy.textContent = calendars.length ? `Chequeamos disponibilidad cruzando tus ${calendars.length} calendarios de esa cuenta — cualquier bloqueo en cualquiera de ellos cuenta como ocupado.` : 'Aún no se pudo leer la lista de tus calendarios — usa "Actualizar calendarios".';
+  }
 }
 function handleGoogleCalendarRedirectParams() {
   const params = new URLSearchParams(location.search);
@@ -190,6 +201,18 @@ function handleGoogleCalendarRedirectParams() {
 $('#mobile-google-disconnect')?.addEventListener('click', async () => {
   if (!confirm('¿Desconectar Google Calendar?')) return;
   try { await api('/api/client/google-calendar/disconnect', { method: 'POST' }); await loadGoogleCalendarStatus(); showToast('Google Calendar desconectado.'); }
+  catch (error) { alert(error.message); }
+});
+$('#mobile-google-refresh-list')?.addEventListener('click', async () => {
+  try { await api('/api/client/google-calendar/refresh-calendars', { method: 'POST' }); await loadGoogleCalendarStatus(); showToast('Lista de calendarios actualizada.'); }
+  catch (error) { alert(error.message); }
+});
+$('#mobile-google-target')?.addEventListener('change', async event => {
+  try { await api('/api/client/google-calendar', { method: 'PATCH', body: JSON.stringify({ calendarId: event.target.value }) }); await loadGoogleCalendarStatus(); showToast('Calendario de citas actualizado.'); }
+  catch (error) { alert(error.message); }
+});
+$('#mobile-google-buffer')?.addEventListener('change', async event => {
+  try { await api('/api/client/google-calendar', { method: 'PATCH', body: JSON.stringify({ bufferMinutes: Number(event.target.value) || 0 }) }); await loadGoogleCalendarStatus(); showToast('Minutos de traslado actualizados.'); }
   catch (error) { alert(error.message); }
 });
 
@@ -325,6 +348,25 @@ document.addEventListener('click', async event => {
     $('#new-customer-sheet').showModal();
     return;
   }
+  if (event.target.closest('#google-contacts-sync')) {
+    const button = $('#google-contacts-sync'), resultEl = $('#google-contacts-sync-result');
+    if (button.disabled) return;
+    if (!state.googleCalendar?.connected) { alert('Conecta Google Calendar primero (pestaña Negocio) para poder sincronizar contactos.'); return; }
+    button.disabled = true;
+    const originalText = button.textContent;
+    button.textContent = 'Sincronizando…';
+    try {
+      const { result } = await api('/api/client/google-contacts/sync', { method: 'POST' });
+      await loadClientes();
+      if (resultEl) {
+        resultEl.hidden = false;
+        resultEl.textContent = `${result.created} nuevos, ${result.updated} actualizados${result.skipped?.length ? `, ${result.skipped.length} omitidos (sin nombre o teléfono válido)` : ''}.`;
+      }
+      showToast('Contactos de Google sincronizados.');
+    } catch (error) { alert(error.message); }
+    finally { button.disabled = false; button.textContent = originalText; }
+    return;
+  }
   const toggleReschedule = event.target.closest('[data-toggle-reschedule]');
   if (toggleReschedule) {
     const box = $('#reschedule-box');
@@ -400,6 +442,22 @@ document.addEventListener('click', async event => {
       await loadClientes();
       await openCustomer(customerId);
     } catch (error) { alert(error.message); }
+    return;
+  }
+  const saveCustomer = event.target.closest('[data-save-customer]');
+  if (saveCustomer) {
+    const customerId = saveCustomer.dataset.saveCustomer, errorEl = $('#edit-customer-error');
+    errorEl.textContent = '';
+    try {
+      await api(`/api/client/customers/${encodeURIComponent(customerId)}`, { method: 'PATCH', body: JSON.stringify({
+        full_name: $('#edit-customer-name').value, phone: $('#edit-customer-phone').value, email: $('#edit-customer-email').value
+      }) });
+      await loadClientes();
+      await loadBandeja();
+      const original = saveCustomer.textContent;
+      saveCustomer.textContent = 'Guardado ✓';
+      setTimeout(() => { saveCustomer.textContent = original; }, 1500);
+    } catch (error) { errorEl.textContent = error.message; }
     return;
   }
   const saveNote = event.target.closest('[data-save-note]');
@@ -874,8 +932,13 @@ async function openCustomer(id) {
     <div class="section-label">${esc(terms.record)}</div>
     <h2>${esc(customer.full_name || 'Sin nombre')}</h2>
     <div class="record-scope"><strong>${esc(terms.intake)}</strong><p>Información entregada por esta persona durante la conversación o la reserva. No sustituye los registros profesionales externos que el negocio deba mantener.</p></div>
-    <div class="detail-row"><span>Teléfono</span><strong>${esc(customer.phone)}</strong></div>
-    ${customer.email ? `<div class="detail-row"><span>Correo</span><strong>${esc(customer.email)}</strong></div>` : ''}
+    <div class="customer-edit-grid" data-customer-id="${esc(customer.id)}">
+      <label>Nombre<input id="edit-customer-name" value="${esc(customer.full_name || '')}"></label>
+      <label>Teléfono<input id="edit-customer-phone" value="${esc(customer.phone || '')}"></label>
+      <label>Correo<input id="edit-customer-email" type="email" value="${esc(customer.email || '')}"></label>
+    </div>
+    <button type="button" class="ghost full" data-save-customer="${esc(customer.id)}">Guardar cambios</button>
+    <p class="sheet-error" id="edit-customer-error"></p>
     ${customer.rut ? `<div class="detail-row"><span>RUT</span><strong>${esc(customer.rut)}</strong></div>` : ''}
     ${customer.age ? `<div class="detail-row"><span>Edad</span><strong>${esc(customer.age)}</strong></div>` : ''}
     ${customer.occupation ? `<div class="detail-row"><span>Ocupación</span><strong>${esc(customer.occupation)}</strong></div>` : ''}

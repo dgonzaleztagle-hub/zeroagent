@@ -427,7 +427,7 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
       // event_id, un reintento acá crearía un segundo evento y una segunda invitación por correo.
       if (appointment.google_calendar_event_id) return;
       const eventId = await createGoogleCalendarEvent({
-        summary: `${serviceName} — ${customerName}`,
+        summary: `${customerName} — ${serviceName}`,
         description: [`Servicio: ${serviceName}`, `Teléfono: ${customerPhone}`, notesWithRisk].filter(Boolean).join('\n'),
         startIso: appointment.starts_at, endIso: appointment.ends_at,
         attendeeEmail: customerEmail || null, colorId: colorIdForLocation(location?.name || '')
@@ -495,7 +495,7 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
   await saveAgendaState(packageData, state);
   await syncGoogleCalendarBestEffort(async () => {
     const eventId = await createGoogleCalendarEvent({
-      summary: `${serviceName} — ${customerName}`,
+      summary: `${customerName} — ${serviceName}`,
       description: [`Servicio: ${serviceName}`, `Teléfono: ${customerPhone}`, notesWithRisk].filter(Boolean).join('\n'),
       startIso: appointment.starts_at, endIso: new Date(endTime).toISOString(),
       attendeeEmail: customerEmail || null, colorId: colorIdForLocation(appointment.location)
@@ -1023,6 +1023,20 @@ export async function updateCustomerSettings(packageData, customerId, patch = {}
     update.segment = patch.segment;
   }
   if (patch.bot_muted !== undefined) update.bot_muted = Boolean(patch.bot_muted);
+  // Edición manual de la identidad del contacto (nombre/teléfono/correo) — antes solo existía
+  // "agregar nuevo" (createManualCustomer); no había forma de corregir uno ya creado (ej. nombre
+  // mal escrito, cambio reportado por el cliente vs su lista de contactos real).
+  if (patch.full_name !== undefined) {
+    const fullName = cleanText(patch.full_name, 120);
+    if (!fullName) throw new Error('El nombre no puede quedar vacío.');
+    update.full_name = fullName;
+  }
+  if (patch.phone !== undefined) {
+    const phone = normalizeChilePhone(cleanText(patch.phone, 40)) || cleanText(patch.phone, 40);
+    if (!phone) throw new Error('El teléfono no puede quedar vacío.');
+    update.phone = phone;
+  }
+  if (patch.email !== undefined) update.email = cleanText(patch.email, 160);
   if (!Object.keys(update).length) throw new Error('Nada que actualizar.');
   if (!agendaUsesSupabase()) return { id: customerId, ...update };
   const rows = await agendaSupabaseRequest(`/rest/v1/za_customers?id=eq.${encodeURIComponent(customerId)}`, {
@@ -1074,30 +1088,82 @@ export function normalizeChilePhone(value) {
 // contacto importado no trae uno.
 const SEGMENT_RANK = { revisar: -1, frio: 0, caliente: 1, cliente: 2 };
 
+// Nota de escala (31-08-2026, franciskom): la primera versión hacía 1 SELECT + 1 INSERT/PATCH
+// por contacto, secuencial (await en el loop). Con una importación chica (CSV a mano) nunca se
+// notó, pero al conectar el sync de Google Contacts —toda la libreta del celular, cientos de
+// contactos— la función serverless se colgó más de 5 minutos sin responder. Reescrito para hacer
+// pocos round-trips grandes en vez de muchos chicos: trae los existentes en lotes por teléfono,
+// inserta los nuevos en bloque, y sólo escribe (en paralelo con concurrencia limitada) los que
+// realmente cambiaron — la mayoría de un re-sync mensual no cambia nada, así que evitar esas
+// escrituras es la mitad de la ganancia.
+async function fetchExistingCustomersByPhone(phones) {
+  const CHUNK = 150; // margen bajo el límite práctico de largo de URL de PostgREST
+  const chunks = [];
+  for (let i = 0; i < phones.length; i += CHUNK) chunks.push(phones.slice(i, i + CHUNK));
+  const byPhone = new Map();
+  await Promise.all(chunks.map(async chunk => {
+    const filter = chunk.map(phone => encodeURIComponent(phone)).join(',');
+    const rows = await agendaSupabaseRequest(`/rest/v1/za_customers?phone=in.(${filter})&select=id,phone,email,segment,full_name`);
+    for (const row of rows || []) byPhone.set(row.phone, row);
+  }));
+  return byPhone;
+}
+
+async function runWithConcurrency(items, limit, worker) {
+  let cursor = 0;
+  async function run() { while (cursor < items.length) { const item = items[cursor++]; await worker(item); } }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
+}
+
 export async function importAgendaCustomers(packageData, contacts) {
   if (!agendaConfig(packageData)) throw new Error('Agenda v1 no está habilitada en este paquete.');
   if (!agendaUsesSupabase()) throw new Error('Importar contactos requiere Supabase configurado en este runtime.');
   const result = { created: 0, updated: 0, skipped: [] };
+
+  const clean = [];
   for (const raw of contacts) {
     const full_name = cleanText(raw.full_name, 200);
     const phone = normalizeChilePhone(raw.phone);
     const email = raw.email ? cleanText(raw.email, 200).toLowerCase() : null;
     const segment = SEGMENT_RANK[raw.segment] != null ? raw.segment : 'frio';
     if (!full_name || !phone) { result.skipped.push({ full_name: raw.full_name || '', phone: raw.phone || '', reason: 'Falta nombre o teléfono válido' }); continue; }
-    const existing = await agendaSupabaseRequest(`/rest/v1/za_customers?phone=eq.${encodeURIComponent(phone)}&select=id,email,segment`);
-    if (existing?.[0]) {
-      const patch = { full_name };
-      if (email && !existing[0].email) patch.email = email;
-      // Nunca degradar: un import solo sube el segmento (frio→caliente→cliente), nunca lo baja
-      // — si ya reservó o confirmó algo real, ese hecho pesa más que la etiqueta del contacto importado.
-      if (SEGMENT_RANK[segment] > (SEGMENT_RANK[existing[0].segment] ?? 0)) patch.segment = segment;
-      await agendaSupabaseRequest(`/rest/v1/za_customers?id=eq.${encodeURIComponent(existing[0].id)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(patch) });
-      result.updated++;
-    } else {
-      await agendaSupabaseRequest('/rest/v1/za_customers', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ full_name, phone, email, segment }) });
-      result.created++;
-    }
+    clean.push({ full_name, phone, email, segment });
   }
+  // Un mismo teléfono puede repetirse en el origen (Google puede traer dos entradas para el mismo
+  // número) — nos quedamos con la última, total la fila destino es la misma.
+  const byPhone = new Map();
+  for (const item of clean) byPhone.set(item.phone, item);
+
+  const existingByPhone = await fetchExistingCustomersByPhone([...byPhone.keys()]);
+
+  const toInsert = [];
+  const toUpdate = [];
+  for (const item of byPhone.values()) {
+    const existing = existingByPhone.get(item.phone);
+    if (!existing) { toInsert.push(item); continue; }
+    const patch = {};
+    if (existing.full_name !== item.full_name) patch.full_name = item.full_name;
+    if (item.email && !existing.email) patch.email = item.email;
+    // Nunca degradar: un import solo sube el segmento (frio→caliente→cliente), nunca lo baja
+    // — si ya reservó o confirmó algo real, ese hecho pesa más que la etiqueta del contacto importado.
+    if (SEGMENT_RANK[item.segment] > (SEGMENT_RANK[existing.segment] ?? 0)) patch.segment = item.segment;
+    if (Object.keys(patch).length) toUpdate.push({ id: existing.id, patch });
+  }
+
+  const INSERT_CHUNK = 500;
+  for (let i = 0; i < toInsert.length; i += INSERT_CHUNK) {
+    const batch = toInsert.slice(i, i + INSERT_CHUNK).map(({ full_name, phone, email, segment }) => ({ full_name, phone, email, segment }));
+    await agendaSupabaseRequest('/rest/v1/za_customers', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(batch) });
+  }
+  result.created = toInsert.length;
+
+  // PostgREST no soporta upsert masivo con un valor distinto por fila, así que esto sigue siendo
+  // una escritura por fila — pero en paralelo (concurrencia limitada) en vez de una por una.
+  await runWithConcurrency(toUpdate, 20, item =>
+    agendaSupabaseRequest(`/rest/v1/za_customers?id=eq.${encodeURIComponent(item.id)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(item.patch) })
+  );
+  result.updated = toUpdate.length;
+
   return result;
 }
 

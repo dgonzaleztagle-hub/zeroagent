@@ -55,6 +55,19 @@
       <button type="button" class="ghost full" id="new-block">Bloquear horario</button>
       <div class="list" id="blocks-list"></div>
 
+      <div class="section-label">Google Calendar</div>
+      <div class="ai-plan-card">
+        <span class="status-pill" id="mobile-google-status">—</span>
+        <strong>Google Calendar</strong>
+        <p id="mobile-google-copy">Cargando estado…</p>
+        <label id="mobile-google-target-wrap" hidden>Calendario donde se crean las citas<select id="mobile-google-target"></select></label>
+        <label id="mobile-google-buffer-wrap" hidden>Minutos de traslado antes/después de un compromiso en otro calendario<input type="number" id="mobile-google-buffer" min="0" max="240" step="5"></label>
+        <p id="mobile-google-busy-copy" class="calendar-busy-copy" hidden></p>
+        <a class="primary full" id="mobile-google-connect" href="/auth/google?return_to=/m/">Conectar Google Calendar</a>
+        <button type="button" class="ghost full" id="mobile-google-refresh-list" hidden>Actualizar calendarios</button>
+        <button type="button" class="ghost full" id="mobile-google-disconnect" hidden>Desconectar</button>
+      </div>
+
       <button class="fab" id="new-booking" aria-label="Nueva reserva">＋</button>
     </section>
 
@@ -63,6 +76,8 @@
       <h1 class="screen-title" id="customers-title">Clientes</h1>
       <p class="screen-sub" id="customers-copy">Contactos y datos de admisión reunidos desde la conversación y la agenda.</p>
       <button type="button" class="ghost" id="open-new-customer" style="margin-bottom:10px">+ Agregar contacto</button>
+      <button type="button" class="ghost" id="google-contacts-sync" style="margin-bottom:10px">Sincronizar desde Google</button>
+      <p id="google-contacts-sync-result" class="calendar-busy-copy" hidden></p>
       <input id="clientes-search" placeholder="Buscar por nombre o teléfono…" style="margin-bottom:10px">
       <div class="segment-pills" id="segment-pills">
         <button class="segment-pill active" data-segment-filter="todos">Todos</button>
@@ -149,13 +164,6 @@
           <strong>Clave propia · BYOK</strong>
           <p id="mobile-byok-copy">La clave se cifra en el servidor y no vuelve al navegador.</p>
           <form id="mobile-ai-byok-form" class="ai-config-form"><label>Proveedor<select id="mobile-ai-byok-provider"><option value="openai">OpenAI</option><option value="groq">Groq</option><option value="compatible">Compatible con OpenAI</option></select></label><label>Modelo<input id="mobile-ai-byok-model" required autocomplete="off" placeholder="Identificador del modelo"></label><label id="mobile-ai-byok-base-row" hidden>URL base HTTPS<input id="mobile-ai-byok-base" type="url" inputmode="url" autocomplete="off" placeholder="https://api.proveedor.com/v1"></label><label>API key<input id="mobile-ai-byok-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="Se enviará una sola vez"></label><p id="mobile-ai-byok-key-state" class="form-note"></p><button type="submit" class="primary full">Activar clave propia</button></form>
-        </div>
-        <div class="ai-plan-card">
-          <span class="status-pill" id="mobile-google-status">—</span>
-          <strong>Google Calendar</strong>
-          <p id="mobile-google-copy">Cargando estado…</p>
-          <a class="primary full" id="mobile-google-connect" href="/auth/google?return_to=/m/">Conectar Google Calendar</a>
-          <button type="button" class="ghost full" id="mobile-google-disconnect" hidden>Desconectar</button>
         </div>
       </div>
     </section>

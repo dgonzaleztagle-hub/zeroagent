@@ -48,6 +48,35 @@
 .integration-grid a.outline-button{display:inline-flex;align-items:center;justify-content:center;margin-top:10px;text-decoration:none}
 .integration-grid .text-button{margin-top:10px}
 
+/* 26-08-2026: la tarjeta de Google Calendar vivía solo en Negocio->Integraciones, enterrada
+   respecto a como se ve en /m (visible directo en la pantalla Agenda) — Daniel lo notó al no
+   encontrarla en la vista de Calendario de PC. Se movió la misma tarjeta (mismos ids, sin
+   cambios de JS) al final de #agenda-calendar para que ambas consolas la muestren en el
+   mismo lugar. */
+.agenda-google-card{margin-top:18px}
+.agenda-google-card article{max-width:320px}
+.integration-grid label{display:block;margin-top:12px;color:var(--muted);font-size:9px}
+.integration-grid select{width:100%;min-height:37px;margin-top:5px;border:1px solid var(--line);border-radius:8px;background:white;padding:0 9px;color:var(--ink);font-size:11px}
+.calendar-busy-copy{margin-top:10px}
+
+/* 26-08-2026: "Actualizar" (#refresh-button) no daba ninguna señal al apretarlo — ni estado
+   presionado, ni indicador de carga, ni confirmación al terminar (Daniel: "ni siquiera se
+   siente como si lo apretara"). Se agrega feedback en las 3 etapas: press inmediato,
+   giro mientras carga (clase .spinning puesta/sacada en el click handler), toast al terminar. */
+.icon-button:active{transform:scale(.92)}
+.icon-button:disabled{opacity:.6;cursor:default}
+.icon-button.spinning{animation:icon-spin .7s linear infinite}
+@keyframes icon-spin{to{transform:rotate(360deg)}}
+
+/* 26-08-2026: editar nombre/telefono/correo de un contacto ya existente -- antes solo se podia
+   "agregar nuevo" (nombre/telefono), sin forma de corregir uno que ya estaba mal escrito o
+   desactualizado. Grid propio (no reusa .dialog-card>label) porque estos inputs viven anidados
+   un nivel mas adentro que ese selector de hijo directo. */
+.customer-edit-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:16px}
+.customer-edit-grid label{display:grid;gap:6px;color:var(--muted);font-size:9px}
+.customer-edit-grid input{min-height:41px;border:1px solid var(--line);border-radius:8px;background:white;padding:9px;color:var(--ink);font-size:13px}
+@media(max-width:760px){.customer-edit-grid{grid-template-columns:1fr}}
+
 /* Estado operativo honesto: separa futuro, vencidos y derivaciones sin crear
    controles que el runtime todavía no puede ejecutar. */
 .today-stats{grid-template-columns:repeat(4,minmax(0,1fr))}

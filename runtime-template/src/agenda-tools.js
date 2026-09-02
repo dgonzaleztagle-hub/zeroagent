@@ -5,6 +5,22 @@ import { updateCustomerIntakeRecord } from './customer-records.js';
 // La relevancia no debe depender de coincidencia textual exacta.
 const normName = value => String(value || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
 const findByName = (list, name) => (list || []).find(item => normName(item.name) === normName(name));
+// Si no hay match exacto (el modelo escribió "evaluación" en vez de "Evaluación · Box Buin"),
+// intenta un match parcial ANTES de rendirse. Si calza con un solo item, se resuelve solo — es
+// justo el caso más común y lo que antes fallaba siempre al primer intento (ver AGENDA_BEHAVIOR /
+// el enum de getAgendaToolDefinitions, que reduce esto todavía más). Si calza con más de uno
+// ("evaluación" sin decir sede, y hay evaluación en 2 sedes), es ambigüedad real del cliente, no
+// del matching — no se elige por él, se marca `ambiguous` para que el modelo pregunte.
+function resolveCatalogItem(list, name) {
+  const exact = findByName(list, name);
+  if (exact) return { item: exact };
+  const query = normName(name);
+  if (!query) return { item: null };
+  const candidates = (list || []).filter(item => normName(item.name).includes(query));
+  if (candidates.length === 1) return { item: candidates[0] };
+  if (candidates.length > 1) return { item: null, ambiguous: candidates };
+  return { item: null };
+}
 const normalizePhone = value => String(value || '').replace(/\D/g, '');
 const isUuid = value => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ''));
 const samePhone = (a, b) => {
@@ -12,12 +28,21 @@ const samePhone = (a, b) => {
   return left.length >= 8 && right.length >= 8 && left === right;
 };
 
-export function getAgendaToolDefinitions(packageData) {
+// El 2do parámetro (catálogo LIVE, mismo que ejecuta las herramientas) es opcional — sin él, se
+// comporta como antes (sólo `type: 'string'`, sin enum). Con él, service/resource/location quedan
+// acotados a los nombres reales, así el modelo elige de una lista real en vez de escribir el
+// nombre libre y fallar contra el match exacto/parcial de resolveCatalogItem.
+export function getAgendaToolDefinitions(packageData, catalog) {
   if (!agendaConfig(packageData)) return [];
+  const namesOf = list => (list || []).map(item => item.name).filter(Boolean);
+  const withEnum = (schema, names) => (names.length ? { ...schema, enum: names } : schema);
+  const serviceSchema = withEnum({ type: 'string' }, namesOf(catalog?.services));
+  const resourceSchema = withEnum({ type: 'string' }, namesOf(catalog?.resources));
+  const locationSchema = withEnum({ type: 'string' }, namesOf(catalog?.locations));
   return [
-    { type: 'function', function: { name: 'get_availability', description: 'Consulta los horarios realmente disponibles. Úsala SIEMPRE que pregunten por horarios, disponibilidad o cupos, incluidas preguntas de sí/no como "¿tienen hora?" o "¿hay cupo?". Nunca inventes horarios ni respondas disponibilidad sin llamarla.', parameters: { type: 'object', properties: { service: { type: 'string' }, resource: { type: 'string' }, date: { type: 'string', description: 'YYYY-MM-DD' } }, required: ['service', 'resource', 'date'] } } },
+    { type: 'function', function: { name: 'get_availability', description: 'Consulta los horarios realmente disponibles. Úsala SIEMPRE que pregunten por horarios, disponibilidad o cupos, incluidas preguntas de sí/no como "¿tienen hora?" o "¿hay cupo?". Nunca inventes horarios ni respondas disponibilidad sin llamarla. Para saber si hay hora sólo hace falta la SEDE (Box Buin o domicilio) — el servicio exacto (evaluación, sesión respiratoria) casi no cambia la duración real y es una pregunta posterior, no un requisito para buscar hora; pásalo sólo si el cliente ya lo dijo espontáneamente.', parameters: { type: 'object', properties: { location: { type: 'string', description: 'Sede pedida por el cliente.', enum: ['Box Buin', 'Domicilio'] }, service: serviceSchema, resource: resourceSchema, date: { type: 'string', description: 'YYYY-MM-DD' } }, required: ['location', 'resource', 'date'] } } },
     { type: 'function', function: { name: 'get_my_appointment', description: 'Consulta las reservas activas del cliente que escribe. Requiere identidad verificada por canal.', parameters: { type: 'object', properties: {} } } },
-    { type: 'function', function: { name: 'create_appointment', description: 'Crea la reserva apenas tengas los datos requeridos (nombre, servicio, profesional, horario) y el cliente haya confirmado que quiere agendar ese horario — NO esperes correo, RUT, edad, ocupación ni antecedentes médicos antes de llamarla, esos son opcionales y nunca bloquean la reserva. Si la respuesta trae ask_intake_details:true, sigue el texto de intake_prompt para pedir esos datos opcionales DESPUÉS, en el mismo mensaje donde confirmas que la hora quedó agendada — nunca antes de crear la reserva. Si la respuesta trae action:"needs_manual_confirmation", NO digas que la reserva quedó agendada: sigue el mensaje que te devuelve la herramienta (el profesional debe confirmar esa hora en particular manualmente).', parameters: { type: 'object', properties: { customer_name: { type: 'string' }, email: { type: 'string', description: 'Correo del cliente, si lo dio.' }, rut: { type: 'string', description: 'RUT del cliente, si lo dio (se pide para emitir la boleta).' }, address: { type: 'string', description: 'Dirección de atención (calle, número, comuna) — obligatoria si el servicio es a domicilio.' }, age: { type: 'integer', description: 'Edad del cliente, si la dio.' }, occupation: { type: 'string', description: 'Ocupación del cliente, si la dio.' }, medical_history: { type: 'string', description: 'Antecedentes médicos importantes (lesiones, cirugías, medicamentos), si los dio.' }, extra_symptoms: { type: 'string', description: 'Otros síntomas además del motivo principal, si los dio.' }, service: { type: 'string' }, resource: { type: 'string' }, location: { type: 'string' }, starts_at: { type: 'string', description: 'ISO 8601' }, notes: { type: 'string' } }, required: ['customer_name', 'service', 'resource', 'starts_at'] } } },
+    { type: 'function', function: { name: 'create_appointment', description: 'Crea la reserva apenas tengas los datos requeridos (nombre, servicio, profesional, horario) y el cliente haya confirmado que quiere agendar ese horario — NO esperes correo, RUT, edad, ocupación ni antecedentes médicos antes de llamarla, esos son opcionales y nunca bloquean la reserva. Si la respuesta trae ask_intake_details:true, sigue el texto de intake_prompt para pedir esos datos opcionales DESPUÉS, en el mismo mensaje donde confirmas que la hora quedó agendada — nunca antes de crear la reserva. Si la respuesta trae action:"needs_manual_confirmation", NO digas que la reserva quedó agendada: sigue el mensaje que te devuelve la herramienta (el profesional debe confirmar esa hora en particular manualmente).', parameters: { type: 'object', properties: { customer_name: { type: 'string' }, email: { type: 'string', description: 'Correo del cliente, si lo dio.' }, rut: { type: 'string', description: 'RUT del cliente, si lo dio (se pide para emitir la boleta).' }, address: { type: 'string', description: 'Dirección de atención (calle, número, comuna) — obligatoria si el servicio es a domicilio.' }, age: { type: 'integer', description: 'Edad del cliente, si la dio.' }, occupation: { type: 'string', description: 'Ocupación del cliente, si la dio.' }, medical_history: { type: 'string', description: 'Antecedentes médicos importantes (lesiones, cirugías, medicamentos), si los dio.' }, extra_symptoms: { type: 'string', description: 'Otros síntomas además del motivo principal, si los dio.' }, service: serviceSchema, resource: resourceSchema, location: locationSchema, starts_at: { type: 'string', description: 'ISO 8601' }, notes: { type: 'string' } }, required: ['customer_name', 'service', 'resource', 'starts_at'] } } },
     { type: 'function', function: { name: 'update_customer_profile', description: 'Guarda correo, RUT, edad, ocupación, antecedentes médicos u otros síntomas que el cliente entrega para su ficha — típicamente respondiendo al pedido de "dejar la ficha lista" después de agendar. Es SÓLO para guardar esos datos, nunca implica crear, cambiar ni revisar ninguna reserva: no llames get_availability ni create_appointment en el mismo turno sólo porque el cliente mandó estos datos. Sólo funciona si el cliente ya agendó al menos una vez con este teléfono. Llámala apenas entregue alguno de estos datos, no esperes a tener todos.', parameters: { type: 'object', properties: { email: { type: 'string' }, rut: { type: 'string' }, age: { type: 'integer' }, occupation: { type: 'string' }, medical_history: { type: 'string' }, extra_symptoms: { type: 'string' } } } } },
     { type: 'function', function: { name: 'cancel_appointment', description: 'Cancela una reserva del mismo cliente verificado. No usar para una reserva de otra persona.', parameters: { type: 'object', properties: { reference: { type: 'string' } }, required: ['reference'] } } },
     { type: 'function', function: { name: 'reschedule_appointment', description: 'Reagenda una reserva del mismo cliente después de que eligió fecha/hora. Verifica disponibilidad y cambia atómicamente.', parameters: { type: 'object', properties: { reference: { type: 'string' }, new_starts_at: { type: 'string', description: 'ISO 8601' } }, required: ['reference', 'new_starts_at'] } } },
@@ -59,9 +84,30 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
     const dashboard = await dashboardOrError(packageData);
     if (dashboard.error) return dashboard;
     if (name === 'get_availability') {
-      const service = findByName(dashboard.catalog.services, args.service);
-      const resource = findByName(dashboard.catalog.resources, args.resource);
-      if (!service || !resource) return { error: 'catalog_not_found', message: 'Ese servicio o profesional no está en el catálogo. Ofrece sólo los disponibles.', available_services: dashboard.catalog.services.map(item => item.name), available_resources: dashboard.catalog.resources.map(item => item.name) };
+      const resourceMatch = resolveCatalogItem(dashboard.catalog.resources, args.resource);
+      if (resourceMatch.ambiguous) return { error: 'ambiguous_resource', message: 'Más de un profesional calza con lo que pidió el cliente — pregúntale cuál de estas opciones exactas quiere, nunca elijas tú.', options: resourceMatch.ambiguous.map(item => item.name) };
+      const resource = resourceMatch.item;
+      if (!resource) return { error: 'catalog_not_found', message: 'Ese profesional no está en el catálogo. Ofrece sólo los disponibles.', available_resources: dashboard.catalog.resources.map(item => item.name) };
+      let service = null;
+      if (args.service) {
+        const serviceMatch = resolveCatalogItem(dashboard.catalog.services, args.service);
+        if (serviceMatch.ambiguous) return { error: 'ambiguous_service', message: 'Más de un servicio calza con lo que pidió el cliente — pregúntale cuál de estas opciones exactas quiere, nunca elijas tú.', options: serviceMatch.ambiguous.map(item => item.name) };
+        service = serviceMatch.item;
+      }
+      if (!service && args.location) {
+        // Sin servicio exacto, sólo sede: elige el servicio agendable de esa sede con MAYOR
+        // duración (nunca ofrece un horario que le quede corto al servicio real que se termine
+        // pidiendo — la diferencia entre servicios de una misma sede es de minutos, no cambia si
+        // hay o no bloque libre). Confirmado con Daniel: lo único que realmente cambia la
+        // viabilidad del horario es la sede (el traslado a domicilio necesita más bloque).
+        const query = normName(args.location);
+        const candidates = (dashboard.catalog.services || [])
+          .filter(item => item.bookable !== false)
+          .filter(item => normName(item.name).includes(query))
+          .filter(item => (resource.services || []).some(n => normName(n) === normName(item.name)));
+        service = candidates.sort((a, b) => (Number(b.duration_minutes) || 0) - (Number(a.duration_minutes) || 0))[0] || null;
+      }
+      if (!service) return { error: 'catalog_not_found', message: 'Indica la sede (Box Buin o domicilio) para poder buscar hora, o el nombre exacto del servicio si el cliente ya lo dijo.', available_services: dashboard.catalog.services.map(item => item.name) };
       // Servicio marcado `bookable:false`: no lo maneja este negocio (ej. atención en un centro
       // de terceros) — no tiene sentido mostrar "disponibilidad" propia para algo que no se agenda acá.
       if (service.bookable === false) return { ok: true, action: 'not_bookable_here', message: service.redirect_note || `"${service.name}" no se agenda por este canal — indícale al cliente que coordine directamente con ese lugar.` };
@@ -98,8 +144,12 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
     }
     if (name === 'create_appointment') {
       if (!context.callerPhone) return { error: 'identity_required', message: 'No puedo crear una reserva por WhatsApp sin el teléfono verificado del remitente.' };
-      const service = findByName(dashboard.catalog.services, args.service);
-      const resource = findByName(dashboard.catalog.resources, args.resource);
+      const serviceMatch = resolveCatalogItem(dashboard.catalog.services, args.service);
+      const resourceMatch = resolveCatalogItem(dashboard.catalog.resources, args.resource);
+      if (serviceMatch.ambiguous) return { error: 'ambiguous_service', message: 'Más de un servicio calza con lo que pidió el cliente — pregúntale cuál de estas opciones exactas quiere, nunca elijas tú.', options: serviceMatch.ambiguous.map(item => item.name) };
+      if (resourceMatch.ambiguous) return { error: 'ambiguous_resource', message: 'Más de un profesional calza con lo que pidió el cliente — pregúntale cuál de estas opciones exactas quiere, nunca elijas tú.', options: resourceMatch.ambiguous.map(item => item.name) };
+      const service = serviceMatch.item;
+      const resource = resourceMatch.item;
       if (!service || !resource) return { error: 'catalog_not_found', message: 'Ese servicio o profesional no está en el catálogo. Ofrece sólo los disponibles.', available_services: dashboard.catalog.services.map(item => item.name), available_resources: dashboard.catalog.resources.map(item => item.name) };
       // Igual que en get_availability: un servicio no gestionado por este negocio nunca se agenda
       // ni deriva a handoff — se redirige directo, sin crear ningún rastro de reserva/ticket.

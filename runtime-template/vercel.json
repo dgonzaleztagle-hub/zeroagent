@@ -4,7 +4,11 @@
   ],
   "functions": {
     "api/index.js": {
-      "includeFiles": "{public/**,agent-package.json}"
+      "includeFiles": "{public/**,agent-package.json}",
+      "maxDuration": 60
     }
-  }
+  },
+  "crons": [
+    { "path": "/api/agenda/google-contacts/cron", "schedule": "0 * * * *" }
+  ]
 }

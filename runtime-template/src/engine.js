@@ -190,8 +190,7 @@ export async function answerWithGroq(packageData, message, context = {}) {
   if (!selectedFacts.length && !getAgendaToolDefinitions(packageData).length) return { ...fallback, provider: 'deterministic', usage: { inputTokens: 0, outputTokens: 0 } };
 
   try {
-    const tools = getAgendaToolDefinitions(packageData);
-    const agendaEnabled = tools.length > 0;
+    const agendaEnabled = getAgendaToolDefinitions(packageData).length > 0;
     const history = Array.isArray(context.history) ? context.history.slice(-20).filter(item => ['user', 'assistant'].includes(item?.role) && typeof item.content === 'string') : [];
     // El modelo no tiene noción propia de "hoy": sin esto, adivina la fecha (se vio devolver
     // 2023 sobre un mensaje de 2026) y razona mal "hoy/mañana/este finde". Se ancla SIEMPRE a la
@@ -205,6 +204,11 @@ export async function answerWithGroq(packageData, message, context = {}) {
     // instrucciones del modelo, aunque las herramientas sí lo encontraran y pudieran agendarlo.
     const liveAgendaDashboard = agendaEnabled ? await getAgendaDashboard(packageData).catch(() => null) : null;
     const catalogSource = liveAgendaDashboard?.catalog || staticAgendaConfig;
+    // Enum del catálogo LIVE en la propia definición de la herramienta: el modelo elige de una
+    // lista real en vez de escribir el nombre libre y fallar la primera vez contra el match exacto
+    // de agenda-tools.js (encontrado en vivo: "evaluación" vs "Evaluación · Box Buin" fallaba
+    // siempre al primer intento, y esa primera falla contaminaba el tono de la respuesta final).
+    const tools = getAgendaToolDefinitions(packageData, catalogSource);
     const businessTimeZone = staticAgendaConfig.timezone || 'America/Santiago';
     const nowLabel = new Intl.DateTimeFormat('es-CL', { timeZone: businessTimeZone, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
     // Prefijo estático (cacheable): comportamiento base + identidad. Los hechos, que cambian por
@@ -237,10 +241,19 @@ export async function answerWithGroq(packageData, message, context = {}) {
     ];
     const toolTrace = [];
     let totalInputTokens = 0; let totalOutputTokens = 0;
+    // La familia gpt-5.x (razonamiento) rechaza `temperature` distinto de 1 con 400, y sin
+    // `reasoning_effort: 'none'` gasta tokens de razonamiento ocultos no facturados como
+    // respuesta visible (mismo hallazgo que en Rishtedar al probar gpt-5.6-luna). El resto de
+    // los proveedores/modelos (gpt-4o-mini, Groq) sigue con el temperature bajo de siempre.
+    const isGpt5Family = /^gpt-5(\.|-)/.test(llm.model);
     for (let round = 0; round < 4; round++) {
       const response = await fetch(`${llm.baseUrl}/chat/completions`, {
         method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${llm.apiKey}` },
-        body: JSON.stringify({ model: llm.model, temperature: 0.1, max_completion_tokens: 260, messages, ...(tools.length ? { tools, tool_choice: 'auto' } : {}) })
+        body: JSON.stringify({
+          model: llm.model, max_completion_tokens: 260, messages,
+          ...(isGpt5Family ? { reasoning_effort: 'none' } : { temperature: 0.1 }),
+          ...(tools.length ? { tools, tool_choice: 'auto' } : {})
+        })
       });
       if (!response.ok) throw new Error(`Groq ${response.status}`);
       const data = await response.json();

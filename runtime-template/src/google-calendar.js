@@ -9,7 +9,16 @@ const SETTINGS_ID = 'primary';
 // calendar.freebusy es un scope aparte de calendar.events — sin él, freeBusy.query devuelve
 // "Request had insufficient authentication scopes" aunque el evento sí se pueda crear/editar
 // (encontrado probando la Fase 1 en producción, 18-08-2026).
-const SCOPE = 'openid email https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.freebusy';
+// calendar.calendarlist.readonly (26-08-2026): sin esto, calendarList.list también da 403 —
+// necesario para descubrir TODOS los calendarios de la cuenta (un negocio real casi siempre
+// tiene más de uno: "Mi calendario" por defecto casi vacío, más uno o varios de trabajo/personal
+// donde realmente pasan sus horas — caso real franciskom: sus pacientes vivían en "Pacientes
+// FrancisKOM", nunca en "primary", así que freebusy contra un solo calendario fijo siempre daba
+// falso "libre" para cualquier bloqueo en los otros).
+// contacts.readonly (31-08-2026): Francisco ya movió sus contactos del teléfono a Google
+// Contacts (siguiendo la guía que le mandamos) — con este scope podemos leerlos (solo lectura,
+// nunca escribimos en su libreta) y traer nombres/teléfonos al CRM sin que tenga que tipear nada.
+const SCOPE = 'openid email https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.freebusy https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/contacts.readonly';
 const STATE_TTL_MS = 10 * 60 * 1000;
 
 function clean(value, max = 500) {
@@ -142,6 +151,19 @@ function decodeIdTokenEmail(idToken) {
   } catch { return ''; }
 }
 
+// Todos los calendarios visibles para esta cuenta (propios + compartidos que aceptó) — no sólo
+// "primary". Si esto falla (ej. token sin el scope calendar.calendarlist.readonly todavía,
+// negocio conectado antes del 26-08-2026), no revienta la conexión: freebusy sigue funcionando
+// contra el/los calendario(s) ya guardados, sólo no se puede refrescar la lista hasta reconectar.
+async function fetchCalendarList(accessToken) {
+  const response = await fetch('https://www.googleapis.com/calendar/v3/users/me/calendarList?minAccessRole=freeBusyReader', {
+    headers: { authorization: `Bearer ${accessToken}` }
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error?.message || `Google respondió ${response.status} al listar calendarios.`);
+  return (body.items || []).map(item => ({ id: item.id, summary: clean(item.summary, 200), primary: Boolean(item.primary) }));
+}
+
 async function storedSettings() {
   if (!agendaUsesSupabase()) return null;
   try {
@@ -158,8 +180,49 @@ export async function getGoogleCalendarStatus() {
   return {
     connected: Boolean(settings?.refresh_token_ciphertext),
     accountEmail: settings?.google_account_email || '',
-    connectedAt: settings?.connected_at || null
+    connectedAt: settings?.connected_at || null,
+    targetCalendarId: settings?.google_calendar_id || 'primary',
+    calendars: Array.isArray(settings?.calendar_ids) ? settings.calendar_ids : [],
+    travelBufferMinutes: Number(settings?.travel_buffer_minutes) || 0
   };
+}
+
+// Re-descubre los calendarios de la cuenta ya conectada (botón "Actualizar calendarios") — para
+// cuando el negocio crea uno nuevo en Google después de haber conectado, sin tener que
+// desconectar/reconectar. Devuelve la lista actualizada (misma forma que getGoogleCalendarStatus).
+export async function refreshGoogleCalendarList() {
+  const ctx = await calendarContext();
+  if (!ctx) throw new Error('Google Calendar no está conectado.');
+  const calendarIds = await fetchCalendarList(ctx.accessToken);
+  await agendaSupabaseRequest(`/rest/v1/za_google_calendar_settings?id=eq.${SETTINGS_ID}`, {
+    method: 'PATCH', body: JSON.stringify({ calendar_ids: calendarIds, updated_at: new Date().toISOString() })
+  });
+  return calendarIds;
+}
+
+// El calendario donde el bot escribe las citas que crea (distinto de la lista completa que
+// freebusy consulta) — un negocio con varios calendarios necesita elegir cuál es "el de
+// pacientes/trabajo", no asumir que es "primary".
+export async function setGoogleCalendarTarget(calendarId) {
+  const id = clean(calendarId, 300);
+  if (!id) throw new Error('Falta el calendario a usar.');
+  const settings = await storedSettings();
+  const known = Array.isArray(settings?.calendar_ids) ? settings.calendar_ids : [];
+  if (known.length && !known.some(cal => cal.id === id)) throw new Error('Ese calendario no está en la lista de calendarios de esta cuenta.');
+  await agendaSupabaseRequest(`/rest/v1/za_google_calendar_settings?id=eq.${SETTINGS_ID}`, {
+    method: 'PATCH', body: JSON.stringify({ google_calendar_id: id, updated_at: new Date().toISOString() })
+  });
+}
+
+// Minutos de margen que hay que sumar antes/después de un bloqueo en OTRO calendario (no el de
+// escritura) para que un horario recién ofrecido sea realmente cumplible — ver el comentario en
+// getGoogleCalendarBusyIntervals. 0 = comportamiento anterior (pegado al bloqueo, sin margen).
+export async function setGoogleCalendarBuffer(minutes) {
+  const value = Number(minutes);
+  if (!Number.isFinite(value) || value < 0 || value > 240) throw new Error('Los minutos de traslado deben ser un número entre 0 y 240.');
+  await agendaSupabaseRequest(`/rest/v1/za_google_calendar_settings?id=eq.${SETTINGS_ID}`, {
+    method: 'PATCH', body: JSON.stringify({ travel_buffer_minutes: Math.round(value), updated_at: new Date().toISOString() })
+  });
 }
 
 // Punto de entrada del callback: canjea el code, guarda el refresh_token cifrado. No devuelve
@@ -174,9 +237,15 @@ export async function completeGoogleCalendarConnection(req, { code, operatorId }
     throw new Error('Google no devolvió un refresh_token. Vuelve a intentar la conexión desde cero.');
   }
   const email = decodeIdTokenEmail(tokens.id_token);
+  // Best-effort: si falla (scope viejo en un re-consentimiento raro, error transitorio de
+  // Google), la conexión igual queda buena — sólo no hay lista de calendarios para elegir
+  // hasta que se use "Actualizar calendarios" o se reconecte.
+  let calendarIds = [];
+  try { calendarIds = await fetchCalendarList(tokens.access_token); } catch { calendarIds = []; }
   const record = {
     id: SETTINGS_ID,
     google_account_email: email,
+    calendar_ids: calendarIds,
     ...encryptToken(tokens.refresh_token),
     connected_at: new Date().toISOString(),
     connected_by_operator_id: operatorId || null,
@@ -207,9 +276,7 @@ export async function disconnectGoogleCalendar() {
 // función de Calendar (freebusy/crear/actualizar/borrar evento) leía la fila de settings dos
 // veces por separado (una para el token, otra para el id de calendario) — mismo dato, dos
 // round-trips a Supabase por operación.
-async function calendarContext() {
-  const settings = await storedSettings();
-  if (!settings?.refresh_token_ciphertext) return null;
+async function accessTokenFromSettings(settings) {
   const refreshToken = decryptToken(settings);
   const { clientId, clientSecret } = oauthClient();
   const response = await fetch('https://oauth2.googleapis.com/token', {
@@ -219,7 +286,32 @@ async function calendarContext() {
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error_description || body.error || `Google respondió ${response.status} al refrescar el token.`);
-  return { accessToken: body.access_token, calendarId: settings.google_calendar_id || 'primary' };
+  return body.access_token;
+}
+
+// Access token fresco de la MISMA cuenta ya conectada, para integraciones hermanas que comparten
+// el mismo OAuth (ej. google-contacts.js) sin duplicar el intercambio de refresh_token. Null si no
+// hay conexión — el llamador decide qué hacer (nunca revienta acá).
+export async function getGoogleAccessToken() {
+  const settings = await storedSettings();
+  if (!settings?.refresh_token_ciphertext) return null;
+  return accessTokenFromSettings(settings);
+}
+
+async function calendarContext() {
+  const settings = await storedSettings();
+  if (!settings?.refresh_token_ciphertext) return null;
+  const accessToken = await accessTokenFromSettings(settings);
+  const calendarId = settings.google_calendar_id || 'primary';
+  const knownIds = Array.isArray(settings.calendar_ids) ? settings.calendar_ids.map(cal => cal.id).filter(Boolean) : [];
+  // Freebusy debe mirar TODOS los calendarios de la cuenta (un bloqueo personal en cualquiera de
+  // ellos igual tiene que bloquear el horario) — si todavía no hay lista descubierta (conexión
+  // vieja, antes de tener este scope), cae de vuelta al único calendario que se conocía antes.
+  return {
+    accessToken, calendarId,
+    busyCalendarIds: knownIds.length ? knownIds : [calendarId],
+    travelBufferMinutes: Number(settings.travel_buffer_minutes) || 0
+  };
 }
 
 // Paleta fija de Google (colorId 1-11) — mapeo simple por sede mientras franciskom sea el único
@@ -252,11 +344,27 @@ export async function getGoogleCalendarBusyIntervals(startIso, endIso) {
   const response = await fetch('https://www.googleapis.com/calendar/v3/freeBusy', {
     method: 'POST',
     headers: { authorization: `Bearer ${ctx.accessToken}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ timeMin: startIso, timeMax: endIso, items: [{ id: ctx.calendarId }] })
+    body: JSON.stringify({ timeMin: startIso, timeMax: endIso, items: ctx.busyCalendarIds.map(id => ({ id })) })
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error?.message || `Google respondió ${response.status} al consultar freebusy.`);
-  return body.calendars?.[ctx.calendarId]?.busy || [];
+  // Unión de TODOS los calendarios de la cuenta -- un bloqueo en cualquiera de ellos ("Familia",
+  // "Entrenamiento", el de pacientes, etc.) cuenta como ocupado, sin importar en cuál esté.
+  // Un bloqueo que viene de OTRO calendario (no el que usamos para escribir nuestras propias
+  // citas) se estira travelBufferMinutes antes y después: un profesional que atiende en más de
+  // un lugar necesita tiempo real para trasladarse, no puede empezar la próxima cita justo
+  // cuando termina el compromiso anterior en otro sitio (caso real franciskom: Eleva Salud
+  // termina 19:00, sin buffer ofrecíamos 19:00 igual, imposible de cumplir en la práctica).
+  const bufferMs = ctx.travelBufferMinutes * 60_000;
+  const calendars = body.calendars || {};
+  return ctx.busyCalendarIds.flatMap(id => {
+    const intervals = calendars[id]?.busy || [];
+    if (!bufferMs || id === ctx.calendarId) return intervals;
+    return intervals.map(interval => ({
+      start: new Date(new Date(interval.start).getTime() - bufferMs).toISOString(),
+      end: new Date(new Date(interval.end).getTime() + bufferMs).toISOString()
+    }));
+  });
 }
 
 // Crea un evento propio en el Calendar conectado. Devuelve null si no hay conexión (para que el

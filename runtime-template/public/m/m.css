@@ -242,5 +242,7 @@ a.primary.full[hidden]{display:none}
 .ai-plan-card{display:grid;gap:8px;margin-bottom:10px;padding:15px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}
 .ai-plan-card.muted{background:transparent}.ai-plan-card h2{margin:4px 0 0;font-size:18px}.ai-plan-card p{margin:0;color:var(--muted);font-size:12px;line-height:1.55}.ai-plan-card>strong{font-size:14px}
 .ai-config-form{display:grid;gap:10px;padding-top:9px;border-top:1px solid var(--line)}.ai-config-form label{display:grid;gap:5px;color:var(--muted);font-size:12px}.ai-config-form input,.ai-config-form select{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;background:var(--surface);padding:9px 10px;color:var(--ink)}.ai-config-form .form-note{margin:0;padding:9px;border-radius:9px;background:var(--soft);color:var(--muted);font-size:11px;line-height:1.45}
+#mobile-google-target-wrap{display:grid;gap:5px;color:var(--muted);font-size:12px}
+.calendar-busy-copy{font-size:11px}
 #mobile-ai-action-status:empty{display:none}
 .operation-toast{position:fixed;left:16px;right:16px;bottom:calc(70px + var(--safe-bottom));z-index:90;padding:13px 15px;border-radius:12px;background:var(--ink);color:#fff;box-shadow:0 12px 34px rgba(23,34,28,.22);font-size:13px;transform:translateY(8px);opacity:0;transition:.2s ease}.operation-toast.visible{transform:none;opacity:1}
