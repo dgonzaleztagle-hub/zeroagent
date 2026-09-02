@@ -33,6 +33,11 @@ const channelProvider = process.env.CHANNEL_PROVIDER || 'zavu';
 const previewKey = process.env.PREVIEW_ACCESS_KEY || '';
 const feedbackWebhookUrl = process.env.FEEDBACK_WEBHOOK_URL || '';
 const dashboardKey = process.env.DASHBOARD_ACCESS_KEY || '';
+// Teléfono ficticio fijo para "Probar" (el dueño probando el bot desde el dashboard, sin un
+// WhatsApp real detrás) — create_appointment exige un callerPhone verificado para no dejar que
+// cualquiera agende a nombre de otra persona por WhatsApp; sin este número, el flujo de reserva
+// completo (el paso que más le importa probar al dueño) nunca podía terminar en preview.
+const PREVIEW_TEST_PHONE = '+56900000000';
 const previewWebhookEvents = new Map();
 const rateWindows = new Map();
 try {
@@ -866,10 +871,11 @@ export async function handleRequest(req, res) {
       const body = await readJson(req);
       if (!(await previewAuthorized(req, body))) return json(res, 401, { error: 'Acceso de preview no autorizado.' });
       if (!body.message?.trim()) return json(res, 400, { error: 'Escribe un mensaje para probar el agente.' });
-      const agentControl = await getAgentControl();
-      if (agentControl.control.mode === 'paused') return json(res, 409, { error: 'El agente está pausado por el dueño.' });
+      // La pausa global corta las respuestas a clientes reales (WhatsApp/webhook genérico) — no
+      // tiene sentido que también bloquee "Probar": el dueño pausa el bot justo para poder revisar
+      // y ajustar su comportamiento en privado sin que responda a nadie más mientras tanto.
       const history = Array.isArray(body.history) ? body.history.filter(item => item && ['user', 'assistant'].includes(item.role) && typeof item.content === 'string') : [];
-      const reply = await answerWithConfiguredAi(body.message, { conversationId: body.conversationId || 'web-preview', history });
+      const reply = await answerWithConfiguredAi(body.message, { callerPhone: PREVIEW_TEST_PHONE, conversationId: body.conversationId || 'web-preview', history });
       await recordUsage({ provider: reply.provider, model: reply.model || 'deterministic', inputTokens: reply.usage?.inputTokens || 0, outputTokens: reply.usage?.outputTokens || 0, source: 'web_preview' });
       if (reply.handoff) {
         await createHandoffTicket(packageData, { channel: 'preview', conversationId: body.conversationId || '', customerMessage: body.message, agentReply: reply.text, reason: 'Derivación automática del agente' });
