@@ -132,9 +132,18 @@ function renderBusinessPane(){$$('.business-pane').forEach(node=>node.hidden=nod
 
 function renderHeaderV2(){
   renderHeader();
-  const openCases=openHumanCases(),active=activeConversations();
+  const openCases=openHumanCases();
   $('#nav-attention').textContent=openCases.length||'';
-  $('#nav-conversations').textContent=(active.length||(state.handoffs||[]).filter(item=>item.status==='open').length)||'';
+  // El contador de Conversaciones marcaba TODAS las conversaciones abiertas: en un negocio con
+  // historial real eso es un número enorme y permanente (134 en franciskom), que no distingue si
+  // hay alguien esperando ni cambia cuando aparece un caso nuevo. Cuenta los que necesitan una
+  // persona, igual que el badge de la Bandeja en la consola móvil.
+  $('#nav-conversations').textContent=openCases.length||'';
+  // Campanita clásica de navegador: el pendiente se ve en la pestaña aunque la consola esté en
+  // segundo plano, sin depender de notificaciones del sistema (que en iPhone exigen instalar la
+  // consola como app).
+  const baseTitle=document.title.replace(/^\(\d+\)\s*/,'');
+  document.title=openCases.length?`(${openCases.length}) ${baseTitle}`:baseTitle;
 }
 
 function setAiAction(message='',isError=false){const node=$('#ai-action-status');if(!node)return;node.textContent=message;node.classList.toggle('is-error',isError)}
