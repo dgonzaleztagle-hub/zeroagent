@@ -50,6 +50,25 @@ export function getAgendaToolDefinitions(packageData, catalog) {
   ];
 }
 
+// El modelo alucina la cola de una lista larga de horas: con 18-23 horas devueltas por la
+// herramienta, gpt-4o-mini seguía la serie regular más allá del último dato real y ofrecía horas
+// fuera del horario de atención (medido 3/3 en franciskom: ofrecía hasta las 22:00 atendiendo
+// hasta las 20:00); con listas cortas responde exacto. Por eso la herramienta entrega una
+// preselección breve y repartida a lo largo del día en vez del bloque completo — la lista real
+// sigue disponible en available_slots para validar la hora que pida el cliente.
+const MAX_SLOTS_TO_OFFER = 6;
+
+function pickSlotShortlist(slots) {
+  if (slots.length <= MAX_SLOTS_TO_OFFER) return slots;
+  const step = (slots.length - 1) / (MAX_SLOTS_TO_OFFER - 1);
+  const picked = [];
+  for (let i = 0; i < MAX_SLOTS_TO_OFFER; i += 1) {
+    const slot = slots[Math.round(i * step)];
+    if (slot && !picked.includes(slot)) picked.push(slot);
+  }
+  return picked;
+}
+
 async function dashboardOrError(packageData) {
   // En producción usa Supabase; en preview local usa el estado local para poder ejercitar la tool.
   return getAgendaDashboard(packageData);
@@ -122,7 +141,17 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
       const slots = await getAvailableSlots(packageData, { service: service.name, resource: resource.name, date: args.date });
       const tz = config.timezone || 'America/Santiago';
       const hourFmt = new Intl.DateTimeFormat('es-CL', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
-      return { ok: true, service: service.name, resource: resource.name, date: args.date, timezone: tz, available_slots: slots.map(iso => ({ at: iso, hora_local: hourFmt.format(new Date(iso)) })) };
+      const availableSlots = slots.map(iso => ({ at: iso, hora_local: hourFmt.format(new Date(iso)) }));
+      const shortlist = pickSlotShortlist(availableSlots);
+      return {
+        ok: true, service: service.name, resource: resource.name, date: args.date, timezone: tz,
+        available_slots: availableSlots,
+        total_disponibles: availableSlots.length,
+        ofrecer_primero: shortlist.map(slot => slot.hora_local),
+        nota: availableSlots.length > shortlist.length
+          ? `TODAS las horas libres de ese día son las de "available_slots" (${availableSlots.length} en total, de ${availableSlots[0].hora_local} a ${availableSlots[availableSlots.length - 1].hora_local}). En tu mensaje ofrece sólo las de "ofrecer_primero" para no abrumar, y dile que hay más horas si ninguna le acomoda. Si el cliente pide otra hora, búscala en "available_slots": si está ahí, está libre y la agendas sin decir que no hay. Nunca ofrezcas una hora que no esté en "available_slots".`
+          : 'Estas son todas las horas libres del día: ofrécelas tal cual, sin agregar ninguna más.'
+      };
     }
     if (name === 'get_my_appointment') {
       if (!context.callerPhone) return { error: 'identity_required', message: 'No hay teléfono verificado para esta conversación.' };
@@ -215,12 +244,22 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
         customer_medical_history: String(args.medical_history || '').trim(), customer_extra_symptoms: String(args.extra_symptoms || '').trim(),
         service: service.name, resource: resource.name, location: location?.name || '', starts_at: requestedIso, notes: String(args.notes || '').trim()
       }, 'whatsapp');
-      if (args.email || args.age != null || args.occupation || args.medical_history || args.extra_symptoms) {
-        await updateCustomerIntakeRecord(packageData, context.callerPhone, args, {
-          source: 'whatsapp', sourceMessageId: context.messageId,
-          operationKey: context.operationKey ? `${context.operationKey}:appointment-intake` : `appointment:${appointment.id || appointment.reference}`,
-          createdBy: 'agent'
-        });
+      // La ficha es opcional por diseño y va DESPUÉS de que la reserva ya existe: si falla, la
+      // hora igual quedó tomada, así que nunca puede propagar su error hacia arriba. Sin este
+      // catch, un problema de ficha (cliente que no calza, migración no aplicada en el Supabase
+      // del cliente) hacía que la herramienta completa se reportara como fallida y el agente le
+      // dijera al paciente "no hice cambios en tu reserva" con la cita ya creada y el bloque
+      // ocupado — el peor desenlace posible: el paciente cree que no tiene hora y nadie lo sabe.
+      if (args.email || args.rut || args.age != null || args.occupation || args.medical_history || args.extra_symptoms) {
+        try {
+          await updateCustomerIntakeRecord(packageData, context.callerPhone, args, {
+            source: 'whatsapp', sourceMessageId: context.messageId,
+            operationKey: context.operationKey ? `${context.operationKey}:appointment-intake` : `appointment:${appointment.id || appointment.reference}`,
+            createdBy: 'agent'
+          });
+        } catch (error) {
+          console.error('[agenda] la reserva se creó pero no se pudo guardar la ficha del cliente:', error.message);
+        }
       }
       const createdTz = config.timezone || 'America/Santiago';
       const createdWhen = new Intl.DateTimeFormat('es-CL', { timeZone: createdTz, dateStyle: 'short', timeStyle: 'short' }).format(new Date(appointment.starts_at));

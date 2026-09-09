@@ -1147,3 +1147,101 @@ nuevos clientes..."). Hallazgos con evidencia, no supuestos:
   (`/demo/panel?embed=1`, que sirve `agenda.html` del template) pide `/auth-gate.js`, que no existe
   → 404. Preexistente, no introducido por este cambio, vive en `runtime-template/`, no en la
   landing.
+
+## Landing desplegada de verdad a Vercel, sin el demo embebido roto · 19-08-2026
+
+- **El 404 de arriba resultó ser más grave de lo que parecía:** `auth-gate.js` no es cosmético —
+  oculta toda la página hasta confirmar sesión y sólo dispara el evento `za-authenticated` que
+  `client-console-v2.js` espera antes de pedir cualquier dato. Sin ese script, el panel embebido no
+  hacía NI UNA sola llamada de API (confirmado con la consola de red) — el botón "Probar el
+  sistema" de la landing llevaba a una demo completamente muerta. Causa: el login PIN
+  (`runtime-template/src/auth.js`+`public/auth-gate.js`) se construyó pensando en clientes reales
+  desplegados con `runtime-template/src/server.js` (que sí sirve `/auth-gate.js`) — Studio nunca
+  aprendió a servir ese archivo para su propia ruta `/demo/panel`, y nadie lo notó porque nadie
+  había abierto esa demo desde que se agregó el PIN.
+- **Decisión de Daniel:** en vez de replicar todo el login/auth para una demo desechable, sacar la
+  prueba en vivo — "un tema visual solamente será suficiente por este inicio". Se reemplazó el
+  `<iframe>` por una maqueta estática (`.panel-mock` en `commercial-demo.css`): conversación +
+  reserva confirmada + tarjetas de agenda/calidad/handoff, sin ninguna llamada de red. Mismo
+  criterio aplicado al link "Probar entrevista de ejemplo" (apuntaba a `/demo/onboarding`, otra
+  ruta que sólo existe en Studio local) — ambos CTAs ahora apuntan al formulario de contacto real.
+- **Con eso, la landing dejó de depender de Studio y se pudo desplegar de verdad.** Nueva carpeta
+  `landing/` (repo raíz): copia estática de `commercial-demo.html/css/js` + los 2 assets +
+  `api/leads.js` (función serverless de Vercel, sin dependencias, hace `POST` directo a
+  `commercial_leads` en el Supabase de Studio usando `STUDIO_SUPABASE_URL`/
+  `STUDIO_SUPABASE_SERVICE_ROLE_KEY`). Proyecto Vercel nuevo (`zeroagent-landing`, cuenta
+  `dgonzaleztagle-hub`, mismo token ya usado para franciskom) creado y desplegado vía API directa
+  (mismo patrón de subida de archivos que quiro-demo, sin conector Git) — protección SSO
+  desactivada a propósito (por defecto Vercel la deja activada y nadie podría abrir el link sin
+  loguearse en la cuenta de Daniel, mismo gotcha ya documentado para clientes).
+- **Verificado en producción real, no sólo local:** `https://zeroagent-landing.vercel.app` — cero
+  errores de consola, todos los assets 200, y el formulario de contacto probado de punta a punta
+  contra la función serverless real (lead creado en el Supabase real de Studio y borrado después).
+- **Pendiente/decisión futura, no resuelta hoy:** si vale la pena reconstruir el demo interactivo
+  en vivo (necesitaría un login de "modo demo" que Studio no tiene) o si la maqueta estática basta
+  a largo plazo. La prueba social real (caso FrancisKOM con link a `franciskom.vercel.app`) queda
+  como la pieza de mayor peso de la landing mientras tanto.
+
+## Auditoría previa a la marcha blanca de franciskom + 3 fixes desplegados · 08-09-2026
+
+Francisco pidió arrancar la marcha blanca. Antes de dar el vamos se auditó el despliegue real
+(repo `dgonzaleztagle-hub/franciskom`, Vercel `franciskom.cl`, Supabase `pbyyixjilpnknjpvgeuq`)
+**probando el bot end-to-end contra la base real**, no sólo leyendo código. La infraestructura
+estaba bien (deploy = último commit, dominio y variables OK, LLM con saldo, timezone chileno
+correcto en las funciones SQL, Google Calendar filtrando los 8 calendarios con buffer de 30 min:
+23 horas brutas → 5 reales). Los defectos estaban en el comportamiento, y ninguno se veía sin
+conversar con el agente:
+
+1. **La reserva se creaba y el bot le decía al paciente que no había hecho nada.** `za_update_
+   customer_intake` comparaba `phone = regexp_replace(p_phone…)` normalizando sólo el parámetro y
+   no la columna (`+56…` vs `56…`), así que **nunca** encontraba al cliente. Desde el commit del
+   02-09 que hace pedir el correo junto al nombre, toda reserva con correo pasaba por ahí: la cita
+   quedaba creada y sincronizada a Calendar, la herramienta lanzaba excepción, y el agente
+   respondía "No pude confirmar esa operación de forma segura. No hice cambios en tu reserva".
+   Agravante: `za_customer_record_entries` y las tablas de `agenda-v1-ai-account.sql` nunca se
+   habían aplicado en el Supabase de franciskom (el manifiesto las lista, la instalación se quedó
+   en las migraciones). Fix: normalizar los dos lados (en `agenda-v1-customer-records.sql` y en
+   `migrations/20260808_customer_rut.sql`, que es la que realmente estaba viva), aplicar las dos
+   migraciones faltantes, y envolver el guardado de ficha en try/catch — un dato opcional jamás
+   puede voltear una reserva que ya existe.
+2. **El modelo inventaba horas fuera del horario de atención.** Con listas largas (18-23 horas
+   libres) gpt-4o-mini seguía la serie más allá del último dato real y ofrecía hasta las 22:00 en
+   un negocio que cierra a las 20:00 — medido 3/3; con listas cortas responde exacto. Fix:
+   `get_availability` devuelve `ofrecer_primero` (máximo 6, repartidas a lo largo del día) y
+   mantiene `available_slots` completa para validar; el behavior de Agenda dice explícitamente que
+   una hora que no esté en `available_slots` no existe, y que una que sí esté se acepta aunque no
+   se haya ofrecido. Re-medido 3/3 sin horas inventadas, y "¿tienes a las 16:00?" (fuera de la
+   preselección, libre de verdad) se sigue aceptando.
+3. **Reservas pendientes que morían solas y que nadie veía.** TTL por defecto de 2 h con
+   confirmación manual: una hora pedida de noche vencía antes de que Francisco despertara. El
+   switch "avisarme de reservas nuevas" existía en la consola sin ninguna implementación detrás, y
+   `handoff_alert_enabled` estaba en false con `alert_phone` vacío — por eso un handoff real
+   (paciente Pamela Naranjo, 24-08) llevaba dos semanas sin que nadie lo viera. Fix: default de TTL
+   a 24 h, alerta de reserva nueva implementada (best-effort, se salta el origen `client_console`),
+   y **franciskom pasó a `confirmation_mode: automatic`** por decisión de Daniel — la invitación de
+   Google Calendar que el paciente ya recibe funciona como confirmación, dejar la hora pendiente lo
+   contradecía. Las franjas de riesgo de Eleva Salud siguen forzando confirmación manual.
+
+**También se limpió en producción:** cita de prueba del 04-08 que seguía "pendiente", operador
+`[DEMO] Operador de prueba` desactivado, y se pobló `za_service_locations` (estaba vacía: ningún
+servicio amarrado a su sede, las reservas del bot quedaban sin sede y el evento de Calendar sin
+color).
+
+**Verificado en producción real** (`franciskom.cl/reservar`, navegador): modo automático reflejado
+en toda la página, horas ofrecidas = las 5 reales del día según Calendar, copy del panel lateral
+alineado con el modo.
+
+**Pendiente, con decisión de Daniel:**
+- **Canal de aviso para handoff.** El bot vive en el número personal de Francisco, así que no puede
+  avisarse por WhatsApp a sí mismo. No existe ninguna capacidad de correo en el runtime (lo único
+  que sale por correo hoy es la invitación de Google Calendar al paciente). Las vías reales son un
+  proveedor de correo propio (Resend/SMTP con el dominio, sirve para toda la línea) o el scope
+  `gmail.send` sobre el OAuth ya conectado (obliga a re-autorizar y Google lo trata como scope
+  restringido).
+- **`reminder_hours: 24` sigue siendo decorativo** — no hay código de recordatorios. Implica cron +
+  envío automático a pacientes reales, no se hizo sin autorización explícita.
+- **El Supabase de Studio (`nbjujqodjvhbxvvlfdfs`) ya no resuelve por DNS** — proyecto pausado o
+  eliminado. Por eso el `confirmation_mode` de franciskom NO se pudo actualizar en Studio: si se
+  reconstruye el build desde ahí, vuelve a `manual`.
+- Silenciar contactos personales (`bot_muted`) es trabajo de Francisco, no nuestro — él sabe a
+  quién deja y a quién no, y los irá marcando a medida que escriban.

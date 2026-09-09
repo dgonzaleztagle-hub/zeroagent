@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { colorIdForLocation, createGoogleCalendarEvent, deleteGoogleCalendarEvent, getGoogleCalendarBusyIntervals, updateGoogleCalendarEventTime } from './google-calendar.js';
+import { sendZavuWhatsApp } from './zavu.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 function statePathFor(packageData) {
@@ -187,6 +188,36 @@ async function assertNotBusyOnGoogleCalendar(startIso, endIso) {
   if (clash) throw new Error('Ese horario quedó ocupado en el Google Calendar conectado. Elige otro horario.');
 }
 
+// Aviso al dueño de que entró una reserva nueva por un canal que él no está mirando (WhatsApp,
+// página pública). La consola ya ofrecía el switch "avisarme de reservas nuevas" pero no existía
+// ningún envío detrás: la bandera se guardaba y no hacía nada. Importa sobre todo con
+// confirmation_mode = manual, donde la hora queda esperando que el dueño la confirme y expira sola
+// si nadie la mira. Va acá, dentro de createAgendaAppointment, para cubrir por igual cualquier
+// origen presente o futuro, y es best-effort: una alerta que falla nunca puede voltear una reserva
+// que ya quedó tomada.
+async function alertNewBookingBestEffort(appointment, { source, config, customerName, serviceName, locationName }) {
+  try {
+    if (source === 'client_console') return;
+    const { getNotificationSettings } = await import('./notification-settings.js');
+    const { settings } = await getNotificationSettings();
+    if (!settings.booking_alert_enabled || !settings.alert_phone) return;
+    const timeZone = config?.timezone || 'America/Santiago';
+    const when = new Intl.DateTimeFormat('es-CL', { timeZone, dateStyle: 'full', timeStyle: 'short' }).format(new Date(appointment.starts_at));
+    const pending = appointment.status === 'pending_confirmation';
+    const text = [
+      pending ? '🔔 Hora nueva POR CONFIRMAR' : '🔔 Hora nueva agendada',
+      `${customerName}${appointment.customer_phone ? ` (${appointment.customer_phone})` : ''}`,
+      `${serviceName}${locationName ? ` · ${locationName}` : ''}`,
+      when,
+      appointment.reference ? `Ref. ${appointment.reference}` : '',
+      pending ? 'Confírmala en tu consola ZeroAgent para que quede tomada.' : ''
+    ].filter(Boolean).join('\n');
+    await sendZavuWhatsApp(settings.alert_phone, text, { idempotencyKey: `booking-alert:${appointment.id}` });
+  } catch (error) {
+    console.error('[agenda] no se pudo avisar la reserva nueva al dueño:', error.message);
+  }
+}
+
 const ACTIVE_APPOINTMENT_STATUSES = new Set(['pending_confirmation', 'confirmed']);
 
 export function isActiveAgendaAppointment(appointment, now = Date.now()) {
@@ -196,9 +227,14 @@ export function isActiveAgendaAppointment(appointment, now = Date.now()) {
   return !Number.isFinite(expiresAt) || expiresAt > now;
 }
 
+// 24 h por defecto, no 2: con confirmation_mode = manual la reserva queda esperando que el dueño
+// la confirme, y un dueño que atiende pacientes todo el día no mira la consola cada dos horas.
+// Con el default anterior, una hora pedida de noche se vencía sola antes de que él despertara —
+// el paciente creía tener hora y no la tenía. Un negocio que quiera ventanas más cortas lo fija
+// explícito en rules.pending_confirmation_ttl_minutes.
 function pendingConfirmationTtlMinutes(config) {
-  const configured = Number(config?.rules?.pending_confirmation_ttl_minutes ?? config?.rules?.pending_ttl_minutes ?? 120);
-  return Math.max(5, Math.min(10_080, Number.isFinite(configured) ? Math.round(configured) : 120));
+  const configured = Number(config?.rules?.pending_confirmation_ttl_minutes ?? config?.rules?.pending_ttl_minutes ?? 1_440);
+  return Math.max(5, Math.min(10_080, Number.isFinite(configured) ? Math.round(configured) : 1_440));
 }
 
 function pendingExpiresAt(config, status, from = Date.now()) {
@@ -445,6 +481,9 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
       });
       appointment.google_calendar_event_id = eventId;
     });
+    await alertNewBookingBestEffort({ ...appointment, customer_phone: customerPhone }, {
+      source, config, customerName, serviceName, locationName: location?.name || ''
+    });
     return { ...appointment, customer_name: customerName, customer_phone: customerPhone, customer_email: customerEmail, customer_rut: customerRut, customer_address: customerAddress, service: serviceName, resource: resourceName, location: location?.name || '', risk_window: riskWindow || null };
   }
   const duration = Number(service.duration_minutes) || 30;
@@ -512,6 +551,9 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
     appointment.google_calendar_event_id = eventId;
     freshAppointment.google_calendar_event_id = eventId;
     await saveAgendaState(packageData, freshState);
+  });
+  await alertNewBookingBestEffort(appointment, {
+    source, config, customerName, serviceName, locationName: appointment.location || ''
   });
   return appointment;
 }

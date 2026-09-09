@@ -34,7 +34,7 @@
   <main class="page">
     <aside class="story">
       <div class="brand"><span class="brand-mark" id="brand-mark">··</span><span><strong id="business-name">Agenda</strong><small>Reserva en línea</small></span></div>
-      <div class="story-copy"><span class="eyebrow">DISPONIBILIDAD REAL</span><h1>Elige con calma.<br><em>La agenda valida.</em></h1><p>Tu solicitud se cruza con servicios, equipo, horarios y bloqueos reales antes de quedar registrada.</p></div>
+      <div class="story-copy"><span class="eyebrow">DISPONIBILIDAD REAL</span><h1>Elige con calma.<br><em>La agenda valida.</em></h1><p id="story-copy-note">Tu solicitud se cruza con servicios, equipo, horarios y bloqueos reales antes de quedar registrada.</p></div>
       <div class="trust"><span><i></i> Sin dobles reservas</span><span><i></i> Estado claro al enviar</span><span><i></i> Datos protegidos</span></div>
     </aside>
 
@@ -113,6 +113,11 @@
       $('#form-intro').textContent=automatic?'La hora quedará confirmada si sigue disponible al enviar.':'El equipo revisará la solicitud y te confirmará la hora por su canal habitual.';
       $('#mode-note').textContent=automatic?'La agenda valida el cupo y confirma la reserva al enviar.':'Esta es una solicitud: la hora queda por confirmar hasta que el equipo la acepte.';
       $('#submit-button').textContent=automatic?'Confirmar reserva':'Enviar solicitud';
+      // El panel lateral hablaba siempre de "solicitud": con confirmación automática
+      // contradecía al formulario, que en la misma pantalla dice que la hora queda confirmada.
+      $('#story-copy-note').textContent=automatic
+        ? 'Tu hora se cruza con servicios, equipo, horarios y bloqueos reales antes de quedar confirmada.'
+        : 'Tu solicitud se cruza con servicios, equipo, horarios y bloqueos reales antes de quedar registrada.';
     }
     async function loadSlotsIfAvailable(){
       if(!state.slotsEndpoint)return;

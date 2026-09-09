@@ -72,7 +72,11 @@ begin
   if p_source not in ('whatsapp', 'client_console', 'import', 'manual') then
     raise exception 'Fuente de admisión no autorizada';
   end if;
-  select * into v_customer from public.za_customers where phone = regexp_replace(coalesce(p_phone, ''), '\D', '', 'g') limit 1 for update;
+  -- El teléfono se guarda con prefijo (+56…) y llega normalizado a dígitos: hay que limpiar
+  -- LOS DOS lados o la comparación no calza nunca y el intake falla con "Cliente no encontrado".
+  select * into v_customer from public.za_customers
+    where regexp_replace(coalesce(phone, ''), '\D', '', 'g') = regexp_replace(coalesce(p_phone, ''), '\D', '', 'g')
+    limit 1 for update;
   if v_customer.id is null then raise exception 'Cliente no encontrado'; end if;
 
   update public.za_customers set
