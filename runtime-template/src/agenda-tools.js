@@ -46,6 +46,9 @@ export function getAgendaToolDefinitions(packageData, catalog) {
     { type: 'function', function: { name: 'update_customer_profile', description: 'Guarda correo, RUT, edad, ocupación, antecedentes médicos u otros síntomas que el cliente entrega para su ficha — típicamente respondiendo al pedido de "dejar la ficha lista" después de agendar. Es SÓLO para guardar esos datos, nunca implica crear, cambiar ni revisar ninguna reserva: no llames get_availability ni create_appointment en el mismo turno sólo porque el cliente mandó estos datos. Sólo funciona si el cliente ya agendó al menos una vez con este teléfono. Llámala apenas entregue alguno de estos datos, no esperes a tener todos.', parameters: { type: 'object', properties: { email: { type: 'string' }, rut: { type: 'string' }, age: { type: 'integer' }, occupation: { type: 'string' }, medical_history: { type: 'string' }, extra_symptoms: { type: 'string' } } } } },
     { type: 'function', function: { name: 'cancel_appointment', description: 'Cancela una reserva del mismo cliente verificado. No usar para una reserva de otra persona.', parameters: { type: 'object', properties: { reference: { type: 'string' } }, required: ['reference'] } } },
     { type: 'function', function: { name: 'reschedule_appointment', description: 'Reagenda una reserva del mismo cliente después de que eligió fecha/hora. Verifica disponibilidad y cambia atómicamente.', parameters: { type: 'object', properties: { reference: { type: 'string' }, new_starts_at: { type: 'string', description: 'ISO 8601' } }, required: ['reference', 'new_starts_at'] } } },
+    ...(literalReplies(packageData).length ? [{ type: 'function', function: { name: 'responder_textual', description: `Envía una respuesta oficial del negocio TAL CUAL fue escrita por el dueño. Úsala SIEMPRE que el mensaje del cliente caiga en uno de estos casos, en vez de redactar tú la respuesta:
+${literalReplies(packageData).map(item => `- "${item.id}": ${item.when}`).join('\n')}
+El texto se manda literal y completo; tú no lo reescribes, no lo resumes y no le agregas nada antes ni después.`, parameters: { type: 'object', properties: { id: { type: 'string', enum: literalReplies(packageData).map(item => item.id), description: 'Cuál de las respuestas oficiales corresponde.' } }, required: ['id'] } } }] : []),
     { type: 'function', function: { name: 'request_human_handoff', description: 'Escala a una persona cuando el cliente lo pide, hay un problema real o falta un dato crítico. Ejecutar en el mismo turno que se anuncia el traspaso.', parameters: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] } } }
   ];
 }
@@ -67,6 +70,16 @@ function pickSlotShortlist(slots) {
     if (slot && !picked.includes(slot)) picked.push(slot);
   }
   return picked;
+}
+
+// Respuestas que el dueño quiere que salgan PALABRA POR PALABRA: precios oficiales, qué incluye
+// cada servicio, promociones. Pedirle al modelo que "copie textual" no basta — antes o después
+// parafrasea, se come un emoji o reordena una línea, y ahí ya no es el texto del negocio. Por eso
+// el modelo sólo elige CUÁL corresponde (que es lo que sabe hacer) y el runtime devuelve el texto
+// exacto sin dejarlo redactar: ver el corte en engine.js.
+export function literalReplies(packageData) {
+  const list = packageData?.agent?.literal_replies || [];
+  return list.filter(item => item?.id && item?.text);
 }
 
 async function dashboardOrError(packageData) {

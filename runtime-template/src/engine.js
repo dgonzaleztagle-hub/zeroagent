@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { executeAgendaTool, getAgendaToolDefinitions } from './agenda-tools.js';
+import { executeAgendaTool, getAgendaToolDefinitions, literalReplies } from './agenda-tools.js';
 import { getAgendaDashboard } from './agenda.js';
 import { BASE_BEHAVIOR } from './base-behavior.js';
 import { AGENDA_BEHAVIOR } from './agenda-behavior.js';
@@ -274,6 +274,19 @@ export async function answerWithGroq(packageData, message, context = {}) {
       for (const call of calls) {
         let args = {};
         try { args = JSON.parse(call.function?.arguments || '{}'); } catch { args = {}; }
+        // Respuesta literal del negocio: se devuelve el texto exacto y se corta acá, sin darle otra
+        // vuelta al modelo. Si se dejara continuar, el modelo "resumiría" o adornaría el bloque y
+        // dejaría de ser lo que el dueño escribió — que es justamente lo que se le prometió.
+        if (call.function?.name === 'responder_textual') {
+          const chosen = literalReplies(packageData).find(item => item.id === args?.id);
+          if (chosen) {
+            return {
+              text: chosen.text, confidence: 'literal_business_reply', source: [chosen.id], handoff: false,
+              provider: llm.provider, model: llm.model,
+              usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens }
+            };
+          }
+        }
         const result = await executeAgendaTool(packageData, call.function?.name, args, context);
         toolTrace.push({ name: call.function?.name, result });
         messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
