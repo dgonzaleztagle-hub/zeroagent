@@ -1535,3 +1535,36 @@ entre lo que dice el texto y lo que cobra la agenda.
 **Pendiente de decisión de Francisco:** una pregunta de cobertura pura ("¿atienden en Paine?") hoy
 se responde redactada (menciona el precio de paso) en vez de mandar el bloque completo. Puede
 quedarse así o sumarse al caso de `sesion_general`; es cosa de decírselo.
+
+### Ocho respuestas literales, envío de imágenes y el RUT que no bloquea · 09-09-2026
+
+Francisco mandó el resto de sus textos oficiales. Quedaron cargados **ocho bloques**:
+`sesion_general` y `sesion_respiratoria` (precios / qué incluye), `como_es_la_sesion` y
+`tratamiento_respiratorio` (el proceso), `formacion_profesional`, `ubicacion_box_buin`,
+`ubicacion_eleva_salud` y `horario_atencion` — todos palabra por palabra como él los escribió.
+
+**Envío de imágenes, que no existía:** el runtime sólo mandaba texto. Un bloque literal ahora
+puede declarar `image` y sale como UN mensaje de WhatsApp con el texto de pie de foto (los dos
+bloques largos miden 959 y 831 caracteres, bajo el límite de 1024 del caption). Además las
+imágenes de `public/` se sirven **por patrón** en vez de una ruta cableada por archivo — antes
+agregar una foto que el agente pudiera mandar obligaba a tocar el servidor — y `asset()` ahora lee
+el archivo ANTES de escribir cabeceras: al revés, un archivo inexistente mandaba un 200 a medias y
+el cliente recibía la conexión cortada en vez de un 404. La imagen del flyer vive sólo en el repo
+del cliente (`public/formacion-profesional.jpeg`), nunca en la plantilla.
+
+**RUT al agendar (decisión de Daniel):** se piden nombre y apellido, RUT y correo en una sola
+frase, pero **si falta el RUT la hora se toma igual** y el resto se pide después. El límite es
+deliberado: exigir todos los datos antes de reservar es exactamente lo que dejaba al modelo
+pidiendo información sin llamar nunca la herramienta.
+
+**Cómo se afinaron los disparadores (medido, no a ojo):** con 18 formulaciones reales, la versión
+final acierta **18/18**. En el camino se probó un rediseño donde el modelo elegía `tema` +
+`aspecto` en vez del id del bloque: **midió peor (12/18)** y se descartó — lo que el modelo
+realmente usa para decidir son las frases gatillo explícitas ("cuánto cuesta", "qué incluye",
+"cómo es", "en qué consiste"), no una taxonomía. Las reglas negativas cruzadas ("no uses ésta
+si…") también lo hacían oscilar entre bloques vecinos; funcionan mejor los disparadores positivos
+con una sola excepción explícita.
+
+**Pendiente menor:** Eleva Salud entrega ubicación pero no es agendable por el agente (se coordina
+con el centro directamente); confirmar con Francisco que el bloque diga eso si alguien intenta
+tomar hora ahí.
