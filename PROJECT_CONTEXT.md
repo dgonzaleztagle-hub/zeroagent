@@ -1379,3 +1379,43 @@ toque si alguno resulta ser paciente.
 (1.296 contactos), frente a 1.952 guardados con nombre propio y 46 sólo con número. Esa etiqueta
 separa pacientes de personales mejor que cualquier heurística nuestra, y es la base del silenciado
 selectivo aplicado hoy.
+
+### Cierre del día: marcha blanca andando · 08-09-2026
+
+**Estado al cierre:** bot `active` desde las 22:03 (hora Chile), 38 contactos silenciados, **0
+contactos personales activos sin silenciar**, 0 casos abiertos en la bandeja, 0 citas de prueba en
+la base. Desde la activación entraron 30 mensajes y el bot respondió 3 — todos a Daniel, antes de
+silenciarlo. **Ningún paciente real ha escrito todavía**, así que el comportamiento en vivo está
+por verse.
+
+**Un último fix del día, encontrado por un falso positivo real:** Francisco recibió un SMS de
+derivación que no correspondía a ningún paciente. Rastreado por el texto del propio SMS ("quiero
+hablar con Francisco directamente"), resultó ser una **prueba de regresión del chat de preview**
+hecha desde esta sesión: el playground crea tickets de handoff reales y `alertHandoff` los trataba
+como cliente esperando. Le pasaría a cualquier dueño que pruebe su propio bot: SMS cobrado por un
+cliente inexistente y caso falso en la bandeja. `alertHandoff` ahora ignora el canal `preview` —
+el ticket se sigue creando (para eso se prueba), pero no interrumpe a nadie. Los dos tickets falsos
+se borraron.
+
+**Regla nueva para el equipo:** con el bot en vivo, **ya no se prueba contra la base del cliente
+con el teléfono de alertas configurado**. Cada prueba puede sonarle el teléfono al dueño o
+ensuciarle la bandeja. Probar sin `alert_phone`, o contra una copia.
+
+**Consumo de SMS del día:** 2 mensajes (el de prueba autorizado y el falso), US$0,056. Quedan
+~US$1,94 del crédito mensual.
+
+**Studio, hallazgo lateral no resuelto (no afecta a franciskom):** el proyecto
+`nbjujqodjvhbxvvlfdfs` **ya no existe** — su PAT de Management API responde `Unauthorized` (el
+mismo valor en `.env` y en `~/.claude/credenciales/zeroagent-studio-supabase.md`) y su dominio no
+resuelve por DNS, mientras el de franciskom sí resuelve desde la misma máquina. Se descartó
+filtración: el token nunca estuvo en ningún commit ni en el repo público. Consecuencias: (1) Studio
+quedó sin base de datos —su default es Postgres desde el 19-08; salida de emergencia
+`STUDIO_DB_BACKEND=sqlite` con `database.sqlite.pre-migration-backup`—, y (2) **el landing
+comercial sigue escribiendo sus leads en esa base muerta** (`landing/api/leads.js` →
+`commercial_leads`), o sea prospectos que se pierden en silencio. Daniel debe entrar a
+supabase.com con `dgonzalez.tagle+zeroagent@gmail.com` y ver si el proyecto existe; según eso, se
+reconecta con un PAT nuevo o se crea uno de reemplazo.
+
+**Lo que queda por delante en franciskom:** observar el comportamiento con pacientes reales (es lo
+único que ninguna prueba entrega), y decidir si se le pide a Zavu el eco de coexistencia para poder
+auto-pausar el bot cuando Francisco responde desde su teléfono.
