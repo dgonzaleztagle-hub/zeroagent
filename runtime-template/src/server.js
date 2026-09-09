@@ -9,7 +9,7 @@ import { agendaConfig, agendaSupabaseRequest, agendaSupabaseUpload, agendaUsesSu
 import { parseContactsFile } from './contacts-import.js';
 import { dispatchAgendaOutbox } from './outbox.js';
 import { verifyZavuSignature, sendZavuWhatsApp, zavuDeliveryUpdate, zavuEventId, zavuProviderMessage } from './zavu.js';
-import { appendConversationMessage, createOperator, findConversationMessageByClientId, getAgentControl, getConversationInbox, getOrCreateConversation, loadConversationHistory, reclaimStaleHandoff, updateAgentControl, updateConversationMessageDelivery, updateConversationOperation } from './conversations.js';
+import { appendConversationMessage, createOperator, findConversationMessageByClientId, getAgentControl, getConversationInbox, getOrCreateConversation, inboundDebounceMs, loadConversationHistory, reclaimStaleHandoff, supersededByNewerInbound, syncWhatsappProfileNames, updateAgentControl, updateConversationMessageDelivery, updateConversationOperation } from './conversations.js';
 import { addKnowledgeSuggestion, currentConfirmedFacts, listKnowledgeSuggestions } from './knowledge.js';
 import { createHandoffTicket, listHandoffTickets, updateHandoffTicket } from './handoffs.js';
 import { addBusinessData, addBusinessInfo, listBusinessData, listBusinessInfo } from './business-data.js';
@@ -739,10 +739,17 @@ export async function handleRequest(req, res) {
     const secret = process.env.CRON_SECRET;
     if (!secret || req.headers.authorization !== `Bearer ${secret}`) return json(res, 401, { error: 'No autorizado.' });
     const chileHour = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Santiago', hour: 'numeric', hour12: false }).format(new Date()));
-    if (chileHour !== 7) return json(res, 200, { ran: false, reason: 'not_the_hour', chileHour });
+    // Los nombres de WhatsApp sí se rellenan en TODAS las corridas horarias: alguien que escribe
+    // hoy tiene que aparecer con nombre en la consola dentro de la hora, no al otro día. Es barato
+    // (un par de páginas del canal) y nunca pisa un nombre real, sólo los números pelados.
+    const profileNames = await syncWhatsappProfileNames().catch(error => {
+      console.error('cron nombres de WhatsApp falló:', error.message);
+      return { updated: 0, error: error.message };
+    });
+    if (chileHour !== 7) return json(res, 200, { ran: false, reason: 'not_the_hour', chileHour, profileNames });
     try {
       const result = await syncGoogleContacts(packageData);
-      return json(res, 200, { ran: true, result });
+      return json(res, 200, { ran: true, result, profileNames });
     } catch (error) {
       // Best-effort: el cron no debe quedar "rojo" en Vercel por un fallo de Google (token
       // vencido, red, etc.) — se loguea para poder revisarlo, el próximo día se reintenta solo.
@@ -964,6 +971,14 @@ export async function handleRequest(req, res) {
         return json(res, 200, { ok: true, ignored: 'event_type' });
       }
       const callerPhone = normalizeChilePhone(event.data?.from || '');
+      // Si el evento del canal trae el nombre de perfil de quien escribe, se aprovecha altiro para
+      // no dejarlo guardado como un número pelado (el cron horario lo rellena igual, pero un cliente
+      // nuevo aparece con nombre desde su primer mensaje). Los alias cubren las variantes del
+      // proveedor sin depender de una sola; si no viene ninguno, no pasa nada.
+      const callerProfileName = String(
+        event.data?.profileName || event.data?.profile_name || event.data?.senderName
+        || event.data?.fromName || event.data?.pushName || event.data?.contact?.name || ''
+      ).trim();
       const message = event.data?.text || '';
       if (!callerPhone || !message) {
         await completeZavuEvent(eventId, claim.lease_token, 'ignored', { ignored: 'no_text_or_sender' });
@@ -973,12 +988,23 @@ export async function handleRequest(req, res) {
         await completeZavuEvent(eventId, claim.lease_token, 'ignored', { ignored: 'rate_limited' });
         return json(res, 200, { ok: true, ignored: 'rate_limited' });
       }
-      let conversation = await getOrCreateConversation('whatsapp', callerPhone);
+      let conversation = await getOrCreateConversation('whatsapp', callerPhone, callerProfileName);
       const inboundKey = `zavu:in:${String(event.data?.messageId || eventId)}`.slice(0, 240);
       const inbound = await appendConversationMessage(conversation?.id, 'inbound', message, {}, {
         senderType: 'human', deliveryStatus: 'delivered', clientMessageId: inboundKey,
         providerMessageId: event.data?.messageId || null
       });
+      // Espera corta antes de contestar: si el cliente sigue escribiendo (lo normal en WhatsApp,
+      // varias líneas seguidas), este turno se calla y contesta el último mensaje, que ya llega con
+      // todo lo anterior en su historial. Sin esto el agente responde una vez por línea.
+      const debounceMs = inboundDebounceMs();
+      if (debounceMs > 0 && inbound?.created_at) {
+        await new Promise(resolve => setTimeout(resolve, debounceMs));
+        if (await supersededByNewerInbound(conversation?.id, inbound.created_at)) {
+          await completeZavuEvent(eventId, claim.lease_token, 'ignored', { superseded: true });
+          return json(res, 200, { ok: true, superseded: true });
+        }
+      }
       const agentControl = await getAgentControl();
       if (agentControl.control.mode === 'paused') {
         await completeZavuEvent(eventId, claim.lease_token, 'ignored', { paused: true });
@@ -1017,7 +1043,7 @@ export async function handleRequest(req, res) {
       // nuevo) y este mismo turno acaba de crearlo (ej. reservó altiro), el vínculo quedaría nulo
       // hasta el próximo mensaje entrante — que puede no llegar nunca. Reintentar acá, en el mismo
       // turno, en vez de depender de un mensaje futuro que el cliente quizás no mande.
-      if (conversation && !conversation.customer_id) await getOrCreateConversation('whatsapp', callerPhone);
+      if (conversation && !conversation.customer_id) await getOrCreateConversation('whatsapp', callerPhone, callerProfileName);
 
       const outboundKey = `zavu:out:${eventId}`.slice(0, 240);
       let outbound = await findConversationMessageByClientId(outboundKey);

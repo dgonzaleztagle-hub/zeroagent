@@ -1,4 +1,5 @@
 import { agendaSupabaseRequest, agendaUsesSupabase, normalizeChilePhone } from './agenda.js';
+import { fetchRecentZavuProfileNames } from './zavu.js';
 
 let previewAgentControl = { mode: 'active', paused_reason: '', updated_at: new Date().toISOString() };
 
@@ -8,14 +9,18 @@ let previewAgentControl = { mode: 'active', paused_reason: '', updated_at: new D
 // escriba por WhatsApp queda en el CRM desde el primer mensaje, no sólo quien llega a reservar.
 // Sin esto, un contacto que nunca agenda (ej. un familiar del dueño) jamás aparecería en la
 // ficha de clientes y no habría dónde marcarlo como "no contestar".
-async function ensureCustomerIdByPhone(phone) {
+async function ensureCustomerIdByPhone(phone, profileName = '') {
   const normalized = normalizeChilePhone(phone) || phone;
   if (!normalized) return null;
   const existing = await agendaSupabaseRequest(`/rest/v1/za_customers?phone=eq.${encodeURIComponent(normalized)}&select=id`).catch(() => []);
   if (existing?.[0]?.id) return existing[0].id;
+  // Quien escribe sin estar en la agenda del negocio queda guardado con su propio número como
+  // nombre, y en la consola el dueño ve una lista de números que no puede reconocer ni buscar. Si
+  // el evento del canal trajo el nombre de perfil, se usa altiro; si no, syncWhatsappProfileNames
+  // (cron horario) lo rellena después.
   const created = await agendaSupabaseRequest('/rest/v1/za_customers', {
     method: 'POST', headers: { Prefer: 'return=representation,resolution=ignore-duplicates' },
-    body: JSON.stringify({ full_name: normalized, phone: normalized })
+    body: JSON.stringify({ full_name: String(profileName || '').trim().slice(0, 120) || normalized, phone: normalized })
   }).catch(() => null);
   if (created?.[0]?.id) return created[0].id;
   // Carrera: otro turno lo creó entre el select y el insert (resolution=ignore-duplicates no devuelve fila).
@@ -23,7 +28,7 @@ async function ensureCustomerIdByPhone(phone) {
   return retry?.[0]?.id || null;
 }
 
-export async function getOrCreateConversation(channel, externalId) {
+export async function getOrCreateConversation(channel, externalId, profileName = '') {
   if (!agendaUsesSupabase()) return null;
   const filter = `/rest/v1/za_conversations?channel=eq.${encodeURIComponent(channel)}&external_id=eq.${encodeURIComponent(externalId)}&select=id,status,customer_id,za_customers(bot_muted)`;
   const existing = await agendaSupabaseRequest(filter);
@@ -37,7 +42,7 @@ export async function getOrCreateConversation(channel, externalId) {
   // El cliente puede no existir todavía la primera vez que escribe (recién se crea al agendar) —
   // por eso se reintenta el vínculo cada vez que falta, no sólo al crear la conversación.
   if (channel === 'whatsapp' && !conversation.customer_id) {
-    const customerId = await ensureCustomerIdByPhone(externalId);
+    const customerId = await ensureCustomerIdByPhone(externalId, profileName);
     if (customerId) {
       // select= en el PATCH pide el mismo embed de za_customers que la lectura inicial — si no,
       // la representación devuelta no trae bot_muted y un contacto ya silenciado antes de su
@@ -49,6 +54,55 @@ export async function getOrCreateConversation(channel, externalId) {
     }
   }
   return conversation;
+}
+
+// La gente escribe como habla: tres mensajes seguidos en dos segundos, no un párrafo. Como el
+// webhook dispara una respuesta por mensaje, el agente contestaba tres veces —una por cada uno,
+// cada una sin ver las siguientes— y eso es justo lo que lo delata como máquina frente a alguien
+// que escribe normal. Caso real (franciskom, 09-09-2026): una paciente mandó tres líneas seguidas
+// y recibió tres presentaciones distintas del "kinesiólogo".
+// El turno espera unos segundos y, si en ese rato entró otro mensaje del mismo cliente, se calla:
+// contesta el último evento, que ya tiene los tres mensajes en su historial.
+export function inboundDebounceMs() {
+  const configured = Number(process.env.INBOUND_DEBOUNCE_MS ?? 7_000);
+  return Math.max(0, Math.min(30_000, Number.isFinite(configured) ? configured : 7_000));
+}
+
+export async function supersededByNewerInbound(conversationId, afterIso) {
+  if (!agendaUsesSupabase() || !conversationId || !afterIso) return false;
+  const rows = await agendaSupabaseRequest(
+    `/rest/v1/za_conversation_messages?conversation_id=eq.${encodeURIComponent(conversationId)}`
+    + `&direction=eq.inbound&created_at=gt.${encodeURIComponent(afterIso)}&select=id&limit=1`
+  ).catch(() => null);
+  return Boolean(rows?.length);
+}
+
+// Rellena el nombre de los contactos que quedaron guardados como un número pelado, usando el
+// nombre que cada persona tiene puesto en su WhatsApp. Nunca pisa un nombre real: sólo toca las
+// filas cuyo full_name es el propio teléfono (o está vacío), así que los nombres que vienen de
+// Google Contacts o que el dueño escribió a mano quedan intactos.
+export async function syncWhatsappProfileNames(options = {}) {
+  if (!agendaUsesSupabase()) return { updated: 0 };
+  const names = await fetchRecentZavuProfileNames(options);
+  let updated = 0;
+  for (const { phone, name } of names) {
+    const rows = await agendaSupabaseRequest(
+      `/rest/v1/za_customers?phone=eq.${encodeURIComponent(phone)}&select=id,full_name`
+    ).catch(() => null);
+    const customer = rows?.[0];
+    if (!customer) continue;
+    const current = String(customer.full_name || '').trim();
+    const looksLikePhone = !current || current === phone || /^[+0-9 ]+$/.test(current);
+    if (!looksLikePhone || current === name) continue;
+    // Prefer=return=representation para poder contar de verdad: sin él el PATCH no devuelve filas
+    // y el contador que informa el cron quedaba siempre en cero aunque el nombre sí se corrigiera.
+    const patched = await agendaSupabaseRequest(`/rest/v1/za_customers?id=eq.${encodeURIComponent(customer.id)}`, {
+      method: 'PATCH', headers: { Prefer: 'return=representation' },
+      body: JSON.stringify({ full_name: name, updated_at: new Date().toISOString() })
+    }).catch(() => null);
+    if (patched?.length) updated += 1;
+  }
+  return { updated, checked: names.length };
 }
 
 export async function loadConversationHistory(conversationId, limit = 20, options = {}) {

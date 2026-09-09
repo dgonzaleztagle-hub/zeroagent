@@ -78,6 +78,42 @@ async function sendZavuMessage(to, text, options = {}) {
   }
 }
 
+// Nombre que la propia persona tiene puesto en su WhatsApp. Es lo único que hay para identificar
+// a quien escribe sin estar en la agenda del negocio: sin esto el dueño ve una lista de números
+// que no puede reconocer ni buscar en su consola. Caso real (franciskom, 09-09-2026): una paciente
+// de años quedó guardada como "+569…", el dueño no logró encontrarla para sacarle el bot de encima,
+// y su nombre estaba en Zavu todo el tiempo.
+//
+// OJO: el parámetro `phoneNumber` de contacts.list existe en el SDK pero el backend no filtra por
+// él (devuelve vacío para un número que sí existe, verificado 09-09-2026), así que no sirve para
+// resolver un teléfono puntual. Se recorren las páginas más recientes, que vienen ordenadas por
+// creación descendente — por eso esto vive en el cron horario y no en el camino del webhook.
+export async function fetchRecentZavuProfileNames({ pages = 3, pageSize = 100 } = {}) {
+  if (!process.env.ZAVUDEV_API_KEY) return [];
+  const names = [];
+  try {
+    const { default: Zavudev } = await import('@zavudev/sdk');
+    const zavu = new Zavudev({ apiKey: process.env.ZAVUDEV_API_KEY });
+    let cursor = null;
+    for (let page = 0; page < Math.max(1, Math.min(30, pages)); page += 1) {
+      const query = cursor ? { limit: pageSize, cursor } : { limit: pageSize };
+      const result = await zavu.contacts.list(query, { timeout: 10_000, maxRetries: 1 });
+      const body = result?.body || result || {};
+      const items = body.items || [];
+      for (const item of items) {
+        const name = String(item?.profileName || '').trim().slice(0, 120);
+        const phone = String(item?.phoneNumber || item?.primaryPhone || '').trim();
+        if (name && phone) names.push({ phone, name });
+      }
+      cursor = body.nextCursor || body.next_cursor;
+      if (!cursor || !items.length) break;
+    }
+  } catch (error) {
+    console.error('[zavu] no se pudieron leer los nombres de perfil:', error.message);
+  }
+  return names;
+}
+
 export function zavuEventId(event, rawBody = '') {
   const explicit = String(event?.id || '').trim();
   if (explicit) return explicit.slice(0, 240);
