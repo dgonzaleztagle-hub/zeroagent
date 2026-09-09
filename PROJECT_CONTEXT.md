@@ -1419,3 +1419,41 @@ reconecta con un PAT nuevo o se crea uno de reemplazo.
 **Lo que queda por delante en franciskom:** observar el comportamiento con pacientes reales (es lo
 único que ninguna prueba entrega), y decidir si se le pide a Zavu el eco de coexistencia para poder
 auto-pausar el bot cuando Francisco responde desde su teléfono.
+
+### Primer caso real de la marcha blanca: dos defectos que sólo aparecen con un paciente de verdad · 09-09-2026
+
+Francisco avisó que el agente le contestó a una paciente. Al revisar la conversación real
+(`+56992373692`, **Adelaida Vergara**, cuidadora de un paciente adulto mayor con problemas
+respiratorios, con historial de meses con Francisco) aparecieron dos cosas que ninguna prueba
+había tocado:
+
+1. **Una respuesta por cada mensaje.** Ella escribió tres líneas en dos segundos —como escribe
+   cualquiera en WhatsApp— y el agente contestó tres veces, cada respuesta ciega a las siguientes,
+   presentándose como "Francisco Martinez, Kinesiólogo Osteópata" a una paciente de años. Nada lo
+   delata más como máquina. **Fix:** el webhook espera `INBOUND_DEBOUNCE_MS` (7 s) y, si en ese
+   rato entró otro mensaje del mismo cliente, ese turno se calla; contesta el último evento, que
+   ya tiene las tres líneas en su historial. Verificado contra la base real:
+   `supersededByNewerInbound` distingue correctamente los dos casos.
+2. **El dueño no podía encontrarla para sacarle el bot de encima.** Ella no está en los Google
+   Contacts de Francisco (los guarda en el iPhone, que sincroniza con iCloud, no con Google), así
+   que el sistema la había registrado con su propio número como nombre. En la consola veía una
+   lista de números que no puede reconocer ni buscar. **Su nombre estaba en Zavu todo el tiempo**:
+   el canal guarda el `profileName` que cada persona tiene puesto en su WhatsApp (98 de cada 100
+   contactos lo traen). **Fix:** se usa ese nombre cuando el contacto no está en la agenda del
+   negocio — del evento entrante si lo trae, y si no del cron horario, que ahora corre el sync de
+   nombres en TODAS las pasadas (Google Contacts sigue sólo a las 7 am). Nunca pisa un nombre
+   real: sólo filas cuyo `full_name` es el propio teléfono. Se hizo además un backfill manual:
+   **43 contactos** dejaron de ser un número pelado en la consola de Francisco.
+
+**Trampa documentada:** `contacts.list` de Zavu acepta un filtro `phoneNumber` que el backend
+ignora — devuelve vacío para un número que sí existe (verificado 09-09-2026). Por eso el sync
+recorre páginas recientes desde el cron en vez de resolver un teléfono puntual en el webhook.
+
+**Contención inmediata aplicada:** la conversación de Adelaida quedó en `handoff` (el agente no
+responde ahí) con el motivo escrito, y su ficha quedó con nombre para que Francisco la encuentre.
+
+**Lo que NO era:** Francisco entendió que ella quería cancelar una hora. Los mensajes de
+cancelación son de días anteriores; lo de anoche fue ella avisándole "te equivocaste de chat" —
+probablemente por algo que él le escribió desde su teléfono, que el sistema no ve. Otra vez el
+mismo hueco: el dueño conversando desde su celular mientras el agente responde en paralelo sin
+saberlo.
