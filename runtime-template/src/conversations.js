@@ -137,6 +137,37 @@ export async function setConversationStatus(conversationId, status) {
 
 // La consola del cliente puede ver sus propios hilos, pero no recibe las credenciales
 // de Supabase ni una vista de administración del agente.
+// Una conversación tomada por una persona deja al agente mudo SOLO en ese hilo — pero si nadie
+// la devuelve, queda muda para siempre y el cliente se queda esperando a alguien que ya se olvidó
+// del caso. Pasadas HANDOFF_AUTO_RETURN_HOURS sin que el equipo escriba, el agente la retoma solo.
+// La ventana se cuenta desde el último mensaje humano saliente (o desde que la conversación se
+// marcó, si nunca hubo respuesta humana), no desde el último mensaje del cliente: un cliente que
+// insiste no debe devolverle la conversación al bot antes de que el dueño alcance a contestar.
+export function handoffAutoReturnHours() {
+  const configured = Number(process.env.HANDOFF_AUTO_RETURN_HOURS ?? 12);
+  return Math.max(1, Math.min(720, Number.isFinite(configured) ? configured : 12));
+}
+
+export async function reclaimStaleHandoff(conversation) {
+  if (!agendaUsesSupabase() || conversation?.status !== 'handoff') return conversation;
+  const windowMs = handoffAutoReturnHours() * 3_600_000;
+  const rows = await agendaSupabaseRequest(
+    `/rest/v1/za_conversation_messages?conversation_id=eq.${encodeURIComponent(conversation.id)}`
+    + '&direction=eq.outbound&sender_type=eq.human&select=created_at&order=created_at.desc&limit=1'
+  );
+  const lastHumanAt = rows?.[0]?.created_at || conversation.updated_at;
+  if (!lastHumanAt) return conversation;
+  const elapsed = Date.now() - new Date(lastHumanAt).getTime();
+  if (!Number.isFinite(elapsed) || elapsed < windowMs) return conversation;
+  const updated = await updateConversationOperation(conversation.id, {
+    status: 'active', needs_human: false, handoff_reason: ''
+  }).catch(error => {
+    console.error('[conversations] no se pudo devolver la conversación al agente:', error.message);
+    return null;
+  });
+  return updated ? { ...conversation, ...updated, za_customers: conversation.za_customers } : conversation;
+}
+
 export async function getConversationInbox(limit = 40) {
   if (!agendaUsesSupabase()) return { mode: 'local_preview_state', conversations: [] };
   const [rows, operators] = await Promise.all([

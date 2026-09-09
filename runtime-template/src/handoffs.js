@@ -37,12 +37,16 @@ function fromRow(row) {
 async function alertHandoff(ticket) {
   const { settings } = await getNotificationSettings();
   if (!settings.handoff_alert_enabled || !settings.alert_phone) return;
-  // El SMS se cobra por segmento de 160 caracteres: el aviso dice lo justo para que el dueño
-  // sepa que tiene que entrar, y el detalle completo lo lee en la consola.
+  // El SMS se cobra por segmento de 160 caracteres: el aviso dice lo justo para que el dueño sepa
+  // que tiene que entrar, y el detalle completo lo lee en la consola. Con el link entra de un
+  // toque desde el propio SMS en vez de ir a buscarla; Zavu exige que cualquier URL enviada por
+  // SMS esté verificada antes en la cuenta (urls.submitForVerification), así que el link sólo se
+  // agrega si la instalación declaró la suya en CONSOLE_URL.
+  const consoleUrl = String(process.env.CONSOLE_URL || '').trim();
   const text = [
     'ZeroAgent: un cliente pide hablar contigo.',
     ticket.customer_message ? `"${ticket.customer_message.slice(0, 60)}"` : '',
-    'Revisalo en tu consola.'
+    consoleUrl ? `Entra a ${consoleUrl}` : 'Revisalo en tu consola.'
   ].filter(Boolean).join(' ').slice(0, 300);
   await sendZavuAlert(settings.alert_phone, text, {
     idempotencyKey: `handoff-alert:${ticket.id}`, subject: 'Un cliente pide hablar contigo'

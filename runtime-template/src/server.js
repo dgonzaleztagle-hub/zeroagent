@@ -9,7 +9,7 @@ import { agendaConfig, agendaSupabaseRequest, agendaSupabaseUpload, agendaUsesSu
 import { parseContactsFile } from './contacts-import.js';
 import { dispatchAgendaOutbox } from './outbox.js';
 import { verifyZavuSignature, sendZavuWhatsApp, zavuDeliveryUpdate, zavuEventId, zavuProviderMessage } from './zavu.js';
-import { appendConversationMessage, createOperator, findConversationMessageByClientId, getAgentControl, getConversationInbox, getOrCreateConversation, loadConversationHistory, updateAgentControl, updateConversationMessageDelivery, updateConversationOperation } from './conversations.js';
+import { appendConversationMessage, createOperator, findConversationMessageByClientId, getAgentControl, getConversationInbox, getOrCreateConversation, loadConversationHistory, reclaimStaleHandoff, updateAgentControl, updateConversationMessageDelivery, updateConversationOperation } from './conversations.js';
 import { addKnowledgeSuggestion, currentConfirmedFacts, listKnowledgeSuggestions } from './knowledge.js';
 import { createHandoffTicket, listHandoffTickets, updateHandoffTicket } from './handoffs.js';
 import { addBusinessData, addBusinessInfo, listBusinessData, listBusinessInfo } from './business-data.js';
@@ -973,7 +973,7 @@ export async function handleRequest(req, res) {
         await completeZavuEvent(eventId, claim.lease_token, 'ignored', { ignored: 'rate_limited' });
         return json(res, 200, { ok: true, ignored: 'rate_limited' });
       }
-      const conversation = await getOrCreateConversation('whatsapp', callerPhone);
+      let conversation = await getOrCreateConversation('whatsapp', callerPhone);
       const inboundKey = `zavu:in:${String(event.data?.messageId || eventId)}`.slice(0, 240);
       const inbound = await appendConversationMessage(conversation?.id, 'inbound', message, {}, {
         senderType: 'human', deliveryStatus: 'delivered', clientMessageId: inboundKey,
@@ -984,6 +984,10 @@ export async function handleRequest(req, res) {
         await completeZavuEvent(eventId, claim.lease_token, 'ignored', { paused: true });
         return json(res, 200, { ok: true, paused: true });
       }
+      // Antes de callarse por handoff, comprobar si esa toma ya venció: si el equipo no ha escrito
+      // en las últimas horas configuradas, el agente retoma el hilo en vez de dejarlo mudo para
+      // siempre. Se evalúa acá, con el mensaje que acaba de entrar, para no depender de un cron.
+      conversation = await reclaimStaleHandoff(conversation);
       if (conversation?.status === 'handoff') {
         await completeZavuEvent(eventId, claim.lease_token, 'ignored', { handoff: true, suppressed: true });
         return json(res, 200, { ok: true, handoff: true, suppressed: true });

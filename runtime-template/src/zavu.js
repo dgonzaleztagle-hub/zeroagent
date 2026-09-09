@@ -27,7 +27,22 @@ export async function sendZavuWhatsApp(to, text, options = {}) {
 // mañana se habilita el canal de correo del sender (167 veces más barato por mensaje).
 export async function sendZavuAlert(to, text, options = {}) {
   const channel = String(process.env.ALERT_CHANNEL || 'sms_oneway').trim() || 'sms_oneway';
-  return sendZavuMessage(to, text, { ...options, channel, subject: options.subject || 'Aviso ZeroAgent' });
+  const send = body => sendZavuMessage(to, body, { ...options, channel, subject: options.subject || 'Aviso ZeroAgent' });
+  try {
+    return await send(text);
+  } catch (error) {
+    // Zavu rechaza un SMS con una URL que todavía no está verificada en la cuenta. Una alerta que
+    // no llega es peor que una alerta sin link: se reintenta con el texto pelado. El reintento
+    // lleva su propia clave de idempotencia porque su contenido es distinto — en el peor caso
+    // (que el primero hubiera salido igual) llega un aviso repetido, que es preferible a ninguno.
+    const withoutLink = text.replace(/https?:\/\/\S+/g, '').replace(/\s{2,}/g, ' ').trim();
+    if (withoutLink === text || !withoutLink) throw error;
+    console.error('[zavu] la alerta con link falló, se reintenta sin link:', error.message);
+    const retryKey = options.idempotencyKey ? `${options.idempotencyKey}:nolink` : '';
+    return sendZavuMessage(to, withoutLink, {
+      ...options, channel, subject: options.subject || 'Aviso ZeroAgent', idempotencyKey: retryKey
+    });
+  }
 }
 
 async function sendZavuMessage(to, text, options = {}) {
