@@ -1568,3 +1568,31 @@ con una sola excepción explícita.
 **Pendiente menor:** Eleva Salud entrega ubicación pero no es agendable por el agente (se coordina
 con el centro directamente); confirmar con Francisco que el bloque diga eso si alguien intenta
 tomar hora ahí.
+
+### Eleva Salud: dejar de ofrecer hora donde Francisco no controla la agenda · 09-09-2026
+
+Pedir hora en Eleva Salud caía en `catalog_not_found` —un error pensado para "falta un dato"— así
+que el agente seguía pidiéndole servicio y fecha al cliente como si la hora fuera posible, y recién
+chocaba después. La peor versión de eso es prometer un cupo que no puede existir.
+
+Tres arreglos, en orden de cuánto movieron la aguja:
+
+1. **Sede no agendable → redirección explícita.** Si TODOS los servicios de una sede están marcados
+   `bookable: false`, `get_availability` devuelve `not_bookable_here` con la nota de redirección en
+   vez del error genérico. Sirve para cualquier cliente con una sede administrada por un tercero.
+2. **El prompt lista los no agendables en su propia sección**, no mezclados entre los agendables con
+   una nota al lado — mismo criterio que ya usaba la página pública de reservas.
+3. **El caso terco se resolvió con una respuesta literal.** Ni (1) ni (2) evitaron que ante "quiero
+   agendar en Eleva Salud" (sin fecha) el modelo pidiera la fecha igual: **0/3 en ambos intentos**,
+   porque sin fecha nunca llega a llamar la herramienta. Se agregó el bloque
+   `agendar_en_eleva_salud`, y el `when` tuvo que decir explícitamente "aunque ya sepas que no se
+   agenda, NO redactes tú la respuesta: usa ésta" — sin esa frase el modelo redactaba una respuesta
+   correcta pero sin la dirección ni el "coordínalo con ellos". Con ella, 8/8.
+
+**Lección que se repite hoy:** cuando el comportamiento tiene que ser exacto, el prompt no alcanza;
+lo que funciona es que el modelo sólo DECIDA y el runtime garantice el texto. Es el mismo patrón de
+las respuestas literales.
+
+**Medición final: 26/26** — los nueve bloques literales con sus variaciones, más las conversaciones
+que NO deben disparar ninguno (saludo, relato de dolor, disponibilidad real, derivación, urgencia,
+cobertura a domicilio).
