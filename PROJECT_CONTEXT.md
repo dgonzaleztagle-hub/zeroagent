@@ -1485,3 +1485,28 @@ patch.full_name = item.full_name`), así que en cuanto él guarda el contacto en
 nomenclatura, la sincronización diaria reemplaza el nombre de WhatsApp por el suyo. Y al revés no
 ocurre: `syncWhatsappProfileNames` sólo toca filas cuyo nombre es el propio teléfono. El nombre de
 WhatsApp es un relleno temporal, nunca una fuente que compita con la del dueño.
+
+### El agente se presenta como asistente, nunca como el dueño · 09-09-2026
+
+**Decisión de Daniel, no negociable:** el agente debe decir lo que es. Hasta hoy el paquete de
+franciskom lo instruía al revés y a propósito — `system_prompt`: "Eres Francisco Martinez,
+Kinesiólogo Osteópata", `role`: "habla en primera persona, como el profesional que eres" — y en el
+día 1 de la marcha blanca eso llevó a que le respondiera como Francisco a pacientes de años.
+
+Ahora: se presenta como "el asistente de FrancisKOM, el centro de Francisco Martinez", habla de
+Francisco en tercera persona, y si le preguntan si es una persona o un bot **abre la respuesta
+diciendo que no es una persona** (la versión anterior contestaba "soy el asistente de FrancisKOM…",
+que deja la duda). La regla vive en `base-behavior.js` (bloque IDENTIDAD), así que aplica a todos
+los clientes de la línea, no sólo a este paquete.
+
+Lo que se conservó a propósito: nombrar a Francisco de forma concreta. El prompt original evitaba
+convertirlo en "un profesional" externo y anónimo, y eso sigue siendo correcto — el paciente tiene
+que saber quién lo va a atender. Lo que cambia es quién dice ser el que escribe.
+
+Verificado tras el cambio: disponibilidad, derivación explícita, ruta de urgencia (caída +
+hormigueo deriva de inmediato) y respuestas de precios se comportan igual que antes.
+
+**Y se revirtió TODO el silenciado que no hizo Francisco** (instrucción de Daniel: el silencio es
+decisión del dueño). Quedan 12 contactos silenciados: los 11 que eligió él más el número de Daniel,
+que pidió expresamente que el bot dejara de responderle. Los 26 que se habían silenciado el 08-09
+por heurística —incluidos 14 leads `S-xxxx`— vuelven a ser atendidos por el agente.
