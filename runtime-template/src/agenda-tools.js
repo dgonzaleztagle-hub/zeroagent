@@ -139,6 +139,19 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
           .filter(item => (resource.services || []).some(n => normName(n) === normName(item.name)));
         service = candidates.sort((a, b) => (Number(b.duration_minutes) || 0) - (Number(a.duration_minutes) || 0))[0] || null;
       }
+      // La sede que pidió el cliente puede existir pero no agendarse por este canal (la administra
+      // un tercero). Antes se caía en "catalog_not_found", un error pensado para cuando falta el
+      // dato — y el modelo, al recibirlo, seguía pidiéndole el servicio al cliente como si la hora
+      // fuera posible, hasta dejarlo en un callejón sin salida. Si TODOS los servicios de esa sede
+      // están marcados no agendables, la sede tampoco lo es: se dice de frente y se lo redirige.
+      if (!service && args.location) {
+        const query = normName(args.location);
+        const inLocation = (dashboard.catalog.services || []).filter(item => normName(item.name).includes(query));
+        if (inLocation.length && inLocation.every(item => item.bookable === false)) {
+          const note = inLocation.find(item => item.redirect_note)?.redirect_note;
+          return { ok: true, action: 'not_bookable_here', message: `${note || 'Esa sede no se agenda por este canal.'} Dile al cliente que esa hora la tiene que coordinar directamente con ese centro, y ofrécele agendar en las sedes que sí maneja Francisco.` };
+        }
+      }
       if (!service) return { error: 'catalog_not_found', message: 'Indica la sede (Box Buin o domicilio) para poder buscar hora, o el nombre exacto del servicio si el cliente ya lo dijo.', available_services: dashboard.catalog.services.map(item => item.name) };
       // Servicio marcado `bookable:false`: no lo maneja este negocio (ej. atención en un centro
       // de terceros) — no tiene sentido mostrar "disponibilidad" propia para algo que no se agenda acá.

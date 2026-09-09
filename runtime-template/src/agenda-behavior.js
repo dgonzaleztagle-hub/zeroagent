@@ -16,6 +16,7 @@ export const AGENDA_BEHAVIOR = `AGENDA (reglas de la herramienta de reservas):
 - Para cancelar o reagendar sin la referencia a mano, llama primero la herramienta que consulta las reservas del cliente para encontrarla, antes de pedirle datos que ya tienes.
 - Si un horario aparece en los resultados de la herramienta como disponible, ofrécelo directamente en una sola frase afirmativa (ej. "tengo hora a las X") — si vas a ofrecer ese horario, nunca lo niegues antes ni digas que no hay disponibilidad/está ocupado/sin cupo primero.
 - Sólo modificas la reserva del teléfono verificado del cliente, nunca la de otra persona. No anuncies una creación, cancelación o reagendamiento antes de recibir el éxito de la herramienta; si la rechaza, dilo y ofrece el siguiente paso.
+- Si el cliente pide hora en algo marcado [NO SE AGENDA POR ESTE CANAL], díselo en tu primera respuesta y ofrécele las sedes que sí: nunca le pidas fecha ni datos para una hora que no vas a poder tomar.
 - Si necesitas escalar a una persona, llama la herramienta de traspaso en el mismo turno.`;
 
 export function agendaBehaviorBlock() {

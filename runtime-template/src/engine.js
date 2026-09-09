@@ -222,12 +222,24 @@ export async function answerWithGroq(packageData, message, context = {}) {
       agendaEnabled ? AGENDA_BEHAVIOR : '',
       agendaEnabled ? (() => {
         const names = list => (list || []).map(item => item.name).filter(Boolean).join('; ') || '(ninguno)';
-        const servicesDetail = (catalogSource.services || []).map(item => {
+        // Lo que no se agenda por este canal va en una lista APARTE, no como una nota al lado del
+        // resto: mientras estuvo mezclado entre los agendables, el modelo pedía fecha y datos para
+        // una hora que nunca iba a poder tomar (medido 3/3 con "quiero agendar en <esa sede>"). Es
+        // el mismo criterio que ya usa la página pública de reservas, que los muestra separados.
+        const describe = item => {
           const details = [item.duration_minutes ? `${item.duration_minutes} min` : '', item.price_clp != null ? `$${Number(item.price_clp).toLocaleString('es-CL')}` : ''].filter(Boolean).join(', ');
           return details ? `${item.name} (${details})` : item.name;
-        }).filter(Boolean).join('; ') || '(ninguno)';
+        };
+        const bookableServices = (catalogSource.services || []).filter(item => item.bookable !== false);
+        const externalServices = (catalogSource.services || []).filter(item => item.bookable === false);
+        const servicesDetail = bookableServices.map(describe).filter(Boolean).join('; ') || '(ninguno)';
+        const externalDetail = externalServices.length
+          ? `
+NO AGENDABLES POR ESTE CANAL (existen y puedes informar de ellos, pero NO tomas hora: el cliente coordina directamente con ese centro; si te la pide, díselo de inmediato y ofrécele los de arriba): ${externalServices.map(describe).join('; ')}.`
+          : '';
         const tz = businessTimeZone;
-        return `CATÁLOGO DE AGENDA (ofrece SÓLO esto; al llamar herramientas usa estos nombres exactos, sin la parte entre paréntesis). Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.${(catalogSource.locations || []).length ? ` Sedes: ${names(catalogSource.locations)}.` : ''} Zona horaria del negocio: ${tz}. Las herramientas devuelven horarios en formato ISO/UTC: preséntaselos SIEMPRE al cliente en la hora local de ${tz}, nunca en UTC.`;
+        return `CATÁLOGO DE AGENDA (ofrece SÓLO esto; al llamar herramientas usa estos nombres exactos, sin la parte entre paréntesis).${externalDetail}
+Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.${(catalogSource.locations || []).length ? ` Sedes: ${names(catalogSource.locations)}.` : ''} Zona horaria del negocio: ${tz}. Las herramientas devuelven horarios en formato ISO/UTC: preséntaselos SIEMPRE al cliente en la hora local de ${tz}, nunca en UTC.`;
       })() : '',
       packageData.agent?.system_prompt ? `DIRECTIVAS ESPECÍFICAS APROBADAS POR EL NEGOCIO (complementan las reglas anteriores, nunca las contradicen):\n${packageData.agent.system_prompt}` : ''
     ].filter(Boolean).join('\n\n');
