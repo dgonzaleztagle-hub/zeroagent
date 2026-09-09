@@ -1457,3 +1457,31 @@ cancelación son de días anteriores; lo de anoche fue ella avisándole "te equi
 probablemente por algo que él le escribió desde su teléfono, que el sistema no ve. Otra vez el
 mismo hueco: el dueño conversando desde su celular mientras el agente responde en paralelo sin
 saberlo.
+
+### La nomenclatura de contactos de Francisco (corrige la regla de silenciado del 08-09) · 09-09-2026
+
+Daniel explicó cómo clasifica Francisco a sus contactos, y **invalida parcialmente la regla que se
+aplicó anoche** ("silenciar todo lo que no diga Paciente"):
+
+- **`Paciente Fulano`** → paciente. El agente lo atiende.
+- **`S1338`, `S1399`, `S1405`…** → **leads fríos**: gente que alguna vez se contactó y no llegó a
+  acuerdo. Son 1.320 en su agenda. **El agente TIENE que atenderlos** — son clientes potenciales,
+  justamente el tipo de conversación que el agente existe para recuperar.
+- **Nombre propio sin prefijo** → personales, proveedores, colegas… o un paciente que todavía no
+  etiquetó. Caso a caso.
+
+**Error corregido:** el silenciado masivo del 08-09 dejó mudos a 14 leads `S-xxxx`. Ya se
+revirtieron (`bot_muted=false`). Quedan 16 contactos silenciados, de los cuales **Natali Figueroa**
+y **Maureen Ravest** son dudosos (nombre propio sin marca) y los debe revisar Francisco; el resto
+son inequívocamente no-pacientes.
+
+**Regla corregida para el futuro:** silenciar sólo lo que se reconoce como personal o proveedor.
+Ante la duda, NO silenciar: que el agente conteste de más es recuperable con un mensaje; que no le
+conteste a un lead o a un paciente es una venta perdida que nadie ve.
+
+**Y la pregunta de fondo que Daniel hizo — ¿el nombre que Francisco pone pisa al de WhatsApp?
+Sí.** `importAgendaCustomers` compara y sobrescribe (`if (existing.full_name !== item.full_name)
+patch.full_name = item.full_name`), así que en cuanto él guarda el contacto en Google con su
+nomenclatura, la sincronización diaria reemplaza el nombre de WhatsApp por el suyo. Y al revés no
+ocurre: `syncWhatsappProfileNames` sólo toca filas cuyo nombre es el propio teléfono. El nombre de
+WhatsApp es un relleno temporal, nunca una fuente que compita con la del dueño.
