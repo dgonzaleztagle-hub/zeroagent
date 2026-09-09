@@ -1245,3 +1245,35 @@ alineado con el modo.
   reconstruye el build desde ahí, vuelve a `manual`.
 - Silenciar contactos personales (`bot_muted`) es trabajo de Francisco, no nuestro — él sabe a
   quién deja y a quién no, y los irá marcando a medida que escriban.
+
+### Canal de aviso al dueño resuelto: SMS por Zavu · 08-09-2026
+
+Investigado con la cuenta real de Zavu de franciskom (no con supuestos):
+
+- **Zavu sí manda correo** (`channel: 'email'` en el mismo endpoint de mensajes, con asunto,
+  HTML, reply-to y adjuntos), **pero el sender de Francisco sólo tiene `whatsapp` y `sms_oneway`**
+  — el canal de correo habría que habilitarlo en la cuenta (dirección/dominio de envío).
+- **El sender ya trae `sms_oneway`, así que el SMS no necesita habilitar nada.** Y resuelve el
+  problema de raíz: el SMS sale por la red de Zavu, no por el número de Francisco, así que sí le
+  llega a ese mismo teléfono. Sirve además porque Francisco usa iPhone y no es hábil con
+  tecnología (Web Push quedó descartado: iOS sólo lo entrega si la consola está instalada como
+  PWA en la pantalla de inicio).
+- **Costos reales (tarifas públicas de Zavu + saldo leído por API):** el plan free da **US$2 de
+  crédito al mes** (`balance: 200`, en centavos) para SMS/voz/correo, más 2.000 mensajes de
+  WhatsApp. SMS a Chile **US$0,067** → unos **29 avisos al mes**. Correo transaccional **US$0,40
+  por 1.000** → 5.000 avisos con el mismo crédito (167 veces más barato por mensaje).
+- **Implementado:** `sendZavuAlert()` en `zavu.js` (canal por `ALERT_CHANNEL`, default
+  `sms_oneway`, y `subject` automático si el canal es correo), usado por la alerta de handoff y la
+  de reserva nueva. Los textos se acortaron a una línea para que quepan en un segmento de 160
+  caracteres — un mensaje largo se cobra 2 o 3 veces.
+- **Configuración de franciskom:** `alert_phone = +56987430833` (su propio número),
+  `handoff_alert_enabled = true`, **`booking_alert_enabled = false`** a propósito: las reservas ya
+  entran a su Google Calendar y Google le notifica, así el crédito mensual queda para lo que sí
+  necesita una persona.
+
+**Hallazgo colateral, importante:** el WhatsApp de Francisco en Zavu tiene
+`paymentStatus.setupStatus: NOT_STARTED` y `canSendTemplates: false` — el bot **sólo puede
+escribir dentro de la ventana de 24 h** desde el último mensaje del paciente. Cualquier mensaje
+proactivo (el recordatorio de 24 h antes, reactivaciones) está bloqueado por Meta hasta configurar
+método de pago y aprobar plantillas. No afecta a la marcha blanca (responder a quien escribe entra
+en la ventana), pero explica que el recordatorio no sea sólo "falta código".
