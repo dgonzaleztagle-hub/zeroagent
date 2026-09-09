@@ -1310,3 +1310,34 @@ al evento `message.sent`** (antes: `message.inbound`, `message.delivered`, `mess
 empiezan a llegar ecos de mensajes que no salieron de nuestra API, se puede cablear el
 auto-takeover (el dueño responde desde su WhatsApp y el bot se calla solo en ese hilo); si no
 llegan, hay que decirle explícitamente que para tomar un caso use la consola.
+
+### Comprobado: Zavu NO ve los mensajes que el dueño manda desde su teléfono · 08-09-2026
+
+Prueba en vivo con Daniel escribiéndole a Francisco por WhatsApp mientras se observaba el sistema:
+
+- Se suscribió el webhook del sender al evento `message.sent` (antes sólo `message.inbound`,
+  `message.delivered`, `message.failed`).
+- Daniel le pidió a Francisco que respondiera; Francisco escribió "ok" desde su teléfono.
+- Resultado: **cero eventos `message.sent`** en `za_webhook_events`, y **cero mensajes outbound de
+  WhatsApp** al consultar directamente `messages.list` de Zavu (39 mensajes de WhatsApp en las
+  últimas páginas, todos entrantes). Comprobado por las dos vías.
+
+**Consecuencia:** no se puede auto-pausar el agente cuando el dueño se mete desde su celular,
+porque el sistema no tiene forma de enterarse. Para tomar una conversación hay que hacerlo desde
+la consola (botón "Tomar conversación", o simplemente responder desde ahí, que la toma sola). La
+salida de fondo sería que Zavu exponga el eco de mensajes enviados desde la app de WhatsApp — es
+una capacidad del modo de coexistencia de Meta, y hay que pedírsela a ellos.
+
+**Implementado en cambio (decisión de Daniel: 12 horas):** `reclaimStaleHandoff` en
+`conversations.js` — pasadas `HANDOFF_AUTO_RETURN_HOURS` (12 por defecto) sin mensaje humano
+saliente en el hilo, el agente lo retoma. La ventana se cuenta desde el último mensaje humano, no
+desde el último del cliente, para que un cliente que insiste no le devuelva la conversación al bot
+antes de que el dueño alcance a contestar. Se evalúa en el webhook con el mensaje que entra, sin
+cron. Verificado contra la base real: toma de 13 h vuelve al agente, toma de 2 h sigue con la
+persona.
+
+**Y el SMS de derivación ahora lleva el link de la consola** (`CONSOLE_URL`, ya configurada en
+Vercel como `https://franciskom.cl/m`). Zavu exige verificar las URLs antes de enviarlas por SMS
+(`urls.submitForVerification`; la de franciskom quedó `pending` de aprobación automática), así que
+si ese envío es rechazado la alerta se reintenta sin el link — una alerta que no llega es peor que
+una sin link.
