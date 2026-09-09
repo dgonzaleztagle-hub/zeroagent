@@ -1341,3 +1341,41 @@ Vercel como `https://franciskom.cl/m`). Zavu exige verificar las URLs antes de e
 (`urls.submitForVerification`; la de franciskom quedó `pending` de aprobación automática), así que
 si ese envío es rechazado la alerta se reintenta sin el link — una alerta que no llega es peor que
 una sin link.
+
+### Marcha blanca iniciada + incidente del minuto 1 · 08-09-2026 22:03
+
+Francisco despausó el bot desde la consola a las 22:03 (hora Chile). En los primeros dos minutos
+apareció el problema de fondo que ninguna prueba de agenda había tocado:
+
+**El bot le respondió a Daniel** (guardado en la agenda de Francisco como "Paciente Daniel
+Gonzales", sin silenciar) mensajes que eran de coordinación técnica sobre el propio sistema —
+"ok ahora lo que no tienes silenciado debería contestar automático" — y contestó en primera persona
+como Francisco, con soltura: *"Entendido. Voy a dejar el bot despausado desde la consola para que
+responda automáticamente en las conversaciones que no estén silenciadas."* Es decir, además de
+opinar sobre un tema ajeno al negocio, **prometió una acción interna que no puede ejecutar**. Sonó
+tan natural que Daniel escribió "parece que el bot que le puse es más inteligente de lo que
+pensaba" creyendo que era Francisco.
+
+**Por qué pasó:** `base-behavior.js` prohibía inventar DATOS y prometer acciones de herramientas,
+pero nada impedía sostener una conversación entera sobre cualquier otro asunto. El modelo no
+percibía que estaba fuera de dominio: sólo conversaba.
+
+**Fix (general, todos los clientes):** bloque **ALCANCE** en `base-behavior.js` — sólo conversa
+sobre el negocio (saludos, agradecimientos y que el cliente cuente cómo se siente siguen siendo
+naturales); ante un tema ajeno lo dice en una frase y ofrece avisar al equipo; **nunca habla del
+asistente** (su consola, pausas, silencios, quién lo programó); y nunca dice que hará algo "por
+dentro". Deliberadamente corto: el propio archivo documenta que los bloques largos y densos en
+prohibiciones suprimen el tool-calling. **Verificado tras el cambio:** los tres mensajes reales que
+provocaron el incidente ahora son declinados, y disponibilidad, creación de reserva y handoff
+siguen disparando sus herramientas; precios y conocimiento sin cambios.
+
+**Contención aplicada en producción:** se silenció el número de Daniel y los **26 contactos
+personales activos** que no están guardados como "Paciente ..." (la contadora, el sushi, la vecina,
+el gas, taekwondo, Manuel de Eleva Salud, la apoderada, Amorchito…). Quedan **0 contactos
+personales activos sin silenciar**; 38 silenciados en total. Reversible desde la consola con un
+toque si alguno resulta ser paciente.
+
+**Convención útil descubierta:** Francisco guarda a sus pacientes con el prefijo "Paciente ..."
+(1.296 contactos), frente a 1.952 guardados con nombre propio y 46 sólo con número. Esa etiqueta
+separa pacientes de personales mejor que cualquier heurística nuestra, y es la base del silenciado
+selectivo aplicado hoy.
