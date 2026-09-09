@@ -122,8 +122,11 @@ function isMobileRequest(req) {
 }
 
 async function asset(res, fileName, contentType) {
+  // Leer ANTES de escribir cabeceras: al revés, un archivo que no existe deja la respuesta a
+  // medias con un 200 ya enviado y el cliente recibe una conexión cortada en vez de un 404.
+  const body = await fs.readFile(path.join(root, 'public', fileName));
   res.writeHead(200, { 'content-type': contentType, 'cache-control': 'no-store' });
-  res.end(await fs.readFile(path.join(root, 'public', fileName)));
+  res.end(body);
 }
 
 async function answerWithConfiguredAi(message, context = {}) {
@@ -340,9 +343,18 @@ export async function handleRequest(req, res) {
   }
   if (req.method === 'GET' && pathname === '/landing.css') return asset(res, 'landing.css', 'text/css; charset=utf-8');
   if (req.method === 'GET' && pathname === '/landing.js') return asset(res, 'landing.js', 'application/javascript; charset=utf-8');
-  if (req.method === 'GET' && pathname === '/logo.png') return asset(res, 'logo.png', 'image/png');
-  if (req.method === 'GET' && pathname === '/francisco-corporativa.png') return asset(res, 'francisco-corporativa.png', 'image/png');
-  if (req.method === 'GET' && pathname === '/sesion-paso-a-paso.jpeg') return asset(res, 'sesion-paso-a-paso.jpeg', 'image/jpeg');
+  // Cualquier imagen que el negocio ponga en public/ queda servida sin tocar código: antes cada
+  // archivo iba cableado a mano acá, así que agregar una foto que el agente pueda mandar por
+  // WhatsApp obligaba a un deploy del servidor. El patrón admite UN solo segmento con caracteres
+  // seguros, así que no hay forma de salirse de public/ con "..".
+  const imageMatch = req.method === 'GET' && /^\/[A-Za-z0-9._-]+\.(png|jpe?g|webp|gif|svg)$/.test(pathname)
+    ? pathname.slice(1) : '';
+  if (imageMatch) {
+    const types = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', svg: 'image/svg+xml' };
+    const extension = imageMatch.split('.').pop().toLowerCase();
+    try { return await asset(res, imageMatch, types[extension]); }
+    catch { return json(res, 404, { error: 'Archivo no encontrado.' }); }
+  }
   if (req.method === 'GET' && pathname === '/playground') {
     return html(res, 200, await fs.readFile(path.join(root, 'public', 'playground.html'), 'utf8'));
   }
@@ -1054,7 +1066,11 @@ export async function handleRequest(req, res) {
         });
       }
       if (!['queued', 'sent', 'delivered', 'read'].includes(outbound?.delivery_status)) {
-        const provider = zavuProviderMessage(await sendZavuWhatsApp(callerPhone, reply.text, { idempotencyKey: outboundKey }));
+        // reply.imageUrl sólo lo trae una respuesta literal del negocio que declara imagen; el
+        // texto viaja como pie de foto para que llegue como UN mensaje y no como dos sueltos.
+        const provider = zavuProviderMessage(await sendZavuWhatsApp(callerPhone, reply.text, {
+          idempotencyKey: outboundKey, imageUrl: reply.imageUrl || ''
+        }));
         outbound = await updateConversationMessageDelivery({
           id: outbound?.id, providerMessageId: provider.id,
           status: ['queued', 'sent', 'delivered', 'read'].includes(provider.status) ? provider.status : 'sent', failureReason: ''

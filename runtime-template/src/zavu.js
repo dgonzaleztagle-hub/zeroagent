@@ -66,6 +66,13 @@ async function sendZavuMessage(to, text, options = {}) {
     text: content.slice(0, 8_000),
     'Zavu-Sender': options.senderId || process.env.ZAVUDEV_SENDER_ID
   };
+  // Imagen con pie de foto: un solo mensaje de WhatsApp, no dos. El texto viaja como caption, que
+  // WhatsApp corta en 1024 caracteres — el llamador es quien decide si su bloque cabe o si conviene
+  // mandar la imagen y el texto por separado.
+  if (options.imageUrl) {
+    payload.messageType = 'image';
+    payload.content = { mediaUrl: String(options.imageUrl).trim() };
+  }
   // Zavu exige asunto cuando el canal es correo (o cuando el destinatario es una dirección).
   if (channel === 'email' || recipient.includes('@')) payload.subject = String(options.subject || 'Aviso ZeroAgent').slice(0, 200);
   if (idempotencyKey) payload.idempotencyKey = idempotencyKey;

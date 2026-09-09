@@ -281,7 +281,7 @@ export async function answerWithGroq(packageData, message, context = {}) {
           const chosen = literalReplies(packageData).find(item => item.id === args?.id);
           if (chosen) {
             return {
-              text: chosen.text, confidence: 'literal_business_reply', source: [chosen.id], handoff: false,
+              text: chosen.text, imageUrl: chosen.image || '', confidence: 'literal_business_reply', source: [chosen.id], handoff: false,
               provider: llm.provider, model: llm.model,
               usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens }
             };
