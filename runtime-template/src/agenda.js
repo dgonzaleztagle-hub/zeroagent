@@ -3,7 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { colorIdForLocation, createGoogleCalendarEvent, deleteGoogleCalendarEvent, getGoogleCalendarBusyIntervals, updateGoogleCalendarEventTime } from './google-calendar.js';
-import { sendZavuWhatsApp } from './zavu.js';
+import { sendZavuAlert } from './zavu.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 function statePathFor(packageData) {
@@ -202,17 +202,18 @@ async function alertNewBookingBestEffort(appointment, { source, config, customer
     const { settings } = await getNotificationSettings();
     if (!settings.booking_alert_enabled || !settings.alert_phone) return;
     const timeZone = config?.timezone || 'America/Santiago';
-    const when = new Intl.DateTimeFormat('es-CL', { timeZone, dateStyle: 'full', timeStyle: 'short' }).format(new Date(appointment.starts_at));
+    const when = new Intl.DateTimeFormat('es-CL', { timeZone, dateStyle: 'short', timeStyle: 'short' }).format(new Date(appointment.starts_at));
     const pending = appointment.status === 'pending_confirmation';
+    // Corto a propósito: este aviso puede salir por SMS, que se cobra por segmento de 160.
     const text = [
-      pending ? '🔔 Hora nueva POR CONFIRMAR' : '🔔 Hora nueva agendada',
-      `${customerName}${appointment.customer_phone ? ` (${appointment.customer_phone})` : ''}`,
-      `${serviceName}${locationName ? ` · ${locationName}` : ''}`,
-      when,
-      appointment.reference ? `Ref. ${appointment.reference}` : '',
-      pending ? 'Confírmala en tu consola ZeroAgent para que quede tomada.' : ''
-    ].filter(Boolean).join('\n');
-    await sendZavuWhatsApp(settings.alert_phone, text, { idempotencyKey: `booking-alert:${appointment.id}` });
+      pending ? 'ZeroAgent: hora nueva POR CONFIRMAR.' : 'ZeroAgent: hora nueva agendada.',
+      `${customerName} · ${serviceName}${locationName ? ` · ${locationName}` : ''} · ${when}.`,
+      pending ? 'Confirmala en tu consola.' : ''
+    ].filter(Boolean).join(' ').slice(0, 300);
+    await sendZavuAlert(settings.alert_phone, text, {
+      idempotencyKey: `booking-alert:${appointment.id}`,
+      subject: pending ? 'Hora nueva por confirmar' : 'Hora nueva agendada'
+    });
   } catch (error) {
     console.error('[agenda] no se pudo avisar la reserva nueva al dueño:', error.message);
   }

@@ -17,6 +17,20 @@ function replayMessage(error) {
 // sobrevivir todos los reintentos de una operación; un 409 es la confirmación de
 // que Zavu ya recibió esa operación, no un motivo para generar otra clave.
 export async function sendZavuWhatsApp(to, text, options = {}) {
+  return sendZavuMessage(to, text, { ...options, channel: 'whatsapp' });
+}
+
+// Las alertas al DUEÑO no pueden salir por WhatsApp cuando el bot vive en su propio número:
+// nadie se manda WhatsApp a sí mismo. El SMS sale por la red de Zavu, no por su número, así que
+// sí le llega a ese mismo teléfono — y no depende de que instale ni configure nada, que es
+// justo lo que se necesita para un dueño poco tecnológico con iPhone. Canal configurable por si
+// mañana se habilita el canal de correo del sender (167 veces más barato por mensaje).
+export async function sendZavuAlert(to, text, options = {}) {
+  const channel = String(process.env.ALERT_CHANNEL || 'sms_oneway').trim() || 'sms_oneway';
+  return sendZavuMessage(to, text, { ...options, channel, subject: options.subject || 'Aviso ZeroAgent' });
+}
+
+async function sendZavuMessage(to, text, options = {}) {
   const recipient = String(to || '').trim();
   const content = String(text || '').trim();
   if (!recipient || !content) throw new Error('Destinatario y mensaje Zavu son obligatorios.');
@@ -30,12 +44,15 @@ export async function sendZavuWhatsApp(to, text, options = {}) {
 
   const idempotencyKey = String(options.idempotencyKey || '').trim().slice(0, 200);
   const timeout = clamp(options.timeoutMs ?? process.env.ZAVUDEV_TIMEOUT_MS, 3_000, 30_000, 15_000);
+  const channel = options.channel || 'whatsapp';
   const payload = {
     to: recipient,
-    channel: 'whatsapp',
+    channel,
     text: content.slice(0, 8_000),
     'Zavu-Sender': options.senderId || process.env.ZAVUDEV_SENDER_ID
   };
+  // Zavu exige asunto cuando el canal es correo (o cuando el destinatario es una dirección).
+  if (channel === 'email' || recipient.includes('@')) payload.subject = String(options.subject || 'Aviso ZeroAgent').slice(0, 200);
   if (idempotencyKey) payload.idempotencyKey = idempotencyKey;
 
   try {

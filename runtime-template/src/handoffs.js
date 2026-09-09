@@ -3,7 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { agendaSupabaseRequest, agendaUsesSupabase } from './agenda.js';
-import { sendZavuWhatsApp } from './zavu.js';
+import { sendZavuAlert } from './zavu.js';
 import { getNotificationSettings } from './notification-settings.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -37,13 +37,16 @@ function fromRow(row) {
 async function alertHandoff(ticket) {
   const { settings } = await getNotificationSettings();
   if (!settings.handoff_alert_enabled || !settings.alert_phone) return;
+  // El SMS se cobra por segmento de 160 caracteres: el aviso dice lo justo para que el dueño
+  // sepa que tiene que entrar, y el detalle completo lo lee en la consola.
   const text = [
-    '🔔 Un cliente necesita hablar con una persona.',
-    ticket.reason ? `Motivo: ${ticket.reason}` : '',
-    ticket.customer_message ? `Dijo: "${ticket.customer_message.slice(0, 300)}"` : '',
-    'Revisa el caso en tu consola ZeroAgent.'
-  ].filter(Boolean).join('\n');
-  await sendZavuWhatsApp(settings.alert_phone, text, { idempotencyKey: `handoff-alert:${ticket.id}` });
+    'ZeroAgent: un cliente pide hablar contigo.',
+    ticket.customer_message ? `"${ticket.customer_message.slice(0, 60)}"` : '',
+    'Revisalo en tu consola.'
+  ].filter(Boolean).join(' ').slice(0, 300);
+  await sendZavuAlert(settings.alert_phone, text, {
+    idempotencyKey: `handoff-alert:${ticket.id}`, subject: 'Un cliente pide hablar contigo'
+  });
 }
 
 // Bandeja de handoff: cuando el agente deriva a una persona (pedido explícito o señal de
