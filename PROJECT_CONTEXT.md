@@ -1510,3 +1510,28 @@ hormigueo deriva de inmediato) y respuestas de precios se comportan igual que an
 decisión del dueño). Quedan 12 contactos silenciados: los 11 que eligió él más el número de Daniel,
 que pidió expresamente que el bot dejara de responderle. Los 26 que se habían silenciado el 08-09
 por heurística —incluidos 14 leads `S-xxxx`— vuelven a ser atendidos por el agente.
+
+### Respuestas literales del negocio (el modelo elige cuál, no cómo) · 09-09-2026
+
+Francisco pidió que precios y "qué incluye la sesión" se respondan **con su texto exacto** —
+emojis, negritas de WhatsApp, saltos de línea y todo—, y que el bloque respiratorio salga *sólo*
+si preguntan específicamente por eso.
+
+Instruir al modelo a "copiar textual" no aguanta: antes o después parafrasea, se come un emoji o
+reordena una línea, y deja de ser el texto del negocio. La solución es determinista: el paquete
+declara `agent.literal_replies` (`{id, when, text}`), la herramienta `responder_textual` le da al
+modelo sólo la decisión de CUÁL corresponde, y **el engine devuelve ese texto tal cual y corta el
+bucle ahí mismo** — no vuelve a pasar por el modelo. Es genérico para toda la línea: cualquier
+cliente puede tener sus bloques oficiales (precios, promociones, políticas).
+
+Cargados para franciskom: `sesion_general` y `sesion_respiratoria`. **Verificado carácter por
+carácter contra el texto que mandó Francisco: 6 de 6 exactos**, eligiendo bien el bloque en cada
+caso, y sin invadir el resto (dolor → indaga; hora → `get_availability`; pedir persona → handoff;
+saludo → presentación).
+
+Los precios de sus bloques calzan con el catálogo real de la base, así que no hay contradicción
+entre lo que dice el texto y lo que cobra la agenda.
+
+**Pendiente de decisión de Francisco:** una pregunta de cobertura pura ("¿atienden en Paine?") hoy
+se responde redactada (menciona el precio de paso) en vez de mandar el bloque completo. Puede
+quedarse así o sumarse al caso de `sesion_general`; es cosa de decírselo.
