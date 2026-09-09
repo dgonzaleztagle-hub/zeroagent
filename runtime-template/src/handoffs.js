@@ -35,6 +35,12 @@ function fromRow(row) {
 }
 
 async function alertHandoff(ticket) {
+  // El chat de prueba del dueño ("Probar" en la consola, playground) crea tickets reales para que
+  // vea el resultado de su prueba en la Bandeja — pero NO es un cliente esperando: alertarlo le
+  // manda un SMS (que se cobra) por algo que acaba de escribir él mismo delante de la pantalla.
+  // Caso real: una prueba de regresión con "quiero hablar con Francisco directamente" le llegó al
+  // dueño como si un paciente lo estuviera pidiendo, en pleno primer día de marcha blanca.
+  if (ticket.channel === 'preview') return;
   const { settings } = await getNotificationSettings();
   if (!settings.handoff_alert_enabled || !settings.alert_phone) return;
   // El SMS se cobra por segmento de 160 caracteres: el aviso dice lo justo para que el dueño sepa
