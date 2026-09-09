@@ -1277,3 +1277,36 @@ escribir dentro de la ventana de 24 h** desde el último mensaje del paciente. C
 proactivo (el recordatorio de 24 h antes, reactivaciones) está bloqueado por Meta hasta configurar
 método de pago y aprobar plantillas. No afecta a la marcha blanca (responder a quien escribe entra
 en la ventana), pero explica que el recordatorio no sea sólo "falta código".
+
+### Flujo de toma de una conversación individual (verificado) · 08-09-2026
+
+Hay **tres niveles de silencio** y conviene no confundirlos:
+
+1. **Pausa global** (`za_agent_controls.mode`): el bot se calla con todos. Es la que está activa hoy.
+2. **Pausa por conversación** (`za_conversations.status = 'handoff'`): el bot se calla sólo en ese
+   hilo. Es la que corresponde cuando el dueño quiere meterse en un caso puntual.
+3. **Contacto silenciado** (`za_customers.bot_muted`): el bot no le responde nunca más a esa
+   persona. Es para los contactos personales, no para tomar un caso.
+
+**Orden de chequeos en el webhook** (`server.js`): guarda el entrante → pausa global → estado
+`handoff` de la conversación → `bot_muted` del contacto → recién ahí responde.
+
+**Cómo se activa el nivel 2 desde la consola (existe en PC y en móvil, verificado por endpoint):**
+- Botón "Tomar conversación" (móvil) / "Tomar caso" (PC) → `PATCH /api/client/conversations/<id>`
+  con `status: handoff`.
+- **O simplemente responder desde la consola:** `POST /api/client/conversations/<id>/messages`
+  marca la conversación como `handoff` ANTES de enviar. El dueño no necesita acordarse de tomarla
+  primero.
+- "Devolver a la IA" / "Devolver a IA" → `status: active`, `needs_human: false`, y el bot retoma.
+- El handoff automático del agente (pedido del cliente o franja de riesgo) deja la conversación en
+  el mismo estado, así que el bot ya se calla solo en ese hilo sin intervención.
+
+**Hueco conocido:** todo lo anterior asume que el dueño actúa DESDE LA CONSOLA. Si responde desde
+la app de WhatsApp en su teléfono, el sistema no se entera y el bot puede seguir contestando en
+paralelo. Los últimos 30 mensajes registrados en Zavu son 29 entrantes y 1 saliente (el SMS de
+prueba): no aparece ningún mensaje enviado por Francisco desde su teléfono, y la documentación de
+Zavu no aclara si emite eco de esos envíos. Por eso el 08-09 se **suscribió el webhook del sender
+al evento `message.sent`** (antes: `message.inbound`, `message.delivered`, `message.failed`). Si
+empiezan a llegar ecos de mensajes que no salieron de nuestra API, se puede cablear el
+auto-takeover (el dueño responde desde su WhatsApp y el bot se calla solo en ese hilo); si no
+llegan, hay que decirle explícitamente que para tomar un caso use la consola.
