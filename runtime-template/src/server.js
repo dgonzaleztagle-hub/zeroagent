@@ -768,6 +768,148 @@ export async function handleRequest(req, res) {
     try { return json(res, 200, await dispatchAgendaOutbox(packageData)); }
     catch (error) { return json(res, 502, { error: error.message }); }
   }
+  // Red de seguridad para mensajes que el webhook en vivo nunca llego a contestar. Encontrado
+  // real (franciskom, 12-09-2026): un mensaje de una paciente quedo con su evento en Supabase
+  // trabado en "processing" para siempre - nunca llego a guardarse en nuestro propio historial ni
+  // a mandarse respuesta - y el dueno del negocio termino contestando a mano, sin las preguntas
+  // del metodo comercial.
+  //
+  // Sólo se reintentan eventos que NOSOTROS MISMOS empezamos a procesar y nunca terminamos (fila
+  // propia en za_webhook_events, con lease vencido) - nunca "conversaciones que se ven viejas"
+  // desde la lista de Zavu. Esa alternativa se descartó a propósito: Zavu no ve los mensajes que
+  // el dueño manda desde su propio WhatsApp (comprobado 08-09-2026), así que una conversación que
+  // el dueño ya atendió a mano se ve igual de "sin contestar" del lado de Zavu para siempre - una
+  // recuperación basada en eso le habría mandado a esa paciente una respuesta duplicada del bot
+  // horas después de que Francisco ya la atendió.
+  //
+  // Por eso el webhook en vivo ahora deja el mensaje crudo (teléfono, texto, nombre de perfil)
+  // guardado en el propio evento ANTES de seguir (ver checkpointZavuEvent con inbound_raw más
+  // arriba): si el resto del turno nunca termina, acá se retoma exactamente desde ese punto,
+  // usando el mismo mecanismo de lease que ya protege contra procesar dos veces lo mismo -  si
+  // Zavu además reintenta el mismo webhook mientras tanto, sólo uno de los dos gana el lease.
+  async function recoverMissedZavuReplies(limit = 5) {
+    if (!agendaUsesSupabase()) return { checked: 0, recovered: 0 };
+    const stuck = await agendaSupabaseRequest(
+      `/rest/v1/za_webhook_events?status=eq.processing&source=eq.zavu&event_type=eq.message.inbound`
+      + `&lease_expires_at=lt.${encodeURIComponent(new Date().toISOString())}`
+      + `&select=event_id,reply&order=received_at.asc&limit=${limit}`
+    ).catch(() => null);
+    if (!stuck) return { checked: 0, recovered: 0, error: 'list_failed' };
+    let checked = 0; let recovered = 0; let unrecoverable = 0;
+    for (const row of stuck) {
+      checked += 1;
+      const eventId = row.event_id;
+      const claim = await claimZavuEvent(eventId, 'message.inbound').catch(() => null);
+      // No se pudo re-adquirir: alguien más (una reentrega real de Zavu, u otra pasada de esta
+      // misma recuperación) ya lo está procesando o ya lo terminó. No hay nada que hacer acá.
+      if (!claim?.acquired) continue;
+      const raw = claim.reply?.inbound_raw;
+      if (!raw?.phone || !raw?.text) {
+        // Murió ANTES de guardar el mensaje crudo (ventana angosta: entre adquirir el lease y la
+        // validación de teléfono/texto). No hay cómo reconstruirlo - se marca 'failed' para que
+        // dejar de aparecer eternamente como "processing" en vez de quedar trabado para siempre.
+        await completeZavuEvent(eventId, claim.lease_token, 'failed', {}, 'sin inbound_raw checkpointeado, no se pudo recuperar');
+        unrecoverable += 1;
+        continue;
+      }
+      const callerPhone = String(raw.phone);
+      const callerProfileName = String(raw.profile_name || '');
+      const message = String(raw.text);
+      try {
+        let conversation = await getOrCreateConversation('whatsapp', callerPhone, callerProfileName);
+        const inboundKey = `zavu:in:${String(raw.message_id || eventId)}`.slice(0, 240);
+        let inbound = await findConversationMessageByClientId(inboundKey);
+        if (!inbound) {
+          inbound = await appendConversationMessage(conversation?.id, 'inbound', message, {}, {
+            senderType: 'human', deliveryStatus: 'delivered', clientMessageId: inboundKey, providerMessageId: raw.message_id || null
+          });
+        }
+        const agentControl = await getAgentControl();
+        if (agentControl.control.mode === 'paused') {
+          await completeZavuEvent(eventId, claim.lease_token, 'ignored', { paused: true, recovered_late: true });
+          continue;
+        }
+        conversation = await reclaimStaleHandoff(conversation);
+        if (conversation?.status === 'handoff') {
+          await completeZavuEvent(eventId, claim.lease_token, 'ignored', { handoff: true, suppressed: true, recovered_late: true });
+          continue;
+        }
+        if (conversation?.za_customers?.bot_muted) {
+          await completeZavuEvent(eventId, claim.lease_token, 'ignored', { muted: true, recovered_late: true });
+          continue;
+        }
+        const operationKey = `zavu:${eventId}`.slice(0, 240);
+        let reply = claim.reply?.agent_reply;
+        const generatedNow = !reply?.text;
+        if (generatedNow) {
+          const history = await loadConversationHistory(conversation?.id, 20, { excludeClientMessageId: inboundKey });
+          reply = await answerWithConfiguredAi(message, {
+            callerPhone, conversationId: conversation?.id || raw.message_id || eventId, history,
+            messageId: operationKey, operationKey, allowSilence: historyAllowsSilence(history)
+          });
+          if (!(await checkpointZavuEvent(eventId, claim.lease_token, { agent_reply: reply }))) throw new Error('Se perdió el lease antes de guardar la respuesta recuperada.');
+          await recordUsage({
+            provider: reply.provider, model: reply.model || 'deterministic', inputTokens: reply.usage?.inputTokens || 0,
+            outputTokens: reply.usage?.outputTokens || 0, source: 'zavu_whatsapp_recovery', conversationRef: eventId
+          }).catch(() => null);
+        }
+        if (conversation && !conversation.customer_id) await getOrCreateConversation('whatsapp', callerPhone, callerProfileName);
+        if (reply.silent) {
+          await completeZavuEvent(eventId, claim.lease_token, 'completed', { inbound_message_id: inbound?.id || null, silent: true, silent_reason: reply.silentReason || '', recovered_late: true });
+          recovered += 1;
+          continue;
+        }
+        const outboundKey = `zavu:out:${eventId}`.slice(0, 240);
+        let outbound = await findConversationMessageByClientId(outboundKey);
+        if (outbound && outbound.content !== reply.text) throw new Error('La operación ya tiene otra respuesta persistida.');
+        if (!outbound) {
+          outbound = await appendConversationMessage(conversation?.id, 'outbound', reply.text, { tools: reply.toolTrace || [] }, {
+            senderType: 'agent', deliveryStatus: 'sending', clientMessageId: outboundKey
+          });
+        }
+        if (!['queued', 'sent', 'delivered', 'read'].includes(outbound?.delivery_status)) {
+          const provider = zavuProviderMessage(await sendZavuWhatsApp(callerPhone, reply.text, {
+            idempotencyKey: outboundKey, imageUrl: reply.imageUrl || ''
+          }));
+          outbound = await updateConversationMessageDelivery({
+            id: outbound?.id, providerMessageId: provider.id,
+            status: ['queued', 'sent', 'delivered', 'read'].includes(provider.status) ? provider.status : 'sent', failureReason: ''
+          }) || outbound;
+        }
+        if (reply.handoff || reply.ownerAlert) {
+          await createHandoffTicket(packageData, {
+            channel: 'whatsapp', conversationId: callerPhone, customerMessage: message, agentReply: reply.text,
+            customerName: conversation?.za_customers?.full_name || '',
+            conversationUuid: conversation?.id || '', customerId: conversation?.customer_id || '',
+            alertReason: reply.handoff ? (reply.handoffReason || '') : (reply.ownerAlert || ''),
+            kind: reply.handoff ? 'handoff' : 'owner_alert',
+            reason: reply.handoff
+              ? `Traspaso pedido por el agente: ${reply.handoffReason || 'el cliente pidio una persona o el tema no es del negocio'}`
+              : `Duda del cliente (el agente sigue atendiendo): ${reply.ownerAlert}`,
+            operationKey: `${operationKey}:handoff-ticket`
+          }).catch(error => console.error('recuperación: no se pudo crear ticket de handoff:', error.message));
+        }
+        if (reply.handoff) await dispatchAgendaOutbox(packageData).catch(() => null);
+        await completeZavuEvent(eventId, claim.lease_token, 'completed', {
+          inbound_message_id: inbound?.id || null, outbound_message_id: outbound?.id || null,
+          provider_message_id: outbound?.provider_message_id || null, recovered_late: true
+        });
+        recovered += 1;
+      } catch (error) {
+        await completeZavuEvent(eventId, claim.lease_token, 'failed', {}, error.message).catch(() => {});
+        console.error('recuperación de mensaje perdido falló para', callerPhone, error.message);
+      }
+    }
+    return { checked, recovered, unrecoverable };
+  }
+
+  if (req.method === 'GET' && pathname === '/api/agenda/recover-missed-replies') {
+    const secret = process.env.CRON_SECRET;
+    if (!secret || req.headers.authorization !== `Bearer ${secret}`) return json(res, 401, { error: 'No autorizado.' });
+    const result = await recoverMissedZavuReplies(5).catch(error => ({ checked: 0, recovered: 0, error: error.message }));
+    return json(res, 200, { ran: true, ...result });
+  }
+
   // Vercel Cron llama esta ruta cada hora en punto (UTC) — nunca fijamos una hora UTC fija acá
   // porque Chile cambia de horario dos veces al año (America/Santiago: UTC-4 en invierno, UTC-3
   // en verano) y una hora UTC fija quedaría desfasada 1h medio año. En cambio, se recalcula la
@@ -784,7 +926,14 @@ export async function handleRequest(req, res) {
       console.error('cron nombres de WhatsApp falló:', error.message);
       return { updated: 0, error: error.message };
     });
-    if (chileHour !== 7) return json(res, 200, { ran: false, reason: 'not_the_hour', chileHour, profileNames });
+    // Corre en TODAS las pasadas horarias, no sólo a las 7am — es la red de seguridad de
+    // mensajes que el webhook en vivo nunca llegó a contestar (ver recoverMissedZavuReplies).
+    // Una hora de espera en el peor caso es mucho mejor que nunca.
+    const recovery = await recoverMissedZavuReplies(5).catch(error => {
+      console.error('cron recuperación de mensajes falló:', error.message);
+      return { checked: 0, recovered: 0, error: error.message };
+    });
+    if (chileHour !== 7) return json(res, 200, { ran: false, reason: 'not_the_hour', chileHour, profileNames, recovery });
     try {
       const result = await syncGoogleContacts(packageData);
       return json(res, 200, { ran: true, result, profileNames });
@@ -1040,6 +1189,14 @@ export async function handleRequest(req, res) {
         await completeZavuEvent(eventId, claim.lease_token, 'ignored', { ignored: 'rate_limited' });
         return json(res, 200, { ok: true, ignored: 'rate_limited' });
       }
+      // Guarda el mensaje crudo ANTES de seguir: si el resto del turno nunca termina (encontrado
+      // real, franciskom, 12-09-2026 — el evento quedó "processing" para siempre y la paciente
+      // nunca recibió respuesta), el evento queda con todo lo necesario para que
+      // recoverMissedZavuReplies pueda terminar el trabajo después, sin depender de Zavu
+      // reentregando el mismo webhook.
+      await checkpointZavuEvent(eventId, claim.lease_token, {
+        inbound_raw: { phone: callerPhone, profile_name: callerProfileName, text: message, message_id: event.data?.messageId || '' }
+      });
       let conversation = await getOrCreateConversation('whatsapp', callerPhone, callerProfileName);
       const inboundKey = `zavu:in:${String(event.data?.messageId || eventId)}`.slice(0, 240);
       const inbound = await appendConversationMessage(conversation?.id, 'inbound', message, {}, {

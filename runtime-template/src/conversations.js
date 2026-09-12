@@ -63,13 +63,18 @@ export async function getOrCreateConversation(channel, externalId, profileName =
 // y recibió tres presentaciones distintas del "kinesiólogo".
 // El turno espera unos segundos y, si en ese rato entró otro mensaje del mismo cliente, se calla:
 // contesta el último evento, que ya tiene los tres mensajes en su historial.
-// El valor por defecto se midió sobre la conversación real de franciskom (356 pausas entre
-// mensajes seguidos de un mismo cliente, 08→11-09-2026): la mediana es 12 s, y los 7 s originales
-// cubrían sólo el 34 % de los casos — de ahí las 6 respuestas dobles de la primera semana. 20 s
-// cubre el 67 % sin que la espera se sienta como abandono.
+// El valor se midió sobre la conversación real de franciskom (356 pausas entre mensajes seguidos
+// de un mismo cliente, 08→11-09-2026): la mediana es 12 s, y los 7 s originales cubrían sólo el
+// 34 % de los casos — de ahí las 6 respuestas dobles de la primera semana. Pero Zavu documenta
+// explícitamente "responde en menos de 30 segundos, procesa async" (webhook-setup skill), y esta
+// espera bloquea la respuesta HTTP del webhook ANTES de generar la respuesta (que mide otros
+// 5-15 s más) — con 20 s de espera, un mensaje real quedó atascado sin contestar nunca (12-09-2026,
+// evento de Supabase trabado en "processing" para siempre, ver recoverMissedZavuReplies en
+// server.js). 12 s cubre la mitad de las pausas reales dejando margen bajo el límite documentado;
+// la red de seguridad (recoverMissedZavuReplies) cubre lo que igual se pase de largo.
 export function inboundDebounceMs() {
-  const configured = Number(process.env.INBOUND_DEBOUNCE_MS ?? 20_000);
-  return Math.max(0, Math.min(45_000, Number.isFinite(configured) ? configured : 20_000));
+  const configured = Number(process.env.INBOUND_DEBOUNCE_MS ?? 12_000);
+  return Math.max(0, Math.min(20_000, Number.isFinite(configured) ? configured : 12_000));
 }
 
 export async function supersededByNewerInbound(conversationId, afterIso) {

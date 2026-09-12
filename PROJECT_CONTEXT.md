@@ -1783,3 +1783,46 @@ contestarle más a esta persona** (`bot_muted`), más el reverso de cada una. Si
 **Lo que esto cierra:** Francisco ya no necesita la pausa global para meterse con un paciente (era
 lo que lo dejaba mudo 16 horas), y el aviso dejó de decirle "entra a tu consola" — que es
 exactamente lo que él dijo que no iba a hacer nunca.
+
+### Mensaje real perdido: el webhook se pasaba del límite de Zavu · 12-09-2026 (mismo día, incidente real)
+
+Francisco mandó captura de una conversación donde el bot **no respondió del todo** a una paciente
+(Guicela) que preguntaba por hora — y Francisco tuvo que meterse a mano, sin las preguntas del
+método comercial. Se investigó a fondo antes de tocar nada.
+
+**Causa confirmada (no es la herramienta de silencio nueva — ese día se activó bien, en otra
+conversación):** el 3er mensaje de Guicela quedó con su evento de `za_webhook_events` trabado en
+`processing` para siempre — **nunca se guardó en nuestro propio historial ni se generó respuesta**.
+Zavu documenta explícito ("webhook-setup" skill): *"Return 200 quickly — respond within 30
+seconds, process async"*. El webhook de este runtime bloqueaba la respuesta HTTP durante TODO el
+`debounce` (subido hoy mismo de 7 a 20 s, ver entrada de arriba) más 5-15 s de generación del LLM —
+podía pasarse fácil de los 30 s. No se pudo confirmar el mecanismo exacto por Vercel (los logs de
+esa invocación puntual ya no estaban disponibles vía API), pero la evidencia (mensaje nunca ni
+siquiera guardado, sin reintento posterior) apunta ahí con fuerza.
+
+**Dos fixes, ninguno agrega costo de infraestructura (importante: a Francisco no se le cobra
+mantención por eso, así que nada de crons nuevos ni servicios extra):**
+1. **Debounce 20 s → 12 s** — sigue cubriendo la mitad de las pausas reales entre mensajes seguidos
+   de un mismo cliente, con más margen bajo el límite de Zavu.
+2. **Red de recuperación**, corre dentro del cron horario que ya existía (cero llamadas nuevas a
+   Vercel): el webhook ahora guarda el mensaje crudo (teléfono, texto, nombre) apenas lo valida,
+   ANTES de seguir — así si el resto del turno no termina, queda todo lo necesario para
+   terminarlo después. El cron busca eventos trabados en `processing` con el lease vencido, los
+   vuelve a tomar con la MISMA función atómica que usa el tráfico real (si Zavu también reintenta
+   el mismo mensaje al mismo tiempo, sólo uno de los dos gana), y termina el trabajo: genera,
+   guarda y manda la respuesta que nunca salió. Un evento que murió ANTES de guardar el mensaje
+   crudo (ventana angosta) se marca `failed` en vez de quedar trabado para siempre.
+   - **Deliberadamente NO se basa en "conversaciones que se ven sin contestar" desde la lista de
+     Zavu** — se descartó ese diseño a propósito: Zavu no ve los mensajes que Francisco manda desde
+     su propio teléfono (hueco ya documentado, 08-09-2026), así que una conversación que él ya
+     atendió a mano se ve "sin contestar" para siempre del lado de Zavu. Con ese diseño, la
+     recuperación le habría mandado a Guicela una respuesta duplicada del bot, horas después de que
+     Francisco ya la atendió — un bug nuevo reemplazando al viejo. Sólo se reintentan eventos que
+     el propio sistema empezó a procesar y no terminó.
+
+**Verificado de punta a punta en local, sin gastar un solo mensaje real:** un evento viejo (de
+antes del fix, sin el mensaje crudo guardado) se marcó `failed` limpio en vez de seguir trabado; un
+evento simulado CON el mensaje crudo se volvió a tomar, reconstruyó el teléfono/texto, generó una
+respuesta sensata, la guardó, e intentó mandarla — falló ahí sólo porque el ambiente de prueba
+local no tenía las claves de WhatsApp a propósito. Ya en producción real, `franciskom.cl` respondió
+`{checked:0, recovered:0, unrecoverable:0}` — nada atorado.
