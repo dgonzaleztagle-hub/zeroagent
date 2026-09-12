@@ -1596,3 +1596,146 @@ las respuestas literales.
 **Medición final: 26/26** — los nueve bloques literales con sus variaciones, más las conversaciones
 que NO deben disparar ninguno (saludo, relato de dolor, disponibilidad real, derivación, urgencia,
 cobertura a domicilio).
+
+### Análisis de la primera semana real (08-09 22:04 → 11-09) · 11-09-2026
+
+Francisco reportó que el bot "le hace handoff a cada rato con un me duele el cuello". Se leyeron
+las 72 conversaciones completas (Supabase `za_conversation_messages` con `tool_trace` + Zavu
+`/v1/conversations`) y los 788 eventos de webhook. **Sólo análisis, nada cambiado todavía.**
+Datos crudos y script de lectura en el scratchpad de la sesión (no versionado).
+
+**Números:** ~100 respuestas del bot; **2 reservas de punta a punta** (Constanza Campos, atendida
+el 11-09 17:00 y feliz; Camilo Arenas, lunes 14-09 18:00) — las dos en conversaciones SIN
+derivación. **20 derivaciones reales** por WhatsApp; descontando a Daniel y a la señora de
+Francisco quedan 18, y **~9 eran pacientes comunes con dolor** que el bot debió llevar a hora:
+"dolor de cuello y espalda" + "Siii", lordosis post-operación (2 tickets), lupus, "camino más
+agachada", **"requiero ajuste completo"** (pedía hora explícitamente), "problemas a la columna",
+"espalda, cervical y brazos", "cuello y cadera, tengo 43, soy joven", paciente que pide domicilio
+para su hijo. Justificadas: Peñaflor fuera de zona, dedos dormidos (según la regla actual), el
+bromista del "mes completo", Tania de Eleva mandando agenda, una colega derivando paciente, y el
+domicilio que Francisco ya coordinaba. Varios de los derivados terminaron agendando igual, con
+Francisco haciendo a mano la indagación que era pega del bot.
+
+**Causa raíz de la sobre-derivación (en `agent-package.json` del repo real):**
+1. El `system_prompt` abre con "PRIMERO, ANTES DE CUALQUIER OTRA COSA… Ninguna otra instrucción de
+   este prompt aplica antes que esta" y lista "dolor que se irradia" — con esa prioridad máxima el
+   modelo lee "brazos", "cadera y pierna", "hernia", "operación" o "lupus" como urgencia.
+2. La descripción de `request_human_handoff` dice "cuando… hay un problema real": para el modelo,
+   todo paciente con dolor tiene un problema real.
+3. `confirmed_facts[0]` todavía dice "habla en primera persona como el profesional (Francisco…)",
+   contradiciendo IDENTIDAD, y repite la regla de urgencia por segunda vez.
+4. Después de indagar no hay una salida de acción explícita (llamar `get_availability` y ofrecer
+   hora): el modelo elige entre "ofrecer evaluación" y "derivar", y deriva la mayoría de las veces.
+5. La derivación deja la conversación en `handoff` 12 h: el paciente que después pregunta precio o
+   días (Ariana 4 veces, Angela, César, "~") no recibe respuesta si Francisco no contesta.
+
+**Otros defectos observados en real:**
+- **Historial con huecos:** Francisco contesta desde su teléfono y Zavu no lo ve, así que el
+  historial que recibe el modelo tiene preguntas "sin responder". Bele escribe "Ya llegué" y el bot
+  le manda el bloque de precios (contestando su pregunta de la noche anterior, que Francisco ya
+  respondió). A Constanza le contestó la dirección que pidió la noche anterior.
+- **Respuestas dobles:** 6 casos (Coté, César, Gloria, Marcela Rojas, Camilo, "~"). El debounce de
+  7 s cubre sólo el 34 % de las pausas reales entre líneas de un mismo paciente (mediana 12 s;
+  20 s cubre 67 %, 30 s cubre 78 %). Además no se re-chequea "llegó otro mensaje" justo antes de
+  enviar, y la generación tarda 5-13 s.
+- **Literales mal disparados:** "Ya llegué" → precios; "tengo hernias, ¿se puede quiropráctico?"
+  → precios; "prefiero evaluación en el box Buin" → precios (debía buscar hora); "¿tú ves dolor
+  crónico?" y "queremos sesión de quiropráctico" → cómo es la sesión. Y como el literal corta el
+  turno, las otras partes de la pregunta se pierden (Claudia: duración/hasta qué hora; Constanza:
+  medios de pago).
+- **Audios e imágenes descartados en silencio:** 23 audios y 13 imágenes desde la activación caen
+  en `no_text_or_sender` — ni respuesta ni registro en la consola (Paciente Gloria Galaz mandó 4
+  audios el 11-09).
+- **Falso positivo del guard de mutaciones:** Gloria pregunta "¿anda en Santiago?" y recibe "No pude
+  confirmar esa operación de forma segura. No hice cambios en tu reserva." — el texto de respaldo
+  es el mismo para cualquier herramienta bloqueada.
+- **Contactos personales:** su familia recibe "este mensaje parece ser una coordinación personal…
+  puedo avisarle al equipo" (Natali Figueroa, cuota de Papudo). Suena a robot con la familia.
+- **SMS de derivación:** 20 enviados en 3 días; **saldo Zavu US$1,09** del crédito mensual de US$2
+  (leído por `/v1/balance` el 11-09). Al ritmo actual se acaba en 2-3 días y los avisos dejan de
+  llegar. El SMS dice "un cliente pide hablar contigo" aunque el cliente no lo pidió, con un
+  fragmento inútil ("Soy joven", "Siii"); dos tickets duplicados cobraron dos SMS; y el `reason`
+  que pasa el modelo no se guarda (todos dicen "Derivación automática del agente").
+- **Francisco usa la pausa global como herramienta de trabajo:** 4 pausas, la más larga
+  10-09 15:51 → 11-09 08:03 (~16 h); 185 mensajes cayeron en pausa. **Al cierre del análisis el
+  bot está PAUSADO** (`za_agent_controls.updated_at` 11-09 15:58 hora Chile).
+
+### Francisco define la regla: el agente es comercial, no un triaje · 12-09-2026
+
+Francisco contestó el análisis de arriba y su respuesta cambia el criterio de raíz — **la
+intervención suya no depende de la gravedad del caso, sino del nivel de duda del paciente**:
+
+- **Ante cualquier cuadro, el agente avanza la conversación** con sus tres preguntas (hace cuánto
+  está con el dolor, si tiene diagnóstico médico o exámenes de imagen, si hizo algún tratamiento
+  antes) y remata con "Francisco prefiere no aventurarse a darte un diagnóstico y prefiere
+  evaluarte, ¿quieres que veamos una hora?". Textual suyo: esas preguntas "ponen al paciente en
+  contexto de que necesita el tratamiento", y el remate "lleva al paciente a que tome la decisión".
+- **Cuando entra él es porque el paciente duda del tratamiento**, no porque el caso sea grave: ahí
+  manda un audio explicando qué cree que tiene y cómo tratarlo, y cierra la venta agendando. De ahí
+  que la opción intermedia (avisarle sin dejar de atender) sea la adecuada para todos los casos.
+- **Las urgencias no cancelan la venta.** Daniel lo dejó explícito: existirán urgencias donde el
+  agente puede sugerir ir a urgencia, pero eso no quita que siga llevando al cierre de la hora.
+- **Audios: no se toca nada.** Está siempre atento a su WhatsApp y los escucha él.
+- **No va a usar la consola, y no es un problema de costumbre:** responde manejando o con su bebé
+  en brazos, y desde hace un tiempo dicta los mensajes por micrófono en vez de escribirlos. Entrar
+  a la app por cada mensaje no le sirve. Todo lo que se diseñe asumiendo que él entra a la consola
+  está muerto de antemano: los avisos tienen que llegar con el número del paciente para que abra el
+  chat de un toque, y el agente no puede quedarse esperando que él "tome" la conversación ahí.
+
+### Curación implementada y medida · 12-09-2026
+
+Medido con los casos REALES de la semana (26 conversaciones reconstruidas, 3 repeticiones cada una,
+contra gpt-4o-mini y el Supabase real; a nivel de engine, sin crear tickets ni mandar SMS):
+**la versión desplegada daba 16/26 y la nueva da 71/78**. Los 16 casos clínicos que la semana
+pasada terminaban en derivación ahora no derivan ni una sola vez.
+
+- **Dos herramientas en vez de una.** `request_human_handoff` (calla al agente en ese hilo) queda
+  sólo para tres casos: pide hablar con una persona, tema ajeno/de un tercero, o algo fuera de lo
+  que el negocio cumple. La nueva `avisar_al_dueno` avisa sin interrumpir la atención — es la
+  opción intermedia que pidió Francisco. Mientras hubo una sola herramienta descrita como "cuando
+  hay un problema real", el modelo la usaba con cualquier paciente con dolor.
+- **El prompt del paquete pasó a ser el método comercial** (y quedó más corto: 503 → ~400
+  palabras). Se eliminó el bloque "PRIMERO, ANTES DE CUALQUIER OTRA COSA… ninguna otra instrucción
+  aplica antes que esta" y el `confirmed_facts[0]` que todavía mandaba hablar en primera persona
+  como Francisco. Los disparadores de herramienta quedaron POSITIVOS ("pide hablar con una
+  persona → llama la de traspaso"), no como prohibiciones.
+- **Lección repetida, medida otra vez:** la primera versión del prompt nuevo era larga y correcta,
+  y **apagó el tool-calling** — los bloques literales dejaron de dispararse (el de precios cayó a
+  0/1) y el traspaso legítimo también. Lo mismo pasó con una línea que agregué a `AGENDA_BEHAVIOR`
+  ("nunca cierres un mensaje sin próximo paso"): con ella, el bloque respiratorio fallaba 3/3 y el
+  agente redactaba el precio a mano — una vez incluso mal ($36.000 + $6.000). Reescrita para ceder
+  el paso a las respuestas oficiales, volvió a 3/3.
+- **El aviso al dueño se ejecuta, no se anuncia.** El modelo escribía "voy a avisar a Francisco"
+  sin llamar la herramienta, 3 de 3 veces. Se resolvió por los dos lados: el prompt dice que
+  decirlo no avisa a nadie, y `validateMutationClaims` ahora también bloquea la promesa en futuro
+  (antes sólo cazaba la afirmación en pasado). Con eso, 3/3 llamando la herramienta.
+- **El SMS ahora dice con quién hablar:** nombre y número del paciente primero, el motivo real que
+  dio el modelo después, y el link a la consola al final (antes decía "un cliente pide hablar
+  contigo" con un fragmento inútil y el link primero). Un solo aviso por contacto por hora
+  (`OWNER_ALERT_DEDUPE_MINUTES`), que era lo que cobraba dos SMS por el mismo caso.
+- **El motivo del modelo se guarda en el ticket.** Todos decían "Derivación automática del
+  agente", así que la Bandeja no servía para entender por qué derivó.
+- **Respuestas dobles:** espera de 7 s → 20 s (`INBOUND_DEBOUNCE_MS`), y se agregó un segundo
+  chequeo de "llegó otro mensaje" DESPUÉS de generar la respuesta, que es donde se colaban (el LLM
+  se demora 5-15 s más).
+- **Historial con huecos:** `loadConversationHistory` marca con una nota de sistema los mensajes
+  del cliente que quedaron sin respuesta y tienen más de 15 min (`OWNER_HANDLED_AFTER_MS`), para
+  que el agente no conteste preguntas que Francisco ya resolvió por teléfono — el caso de "ya
+  llegué" contestado con la lista de precios.
+- **Mensaje de error por herramienta:** el "no hice cambios en tu reserva" ya no sale cuando lo
+  bloqueado era un aviso ("todavía no dejé ese aviso, ¿quieres que le pida al equipo que te
+  escriba?").
+- **Quedan 2 casos medidos que NO se logran** (el texto que manda es correcto, pero no dispara la
+  herramienta): domicilio fuera de zona (Peñaflor) declina y ofrece Box Buin, pero no avisa a
+  Francisco — se pierde el dato de un lead que quizás pagaría el traslado; y el mensaje de Tania de
+  Eleva mandando la agenda se trata como si fuera una paciente (ese contacto está silenciado en
+  producción, así que hoy no tiene efecto). Los dos siguen en la batería como fallas conocidas.
+- **Lo que NO se tocó, por decisión de Francisco:** los audios (los escucha él) y cualquier flujo
+  que dependa de que entre a la consola.
+
+**Sigue pendiente:** el eco de coexistencia de Meta/Zavu (única vía para que el agente se calle
+solo cuando Francisco responde desde su teléfono — quedó esperando su captura de
+business.facebook.com), el crédito de SMS (Daniel lo deja así y evalúa pasar los avisos a correo
+cuando Francisco tenga tiempo), y que **Studio no puede regenerar este paquete**: su Supabase
+(`nbjujqodjvhbxvvlfdfs`) sigue caído, así que el prompt corregido vive en el repo desplegado y en
+`runtime-template/`. Si algún día Studio vuelve, hay que subirle esta versión antes de rebuildear.

@@ -30,7 +30,7 @@ async function ensureCustomerIdByPhone(phone, profileName = '') {
 
 export async function getOrCreateConversation(channel, externalId, profileName = '') {
   if (!agendaUsesSupabase()) return null;
-  const filter = `/rest/v1/za_conversations?channel=eq.${encodeURIComponent(channel)}&external_id=eq.${encodeURIComponent(externalId)}&select=id,status,customer_id,za_customers(bot_muted)`;
+  const filter = `/rest/v1/za_conversations?channel=eq.${encodeURIComponent(channel)}&external_id=eq.${encodeURIComponent(externalId)}&select=id,status,customer_id,za_customers(full_name,bot_muted)`;
   const existing = await agendaSupabaseRequest(filter);
   let conversation = existing?.[0];
   if (!conversation) {
@@ -47,7 +47,7 @@ export async function getOrCreateConversation(channel, externalId, profileName =
       // select= en el PATCH pide el mismo embed de za_customers que la lectura inicial — si no,
       // la representación devuelta no trae bot_muted y un contacto ya silenciado antes de su
       // primer mensaje en esta conversación quedaría sin ese dato (el bot le respondería igual).
-      const updated = await agendaSupabaseRequest(`/rest/v1/za_conversations?id=eq.${encodeURIComponent(conversation.id)}&select=id,status,customer_id,za_customers(bot_muted)`, {
+      const updated = await agendaSupabaseRequest(`/rest/v1/za_conversations?id=eq.${encodeURIComponent(conversation.id)}&select=id,status,customer_id,za_customers(full_name,bot_muted)`, {
         method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ customer_id: customerId })
       }).catch(() => null);
       if (updated?.[0]) conversation = updated[0];
@@ -63,9 +63,13 @@ export async function getOrCreateConversation(channel, externalId, profileName =
 // y recibió tres presentaciones distintas del "kinesiólogo".
 // El turno espera unos segundos y, si en ese rato entró otro mensaje del mismo cliente, se calla:
 // contesta el último evento, que ya tiene los tres mensajes en su historial.
+// El valor por defecto se midió sobre la conversación real de franciskom (356 pausas entre
+// mensajes seguidos de un mismo cliente, 08→11-09-2026): la mediana es 12 s, y los 7 s originales
+// cubrían sólo el 34 % de los casos — de ahí las 6 respuestas dobles de la primera semana. 20 s
+// cubre el 67 % sin que la espera se sienta como abandono.
 export function inboundDebounceMs() {
-  const configured = Number(process.env.INBOUND_DEBOUNCE_MS ?? 7_000);
-  return Math.max(0, Math.min(30_000, Number.isFinite(configured) ? configured : 7_000));
+  const configured = Number(process.env.INBOUND_DEBOUNCE_MS ?? 20_000);
+  return Math.max(0, Math.min(45_000, Number.isFinite(configured) ? configured : 20_000));
 }
 
 export async function supersededByNewerInbound(conversationId, afterIso) {
@@ -105,16 +109,47 @@ export async function syncWhatsappProfileNames(options = {}) {
   return { updated, checked: names.length };
 }
 
+// Cuánto rato hacia atrás cuenta como "lo que el cliente está diciendo ahora". Todo mensaje del
+// cliente más viejo que esto, que quedó sin respuesta del agente, se marca como ya atendido por el
+// dueño (ver OWNER_HANDLED_NOTE).
+function ownerHandledCutoffMs() {
+  const configured = Number(process.env.OWNER_HANDLED_AFTER_MS ?? 15 * 60_000);
+  return Math.max(60_000, Number.isFinite(configured) ? configured : 15 * 60_000);
+}
+
+// El dueño contesta desde la app de WhatsApp de su teléfono y el canal NO nos entrega esos envíos
+// (comprobado con Zavu el 08-09-2026: cero eventos message.sent, cero mensajes outbound). El
+// historial que ve el modelo queda entonces con preguntas del cliente aparentemente sin responder,
+// y el modelo las contesta tarde: caso real (franciskom, 09-09-2026) una paciente escribió "ya
+// llegué" y recibió la lista de precios, porque su pregunta de la noche anterior —que el dueño ya
+// había respondido por teléfono— seguía "abierta" en el historial. Esta nota le dice al modelo que
+// esa parte ya está resuelta y que sólo conteste lo último.
+const OWNER_HANDLED_NOTE = 'Nota del sistema: los mensajes anteriores del cliente ya fueron atendidos por el negocio por otra vía (el dueño responde también desde su teléfono y esas respuestas no aparecen en este historial). Son sólo contexto: no los vuelvas a responder ni retomes preguntas de ahí. Responde únicamente los mensajes que vienen después de esta nota.';
+
 export async function loadConversationHistory(conversationId, limit = 20, options = {}) {
   if (!agendaUsesSupabase() || !conversationId) return [];
   const safeLimit = Math.max(1, Math.min(50, Number(limit) || 20));
-  const rows = await agendaSupabaseRequest(`/rest/v1/za_conversation_messages?conversation_id=eq.${encodeURIComponent(conversationId)}&select=direction,content,client_message_id&order=created_at.desc&limit=${safeLimit + 1}`);
+  const rows = await agendaSupabaseRequest(`/rest/v1/za_conversation_messages?conversation_id=eq.${encodeURIComponent(conversationId)}&select=direction,content,client_message_id,created_at&order=created_at.desc&limit=${safeLimit + 1}`);
   const exclude = String(options.excludeClientMessageId || '');
-  return (rows || [])
+  const ordered = (rows || [])
     .filter(item => !exclude || item.client_message_id !== exclude)
     .slice(0, safeLimit)
-    .reverse()
-    .map(item => ({ role: item.direction === 'inbound' ? 'user' : 'assistant', content: item.content }));
+    .reverse();
+  const history = [];
+  const cutoff = Date.now() - ownerHandledCutoffMs();
+  // Sólo interesa la racha final sin respuesta: si después de un mensaje del cliente el agente
+  // contestó, esa parte de la conversación está cerrada y no hay nada que marcar.
+  let lastAgentReplyIndex = -1;
+  ordered.forEach((item, index) => { if (item.direction !== 'inbound') lastAgentReplyIndex = index; });
+  let noteInsertedAfter = -1;
+  ordered.forEach((item, index) => {
+    if (index > lastAgentReplyIndex && Date.parse(item.created_at || '') < cutoff) noteInsertedAfter = index;
+  });
+  ordered.forEach((item, index) => {
+    history.push({ role: item.direction === 'inbound' ? 'user' : 'assistant', content: item.content });
+    if (index === noteInsertedAfter) history.push({ role: 'system', content: OWNER_HANDLED_NOTE });
+  });
+  return history;
 }
 
 export async function findConversationMessageByClientId(clientMessageId) {

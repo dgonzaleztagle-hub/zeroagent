@@ -90,7 +90,13 @@ const MUTATION_CLAIMS = [
       claimPattern(`${IMMEDIATE_NEGATION}\\b(?:derive|escale|pase|traspase)\\b.{0,60}\\b(?:tu caso|tu consulta|la conversacion)\\b`),
       claimPattern(`${IMMEDIATE_NEGATION}\\b(?:avise|notifique)\\b.{0,60}\\b(?:equipo|persona|humano|humana|francisco)\\b`),
       claimPattern(`\\b(?:tu caso|tu consulta|la conversacion)\\b(?!.{0,30}\\b(?:no|nunca)\\b).{0,60}\\b(?:derivad[ao]|escalad[ao]|traspasad[ao])\\b`),
-      claimPattern(`\\b(?:el equipo|francisco|una persona|un humano|una humana)\\b(?!.{0,30}\\b(?:no|nunca)\\b).{0,60}\\b(?:avisad[ao]|notificad[ao])\\b`)
+      claimPattern(`\\b(?:el equipo|francisco|una persona|un humano|una humana)\\b(?!.{0,30}\\b(?:no|nunca)\\b).{0,60}\\b(?:avisad[ao]|notificad[ao])\\b`),
+      // La promesa en futuro es el mismo problema que la afirmación en pasado: "voy a avisarle a
+      // Francisco" sin llamar la herramienta deja al cliente esperando a alguien que nunca supo
+      // de él. Medido el 12-09-2026 sobre un cliente dudando: el modelo anunciaba el aviso en el
+      // texto y no ejecutaba nada, 3 de 3 veces.
+      claimPattern(`\\bvoy a (?:avisar|avisarle|derivar|derivarte|escalar|pasar|traspasar|comunicar)\\b.{0,60}\\b(?:equipo|persona|humano|humana|dueno|francisco)\\b`),
+      claimPattern(`\\b(?:le avisare|le aviso|les aviso|avisare)\\b.{0,60}\\b(?:equipo|persona|dueno|francisco)\\b`)
     ]
   },
   {
@@ -131,7 +137,12 @@ function claimHasEvidence(claim, toolTrace) {
   if (claim.evidence === 'created') return successfulAction(toolTrace, 'create_appointment', ['created']);
   if (claim.evidence === 'cancelled') return successfulAction(toolTrace, 'cancel_appointment', ['cancelled']);
   if (claim.evidence === 'rescheduled') return successfulAction(toolTrace, 'reschedule_appointment', ['rescheduled']);
-  if (claim.evidence === 'handoff') return successfulAction(toolTrace, 'request_human_handoff', ['handoff_requested']);
+  // Decir "le avisé al equipo" es cierto tanto si traspasó la conversación como si sólo pidió el
+  // aviso blando al dueño: las dos herramientas son evidencia válida de esa afirmación.
+  if (claim.evidence === 'handoff') {
+    return successfulAction(toolTrace, 'request_human_handoff', ['handoff_requested'])
+      || successfulAction(toolTrace, 'avisar_al_dueno', ['owner_alerted']);
+  }
   if (claim.evidence === 'appointment') {
     if (successfulAction(toolTrace, 'create_appointment', ['created', 'already_has_active_appointment'])) return true;
     if (successfulAction(toolTrace, 'reschedule_appointment', ['rescheduled'])) return true;
@@ -149,11 +160,14 @@ export function validateMutationClaims(text, toolTrace = []) {
   const unsupported = MUTATION_CLAIMS.find(claim => claim.patterns.some(pattern => patternMatchesCompletedClaim(pattern, normalizedText))
     && !claimHasEvidence(claim, trace));
   if (!unsupported) return { ok: true, text };
-  return {
-    ok: false,
-    blockedTool: unsupported.tool,
-    text: 'No pude confirmar esa operación de forma segura. No hice cambios en tu reserva. Puedo volver a intentarlo o pedir ayuda al equipo.'
-  };
+  // El texto de respaldo tiene que hablar de lo que el modelo afirmó sin evidencia, no de "tu
+  // reserva" siempre: caso real (franciskom, 10-09-2026) una paciente preguntó si Francisco
+  // atiende en Santiago, el modelo dijo de más sobre avisarle al equipo, y ella recibió "no hice
+  // cambios en tu reserva", que no tenía nada que ver con lo que había preguntado.
+  const blockedText = unsupported.tool === 'request_human_handoff'
+    ? 'Todavía no dejé ese aviso. ¿Quieres que le pida al equipo que te escriba?'
+    : 'No pude confirmar esa operación de forma segura. No hice cambios en tu reserva. Puedo volver a intentarlo o pedir ayuda al equipo.';
+  return { ok: false, blockedTool: unsupported.tool, text: blockedText };
 }
 
 export async function answerWithGroq(packageData, message, context = {}) {
@@ -191,7 +205,9 @@ export async function answerWithGroq(packageData, message, context = {}) {
 
   try {
     const agendaEnabled = getAgendaToolDefinitions(packageData).length > 0;
-    const history = Array.isArray(context.history) ? context.history.slice(-20).filter(item => ['user', 'assistant'].includes(item?.role) && typeof item.content === 'string') : [];
+    // 'system' está permitido dentro del historial a propósito: conversations.js inserta ahí una
+    // nota cuando parte de la conversación la atendió el dueño por fuera del canal.
+    const history = Array.isArray(context.history) ? context.history.slice(-20).filter(item => ['user', 'assistant', 'system'].includes(item?.role) && typeof item.content === 'string') : [];
     // El modelo no tiene noción propia de "hoy": sin esto, adivina la fecha (se vio devolver
     // 2023 sobre un mensaje de 2026) y razona mal "hoy/mañana/este finde". Se ancla SIEMPRE a la
     // zona horaria del negocio (Chile por defecto) para no repetir el problema de servidores/LLM
@@ -235,7 +251,7 @@ export async function answerWithGroq(packageData, message, context = {}) {
         const servicesDetail = bookableServices.map(describe).filter(Boolean).join('; ') || '(ninguno)';
         const externalDetail = externalServices.length
           ? `
-NO AGENDABLES POR ESTE CANAL (existen y puedes informar de ellos, pero NO tomas hora: el cliente coordina directamente con ese centro; si te la pide, díselo de inmediato y ofrécele los de arriba): ${externalServices.map(describe).join('; ')}.`
+NO AGENDABLES POR ESTE CANAL (existen y puedes informar de ellos, pero NO tomas hora: el cliente coordina directamente con ese centro; si te la pide, díselo de inmediato y ofrécele los de arriba; si el negocio tiene una respuesta oficial para ese caso, úsala en vez de redactarla tú): ${externalServices.map(describe).join('; ')}.`
           : '';
         const tz = businessTimeZone;
         return `CATÁLOGO DE AGENDA (ofrece SÓLO esto; al llamar herramientas usa estos nombres exactos, sin la parte entre paréntesis).${externalDetail}
@@ -252,6 +268,10 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
       { role: 'user', content: String(message) }
     ];
     const toolTrace = [];
+    // Motivo del aviso blando al dueño, si el modelo lo pidió en cualquier ronda: viaja con la
+    // respuesta para que el llamador cree el ticket y mande el aviso, sin callar al agente.
+    let ownerAlert = null;
+    let handoffReason = null;
     let totalInputTokens = 0; let totalOutputTokens = 0;
     // La familia gpt-5.x (razonamiento) rechaza `temperature` distinto de 1 con 400, y sin
     // `reasoning_effort: 'none'` gasta tokens de razonamiento ocultos no facturados como
@@ -279,8 +299,13 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
         const validation = validateMutationClaims(rawText, toolTrace);
         const text = validation.text;
         if (!text) throw new Error('Groq devolvió una respuesta vacía');
-        const handoff = toolTrace.some(item => item.name === 'request_human_handoff' && item.result?.ok) || text.toLowerCase().includes('no tengo ese dato confirmado');
-        return { text, confidence: validation.ok ? 'model_from_confirmed_context' : 'safety_blocked', source: selectedFacts.map(fact => fact.subject), handoff, provider: llm.provider, model: llm.model, usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens }, toolTrace, safetyBlocked: validation.ok ? null : validation.blockedTool };
+        const handoff = toolTrace.some(item => item.name === 'request_human_handoff' && item.result?.ok);
+        // Antes, un "no tengo ese dato confirmado" contaba como traspaso: dejaba el hilo mudo y le
+        // mandaba un aviso urgente al dueño por no saber un dato. Ahora es un aviso blando — el
+        // dueño se entera igual, pero el agente sigue atendiendo la conversación.
+        const missingFact = !handoff && text.toLowerCase().includes('no tengo ese dato confirmado');
+        const alert = ownerAlert || (missingFact ? 'El agente no tenía ese dato confirmado y ofreció que el negocio responda.' : null);
+        return { text, confidence: validation.ok ? 'model_from_confirmed_context' : 'safety_blocked', source: selectedFacts.map(fact => fact.subject), handoff, handoffReason, ownerAlert: handoff ? null : alert, provider: llm.provider, model: llm.model, usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens }, toolTrace, safetyBlocked: validation.ok ? null : validation.blockedTool };
       }
       messages.push({ role: 'assistant', content: assistantMessage.content || null, tool_calls: calls });
       for (const call of calls) {
@@ -293,13 +318,15 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           const chosen = literalReplies(packageData).find(item => item.id === args?.id);
           if (chosen) {
             return {
-              text: chosen.text, imageUrl: chosen.image || '', confidence: 'literal_business_reply', source: [chosen.id], handoff: false,
+              text: chosen.text, imageUrl: chosen.image || '', confidence: 'literal_business_reply', source: [chosen.id], handoff: false, ownerAlert,
               provider: llm.provider, model: llm.model,
               usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens }
             };
           }
         }
         const result = await executeAgendaTool(packageData, call.function?.name, args, context);
+        if (call.function?.name === 'avisar_al_dueno' && result?.ok) ownerAlert = String(args?.reason || 'El cliente necesita que el dueño entre a la conversación.').slice(0, 400);
+        if (call.function?.name === 'request_human_handoff' && result?.ok) handoffReason = String(args?.reason || '').slice(0, 400);
         toolTrace.push({ name: call.function?.name, result });
         messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
       }

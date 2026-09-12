@@ -896,8 +896,14 @@ export async function handleRequest(req, res) {
       const history = Array.isArray(body.history) ? body.history.filter(item => item && ['user', 'assistant'].includes(item.role) && typeof item.content === 'string') : [];
       const reply = await answerWithConfiguredAi(body.message, { callerPhone: PREVIEW_TEST_PHONE, conversationId: body.conversationId || 'web-preview', history });
       await recordUsage({ provider: reply.provider, model: reply.model || 'deterministic', inputTokens: reply.usage?.inputTokens || 0, outputTokens: reply.usage?.outputTokens || 0, source: 'web_preview' });
-      if (reply.handoff) {
-        await createHandoffTicket(packageData, { channel: 'preview', conversationId: body.conversationId || '', customerMessage: body.message, agentReply: reply.text, reason: 'Derivación automática del agente' });
+      if (reply.handoff || reply.ownerAlert) {
+        await createHandoffTicket(packageData, {
+          channel: 'preview', conversationId: body.conversationId || '', customerMessage: body.message, agentReply: reply.text,
+          kind: reply.handoff ? 'handoff' : 'owner_alert',
+          reason: reply.handoff
+            ? `Traspaso pedido por el agente: ${reply.handoffReason || 'el cliente pidió una persona o el tema no es del negocio'}`
+            : `Duda del cliente (el agente sigue atendiendo): ${reply.ownerAlert}`
+        });
       }
       return json(res, 200, { reply, mode: 'preview' });
     } catch { return json(res, 400, { error: 'Solicitud inválida.' }); }
@@ -930,8 +936,16 @@ export async function handleRequest(req, res) {
       const reply = await answerWithConfiguredAi(message, { callerPhone, conversationId: event.conversationId || event.id || '' });
       await recordUsage({ provider: reply.provider, model: reply.model || 'deterministic', inputTokens: reply.usage?.inputTokens || 0, outputTokens: reply.usage?.outputTokens || 0, source: 'whatsapp', conversationRef: event.conversationId || '' });
       let sentinel = { sent: false, reason: 'not_needed' };
+      if (reply.handoff || reply.ownerAlert) {
+        await createHandoffTicket(packageData, {
+          channel: 'whatsapp', conversationId: event.conversationId || event.id || '', customerMessage: message, agentReply: reply.text,
+          kind: reply.handoff ? 'handoff' : 'owner_alert',
+          reason: reply.handoff
+            ? `Traspaso pedido por el agente: ${reply.handoffReason || 'el cliente pidió una persona o el tema no es del negocio'}`
+            : `Duda del cliente (el agente sigue atendiendo): ${reply.ownerAlert}`
+        });
+      }
       if (reply.handoff) {
-        await createHandoffTicket(packageData, { channel: 'whatsapp', conversationId: event.conversationId || event.id || '', customerMessage: message, agentReply: reply.text, reason: 'Derivación automática del agente' });
         try {
           sentinel = await notifySentinel({
             type: 'information_unknown', agentId: packageData.business?.id,
@@ -1057,6 +1071,16 @@ export async function handleRequest(req, res) {
       // turno, en vez de depender de un mensaje futuro que el cliente quizás no mande.
       if (conversation && !conversation.customer_id) await getOrCreateConversation('whatsapp', callerPhone, callerProfileName);
 
+      // Segundo chequeo, ahora que la respuesta ya está generada: entre la espera y el LLM pasan
+      // 5-15 segundos más, y en ese rato el cliente puede haber mandado otra línea. Sin esto, el
+      // debounce no alcanzaba y el agente igual contestaba dos veces seguidas (6 casos reales en
+      // la primera semana de franciskom). La respuesta queda en el checkpoint del evento, así que
+      // no se pierde trabajo: el evento nuevo la reemplaza con una que ya vio el mensaje completo.
+      if (generatedNow && await supersededByNewerInbound(conversation?.id, inbound?.created_at)) {
+        await completeZavuEvent(eventId, claim.lease_token, 'ignored', { superseded: true, after_generation: true });
+        return json(res, 200, { ok: true, superseded: true });
+      }
+
       const outboundKey = `zavu:out:${eventId}`.slice(0, 240);
       let outbound = await findConversationMessageByClientId(outboundKey);
       if (outbound && outbound.content !== reply.text) throw new Error('La operación Zavu ya tiene otra respuesta persistida.');
@@ -1076,10 +1100,18 @@ export async function handleRequest(req, res) {
           status: ['queued', 'sent', 'delivered', 'read'].includes(provider.status) ? provider.status : 'sent', failureReason: ''
         }) || outbound;
       }
-      if (reply.handoff) {
+      // El motivo que da el modelo se guarda tal cual: mientras todos los tickets decían
+      // "Derivación automática del agente", la Bandeja no servía para entender POR QUÉ derivó —
+      // que es justo lo que había que revisar cuando la primera semana derivó de más.
+      if (reply.handoff || reply.ownerAlert) {
         await createHandoffTicket(packageData, {
           channel: 'whatsapp', conversationId: callerPhone, customerMessage: message, agentReply: reply.text,
-          reason: 'Derivación automática del agente', operationKey: `${operationKey}:handoff-ticket`
+          customerName: conversation?.za_customers?.full_name || '',
+          kind: reply.handoff ? 'handoff' : 'owner_alert',
+          reason: reply.handoff
+            ? `Traspaso pedido por el agente: ${reply.handoffReason || 'el cliente pidió una persona o el tema no es del negocio'}`
+            : `Duda del cliente (el agente sigue atendiendo): ${reply.ownerAlert}`,
+          operationKey: `${operationKey}:handoff-ticket`
         });
       }
       // Si hubo handoff/corrección, intenta despachar la alerta inmediatamente.

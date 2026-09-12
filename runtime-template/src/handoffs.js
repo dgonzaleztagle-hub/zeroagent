@@ -34,6 +34,22 @@ function fromRow(row) {
   };
 }
 
+// Un mismo cliente puede gatillar dos avisos en segundos (dos mensajes seguidos, cada uno con su
+// propio turno: pasó real con dos pacientes el 09 y 10-09-2026, dos SMS cobrados por el mismo
+// caso). Se mira si ya hubo un ticket para ese mismo contacto hace poco y, si lo hay, el ticket se
+// crea igual pero el aviso no se repite.
+async function alertedRecently(ticket) {
+  if (!agendaUsesSupabase() || !ticket?.conversation_id) return false;
+  const windowMinutes = Math.max(0, Number(process.env.OWNER_ALERT_DEDUPE_MINUTES ?? 60));
+  if (!windowMinutes) return false;
+  const since = new Date(Date.now() - windowMinutes * 60_000).toISOString();
+  const rows = await agendaSupabaseRequest(
+    `/rest/v1/za_handoff_tickets?conversation_ref=eq.${encodeURIComponent(ticket.conversation_id)}`
+    + `&created_at=gte.${encodeURIComponent(since)}&select=id,created_at&order=created_at.asc`
+  ).catch(() => null);
+  return Boolean((rows || []).some(row => row.id !== ticket.id));
+}
+
 async function alertHandoff(ticket) {
   // El chat de prueba del dueño ("Probar" en la consola, playground) crea tickets reales para que
   // vea el resultado de su prueba en la Bandeja — pero NO es un cliente esperando: alertarlo le
@@ -43,19 +59,27 @@ async function alertHandoff(ticket) {
   if (ticket.channel === 'preview') return;
   const { settings } = await getNotificationSettings();
   if (!settings.handoff_alert_enabled || !settings.alert_phone) return;
-  // El SMS se cobra por segmento de 160 caracteres: el aviso dice lo justo para que el dueño sepa
-  // que tiene que entrar, y el detalle completo lo lee en la consola. Con el link entra de un
-  // toque desde el propio SMS en vez de ir a buscarla; Zavu exige que cualquier URL enviada por
-  // SMS esté verificada antes en la cuenta (urls.submitForVerification), así que el link sólo se
-  // agrega si la instalación declaró la suya en CONSOLE_URL.
+  if (await alertedRecently(ticket)) return;
+  // El SMS se cobra por segmento de 160 caracteres, así que dice lo justo. Lo primero es CON QUIÉN
+  // hablar: el nombre y el número del cliente, porque el dueño contesta desde su propio WhatsApp y
+  // no desde la consola (Francisco fue explícito el 11-09-2026: entrar a la app en medio del día,
+  // manejando o con su bebé en brazos, no le sirve — responde por voz desde el chat). Con el
+  // número en el SMS abre la conversación de un toque. El link a la consola queda al final y sólo
+  // si la instalación declaró CONSOLE_URL — Zavu exige verificar antes cualquier URL enviada por
+  // SMS (urls.submitForVerification).
   const consoleUrl = String(process.env.CONSOLE_URL || '').trim();
+  const who = [ticket.customer_name, ticket.conversation_id].filter(Boolean).join(' ') || 'Un cliente';
+  const head = ticket.kind === 'owner_alert'
+    ? `ZeroAgent: ${who} está dudando, cierra tú.`
+    : `ZeroAgent: ${who} pide hablar contigo.`;
   const text = [
-    'ZeroAgent: un cliente pide hablar contigo.',
-    ticket.customer_message ? `"${ticket.customer_message.slice(0, 60)}"` : '',
-    consoleUrl ? `Entra a ${consoleUrl}` : 'Revisalo en tu consola.'
+    head,
+    ticket.reason ? ticket.reason.slice(0, 70) : (ticket.customer_message ? `"${ticket.customer_message.slice(0, 60)}"` : ''),
+    consoleUrl ? consoleUrl : ''
   ].filter(Boolean).join(' ').slice(0, 300);
   await sendZavuAlert(settings.alert_phone, text, {
-    idempotencyKey: `handoff-alert:${ticket.id}`, subject: 'Un cliente pide hablar contigo'
+    idempotencyKey: `handoff-alert:${ticket.id}`,
+    subject: ticket.kind === 'owner_alert' ? 'Un cliente necesita que lo convenzas' : 'Un cliente pide hablar contigo'
   });
 }
 
@@ -83,7 +107,10 @@ export async function createHandoffTicket(packageData, input = {}) {
       ? (await agendaSupabaseRequest(`/rest/v1/za_handoff_tickets?operation_key=eq.${encodeURIComponent(operationKey)}&select=*&limit=1`))?.[0]
       : null;
     const ticket = fromRow(created || existing);
-    if (created) await alertHandoff(ticket).catch(error => console.error('No se pudo enviar alerta de handoff:', error.message));
+    // kind y customer_name no se persisten (no existe columna): sirven sólo para redactar el aviso
+    // al dueño en este mismo turno. El motivo sí queda guardado, y es lo que ve en la Bandeja.
+    const alertable = ticket ? { ...ticket, kind: input.kind || 'handoff', customer_name: String(input.customerName || '').trim() } : ticket;
+    if (created) await alertHandoff(alertable).catch(error => console.error('No se pudo enviar alerta de handoff:', error.message));
     return ticket;
   }
   const state = await loadState(packageData);

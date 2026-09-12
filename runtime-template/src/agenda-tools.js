@@ -49,7 +49,14 @@ export function getAgendaToolDefinitions(packageData, catalog) {
     ...(literalReplies(packageData).length ? [{ type: 'function', function: { name: 'responder_textual', description: `Envía una respuesta oficial del negocio TAL CUAL fue escrita por el dueño. Úsala SIEMPRE que el mensaje del cliente caiga en uno de estos casos, en vez de redactar tú la respuesta:
 ${literalReplies(packageData).map(item => `- "${item.id}": ${item.when}`).join('\n')}
 El texto se manda literal y completo; tú no lo reescribes, no lo resumes y no le agregas nada antes ni después.`, parameters: { type: 'object', properties: { id: { type: 'string', enum: literalReplies(packageData).map(item => item.id), description: 'Cuál de las respuestas oficiales corresponde.' } }, required: ['id'] } } }] : []),
-    { type: 'function', function: { name: 'request_human_handoff', description: 'Escala a una persona cuando el cliente lo pide, hay un problema real o falta un dato crítico. Ejecutar en el mismo turno que se anuncia el traspaso.', parameters: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] } } }
+    // Dos herramientas distintas a propósito. La primera CALLA al agente en ese hilo, así que es
+    // sólo para los casos en que seguir contestando sería peor; la segunda avisa al dueño sin
+    // interrumpir la atención. Mientras existió una sola, descrita como "cuando hay un problema
+    // real", el modelo la usaba con cualquier paciente con dolor —9 de 18 derivaciones reales de
+    // la primera semana de franciskom eran pacientes comunes que había que llevar a una hora— y
+    // dejaba el hilo mudo 12 h mientras el cliente seguía preguntando precio y horarios.
+    { type: 'function', function: { name: 'request_human_handoff', description: 'Traspasa la conversación a una persona; el agente deja de atender ese hilo. Llámala cuando el cliente pide hablar con una persona, cuando el mensaje es de un tema ajeno al negocio o de un tercero, y cuando lo pedido está fuera de lo que el negocio cumple. No es para la gravedad ni los antecedentes de salud del cliente: eso se atiende y se agenda. Ejecútala en el mismo turno en que anuncias el traspaso.', parameters: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] } } },
+    { type: 'function', function: { name: 'avisar_al_dueno', description: 'Avisa al dueño para que entre él a cerrar la venta, sin dejar de atender: en el mismo turno sigues respondiendo y ofreciendo hora. Llámala cuando el cliente duda de que el tratamiento le sirva (dice que ya gastó, que nada le ha resultado, pregunta si de verdad le va a servir, da vueltas sin decidirse) o cuando falta un dato que el negocio no tiene confirmado.', parameters: { type: 'object', properties: { reason: { type: 'string', description: 'En una frase: qué duda tiene el cliente o qué dato falta.' } }, required: ['reason'] } } }
   ];
 }
 
@@ -326,6 +333,12 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
     }
     if (name === 'request_human_handoff') {
       return requestHandoff(args.reason, context);
+    }
+    // Aviso blando: NO toca el estado de la conversación (el agente sigue atendiendo). Quien crea
+    // el ticket de la Bandeja y manda el aviso al dueño es el llamador (server.js), igual que con
+    // el handoff en preview — acá sólo se confirma al modelo que el aviso quedó pedido.
+    if (name === 'avisar_al_dueno') {
+      return { ok: true, action: 'owner_alerted', message: 'El dueño quedó avisado. Sigue atendiendo y ofreciendo hora con normalidad; no digas que la conversación quedó en pausa ni que dejarás de responder.' };
     }
     return { error: 'unknown_tool' };
   } catch (error) {
