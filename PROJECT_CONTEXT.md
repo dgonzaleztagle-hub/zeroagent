@@ -1739,3 +1739,47 @@ business.facebook.com), el crédito de SMS (Daniel lo deja así y evalúa pasar 
 cuando Francisco tenga tiempo), y que **Studio no puede regenerar este paquete**: su Supabase
 (`nbjujqodjvhbxvvlfdfs`) sigue caído, así que el prompt corregido vive en el repo desplegado y en
 `runtime-template/`. Si algún día Studio vuelve, hay que subirle esta versión antes de rebuildear.
+
+### Silencio deliberado + links de acción en el SMS · 12-09-2026 (mismo día, después de lo anterior)
+
+Las dos piezas del mismo problema: **el dueño contesta desde su propio WhatsApp y el canal no nos
+entrega esos mensajes**. Todo desplegado y verificado en `franciskom.cl` real.
+
+**1. El agente puede elegir no responder** (`no_intervenir`, genérico para la línea). La decisión
+la toma el modelo, pero **el permiso lo da el runtime**: la herramienta sólo se le ofrece cuando el
+historial trae la nota de mensajes del cliente que quedaron sin responder y con rato encima
+(`historyAllowsSilence`) — o sea, un hilo que alguien más está atendiendo. En una conversación
+nueva o en una que el propio agente está llevando, la herramienta no existe, porque callarse ahí
+sería perder al cliente. Medido, 3 corridas por caso: **9/9** en las formas que lo delatan ("ya
+llegué", "sí, a las 15 me acomoda", "gracias, nos vemos el jueves") y **15/15** en las que SÍ debe
+responder (pregunta nueva concreta, pedir otra hora, lead nuevo).
+- La nota de historial tuvo que decir explícitamente qué hacer: con la versión que sólo decía "no
+  respondas eso", el silencio salía 1/9. Nombrando las formas ("responde algo que tú no dijiste,
+  agradece, o acepta una hora/fecha/precio que tú no ofreciste") subió a 5/9, y lo que cerró el
+  caso más terco ("sí, a las 15 me acomoda", 0/3) fue una excepción puntual en `AGENDA_BEHAVIOR`:
+  con esa nota presente, no consultar disponibilidad por una hora que el agente no ofreció —
+  ofrecerle otros horarios contradice lo que Francisco ya le dijo.
+
+**2. El SMS de aviso lleva un link de un toque** (`za_action_tokens` + `owner-actions.js` +
+ruta `/t/<token>`). Abre una pantalla con ESE paciente —nombre, teléfono, su último mensaje— y
+tres botones: **abrir su WhatsApp** (`wa.me`, que es su flujo real), **yo sigo esta conversación**
+(el agente se calla en ese hilo, con el retorno automático de 12 h que ya existía) y **no
+contestarle más a esta persona** (`bot_muted`), más el reverso de cada una. Sin PIN.
+- **Abrir el link no ejecuta nada**: los previsualizadores de WhatsApp y los filtros de SMS abren
+  las URLs por su cuenta, así que una acción en el GET habría silenciado contactos sin que nadie
+  la pidiera. Verificado en vivo: tras un GET, el token sigue sin acción registrada. Cada acción es
+  un POST de un botón.
+- Token aleatorio de 16 caracteres en tabla (no firmado) para que el SMS quepa en **un segmento de
+  160**: con el motivo del modelo recortado en límite de palabra, el aviso completo mide 154-160
+  caracteres. Antes el motivo llevaba el prefijo de la Bandeja y se iba a 2 segmentos (doble cobro).
+- **Zavu tiene `franciskom.cl` aprobada por `domain_whitelist`**, así que cualquier ruta del
+  dominio pasa por SMS — no hay que verificar el link nuevo. Si igual fuera rechazado, el aviso
+  sale sin link (ya estaba).
+- Verificado en el navegador real, PC y móvil (375px), local y después en producción: las cuatro
+  acciones escriben lo que corresponde en Supabase, la pantalla refleja el estado, un token
+  inexistente da 404 con mensaje legible, y al borrar los datos de prueba el link degrada bien.
+  Datos de prueba (`+56900000099`, "PRUEBA Link de acción") creados y borrados en la misma sesión.
+
+**Lo que esto cierra:** Francisco ya no necesita la pausa global para meterse con un paciente (era
+lo que lo dejaba mudo 16 horas), y el aviso dejó de decirle "entra a tu consola" — que es
+exactamente lo que él dijo que no iba a hacer nunca.

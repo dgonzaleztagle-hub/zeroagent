@@ -32,7 +32,7 @@ const samePhone = (a, b) => {
 // comporta como antes (sólo `type: 'string'`, sin enum). Con él, service/resource/location quedan
 // acotados a los nombres reales, así el modelo elige de una lista real en vez de escribir el
 // nombre libre y fallar contra el match exacto/parcial de resolveCatalogItem.
-export function getAgendaToolDefinitions(packageData, catalog) {
+export function getAgendaToolDefinitions(packageData, catalog, options = {}) {
   if (!agendaConfig(packageData)) return [];
   const namesOf = list => (list || []).map(item => item.name).filter(Boolean);
   const withEnum = (schema, names) => (names.length ? { ...schema, enum: names } : schema);
@@ -56,6 +56,11 @@ El texto se manda literal y completo; tú no lo reescribes, no lo resumes y no l
     // la primera semana de franciskom eran pacientes comunes que había que llevar a una hora— y
     // dejaba el hilo mudo 12 h mientras el cliente seguía preguntando precio y horarios.
     { type: 'function', function: { name: 'request_human_handoff', description: 'Traspasa la conversación a una persona; el agente deja de atender ese hilo. Llámala cuando el cliente pide hablar con una persona, cuando el mensaje es de un tema ajeno al negocio o de un tercero, y cuando lo pedido está fuera de lo que el negocio cumple. No es para la gravedad ni los antecedentes de salud del cliente: eso se atiende y se agenda. Ejecútala en el mismo turno en que anuncias el traspaso.', parameters: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] } } },
+    // Sólo se ofrece cuando el runtime lo permite (ver historyAllowsSilence): el dueño contesta
+    // desde su propio WhatsApp y el canal no nos entrega esos mensajes, así que en un hilo que él
+    // está llevando la respuesta correcta puede ser ninguna. Callarse en cualquier otro contexto
+    // sería perder al cliente, por eso la herramienta no existe en esos turnos.
+    ...(options.allowSilence ? [{ type: 'function', function: { name: 'no_intervenir', description: 'No manda ningún mensaje en este turno. Llámala cuando el hilo lo está llevando una persona del negocio y tú no ves sus mensajes: el último mensaje del cliente responde a algo que tú no dijiste (contesta "sí", "a las 15", "ya llegué", "gracias" sin que tú se lo hayas preguntado), o coordina algo que tú nunca ofreciste. Ante la duda, responde en vez de callarte.', parameters: { type: 'object', properties: { reason: { type: 'string', description: 'En una frase: por qué este turno no es para ti.' } }, required: ['reason'] } } }] : []),
     { type: 'function', function: { name: 'avisar_al_dueno', description: 'Avisa al dueño para que entre él a cerrar la venta, sin dejar de atender: en el mismo turno sigues respondiendo y ofreciendo hora. Llámala cuando el cliente duda de que el tratamiento le sirva (dice que ya gastó, que nada le ha resultado, pregunta si de verdad le va a servir, da vueltas sin decidirse) o cuando falta un dato que el negocio no tiene confirmado.', parameters: { type: 'object', properties: { reason: { type: 'string', description: 'En una frase: qué duda tiene el cliente o qué dato falta.' } }, required: ['reason'] } } }
   ];
 }
@@ -337,6 +342,9 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
     // Aviso blando: NO toca el estado de la conversación (el agente sigue atendiendo). Quien crea
     // el ticket de la Bandeja y manda el aviso al dueño es el llamador (server.js), igual que con
     // el handoff en preview — acá sólo se confirma al modelo que el aviso quedó pedido.
+    if (name === 'no_intervenir') {
+      return { ok: true, action: 'silence', message: 'No se envía nada en este turno.' };
+    }
     if (name === 'avisar_al_dueno') {
       return { ok: true, action: 'owner_alerted', message: 'El dueño quedó avisado. Sigue atendiendo y ofreciendo hora con normalidad; no digas que la conversación quedó en pausa ni que dejarás de responder.' };
     }

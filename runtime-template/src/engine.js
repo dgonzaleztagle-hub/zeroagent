@@ -224,7 +224,7 @@ export async function answerWithGroq(packageData, message, context = {}) {
     // lista real en vez de escribir el nombre libre y fallar la primera vez contra el match exacto
     // de agenda-tools.js (encontrado en vivo: "evaluación" vs "Evaluación · Box Buin" fallaba
     // siempre al primer intento, y esa primera falla contaminaba el tono de la respuesta final).
-    const tools = getAgendaToolDefinitions(packageData, catalogSource);
+    const tools = getAgendaToolDefinitions(packageData, catalogSource, { allowSilence: context.allowSilence === true });
     const businessTimeZone = staticAgendaConfig.timezone || 'America/Santiago';
     const nowLabel = new Intl.DateTimeFormat('es-CL', { timeZone: businessTimeZone, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
     // Prefijo estático (cacheable): comportamiento base + identidad. Los hechos, que cambian por
@@ -314,6 +314,17 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
         // Respuesta literal del negocio: se devuelve el texto exacto y se corta acá, sin darle otra
         // vuelta al modelo. Si se dejara continuar, el modelo "resumiría" o adornaría el bloque y
         // dejaría de ser lo que el dueño escribió — que es justamente lo que se le prometió.
+        // Silencio deliberado: se corta acá, sin volver a pasar por el modelo y sin texto. El
+        // llamador es el que no envía nada (ver server.js), así el silencio es del runtime y no
+        // depende de que el modelo produzca una respuesta vacía.
+        if (call.function?.name === 'no_intervenir' && context.allowSilence === true) {
+          return {
+            text: '', silent: true, silentReason: String(args?.reason || '').slice(0, 300),
+            confidence: 'deliberate_silence', source: [], handoff: false, ownerAlert: null,
+            provider: llm.provider, model: llm.model,
+            usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens }, toolTrace
+          };
+        }
         if (call.function?.name === 'responder_textual') {
           const chosen = literalReplies(packageData).find(item => item.id === args?.id);
           if (chosen) {

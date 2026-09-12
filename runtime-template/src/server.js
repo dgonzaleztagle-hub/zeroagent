@@ -9,13 +9,14 @@ import { agendaConfig, agendaSupabaseRequest, agendaSupabaseUpload, agendaUsesSu
 import { parseContactsFile } from './contacts-import.js';
 import { dispatchAgendaOutbox } from './outbox.js';
 import { verifyZavuSignature, sendZavuWhatsApp, zavuDeliveryUpdate, zavuEventId, zavuProviderMessage } from './zavu.js';
-import { appendConversationMessage, createOperator, findConversationMessageByClientId, getAgentControl, getConversationInbox, getOrCreateConversation, inboundDebounceMs, loadConversationHistory, reclaimStaleHandoff, supersededByNewerInbound, syncWhatsappProfileNames, updateAgentControl, updateConversationMessageDelivery, updateConversationOperation } from './conversations.js';
+import { appendConversationMessage, createOperator, findConversationMessageByClientId, getAgentControl, getConversationInbox, getOrCreateConversation, historyAllowsSilence, inboundDebounceMs, loadConversationHistory, reclaimStaleHandoff, supersededByNewerInbound, syncWhatsappProfileNames, updateAgentControl, updateConversationMessageDelivery, updateConversationOperation } from './conversations.js';
 import { addKnowledgeSuggestion, currentConfirmedFacts, listKnowledgeSuggestions } from './knowledge.js';
 import { createHandoffTicket, listHandoffTickets, updateHandoffTicket } from './handoffs.js';
 import { addBusinessData, addBusinessInfo, listBusinessData, listBusinessInfo } from './business-data.js';
 import { getNotificationSettings, updateNotificationSettings } from './notification-settings.js';
 import { findOperatorByPin, operatorSessionFromRequest, sessionSetCookieHeader, setOperatorPin, signSession, verifyPinHash } from './auth.js';
 import { getPublicAiAccount, resolveRuntimeLlmConfig, updateAiSelection } from './ai-account.js';
+import { applyOwnerAction, loadOwnerAction, ownerActionPage } from './owner-actions.js';
 import { appendCustomerRecordEntry, listCustomerRecord } from './customer-records.js';
 import { buildGoogleAuthUrl, completeGoogleCalendarConnection, disconnectGoogleCalendar, getGoogleCalendarStatus, refreshGoogleCalendarList, setGoogleCalendarBuffer, setGoogleCalendarTarget, signGoogleOAuthState, verifyGoogleOAuthState } from './google-calendar.js';
 import { syncGoogleContacts } from './google-contacts.js';
@@ -380,6 +381,31 @@ export async function handleRequest(req, res) {
   if (req.method === 'GET' && pathname === '/client-console-tour.css') return asset(res, 'client-console-tour.css', 'text/css; charset=utf-8');
   if (req.method === 'GET' && pathname === '/client-console-v2.js') return asset(res, 'client-console-v2.js', 'application/javascript; charset=utf-8');
   if (req.method === 'GET' && pathname === '/auth-gate.js') return asset(res, 'auth-gate.js', 'application/javascript; charset=utf-8');
+  // Link de un toque del SMS de aviso al dueño. El GET sólo muestra la pantalla: los
+  // previsualizadores de enlaces y los filtros de SMS abren las URLs por su cuenta, y una acción
+  // en el GET silenciaría contactos sin que nadie la haya pedido. Cada acción es un botón (POST).
+  if (pathname.startsWith('/t/') && ['GET', 'POST'].includes(req.method)) {
+    const token = pathname.slice(3);
+    if (!withinRateLimit(`owner-action:${clientIp(req)}`, 60, 60 * 1000)) return html(res, 429, '<p>Demasiados intentos, espera un momento.</p>');
+    const businessName = packageData.business?.display_name || packageData.business?.name || 'ZeroAgent';
+    if (req.method === 'GET') {
+      const record = await loadOwnerAction(token).catch(() => null);
+      return html(res, record && !record.expired ? 200 : 404, ownerActionPage(record, { businessName }));
+    }
+    const form = new URLSearchParams(await readRaw(req, 4 * 1024));
+    const result = await applyOwnerAction(token, String(form.get('accion') || '')).catch(error => ({ ok: false, error: error.message }));
+    if (!result.ok) {
+      const record = await loadOwnerAction(token).catch(() => null);
+      return html(res, 400, ownerActionPage(record, { businessName, notice: 'No se pudo aplicar eso. Prueba de nuevo o entra a tu consola.' }));
+    }
+    const notice = {
+      silenciar: 'Listo: el asistente no le va a responder más a este contacto.',
+      desilenciar: 'Listo: el asistente vuelve a contestarle a este contacto.',
+      tomar: 'Listo: el asistente se queda callado en esta conversación y la sigues tú.',
+      devolver: 'Listo: el asistente retoma esta conversación.'
+    }[result.action] || 'Listo.';
+    return html(res, 200, ownerActionPage(result.record, { businessName, notice }));
+  }
   if (req.method === 'GET' && pathname === '/reservar') {
     return html(res, 200, await fs.readFile(path.join(root, 'public', 'booking.html'), 'utf8'));
   }
@@ -1055,7 +1081,7 @@ export async function handleRequest(req, res) {
         const history = await loadConversationHistory(conversation?.id, 20, { excludeClientMessageId: inboundKey });
         reply = await answerWithConfiguredAi(message, {
           callerPhone, conversationId: conversation?.id || event.data?.messageId || eventId,
-          history, messageId: operationKey, operationKey
+          history, messageId: operationKey, operationKey, allowSilence: historyAllowsSilence(history)
         });
         if (!(await checkpointZavuEvent(eventId, claim.lease_token, { agent_reply: reply }))) {
           throw new Error('Se perdió el lease Zavu antes de guardar la respuesta.');
@@ -1070,6 +1096,16 @@ export async function handleRequest(req, res) {
       // hasta el próximo mensaje entrante — que puede no llegar nunca. Reintentar acá, en el mismo
       // turno, en vez de depender de un mensaje futuro que el cliente quizás no mande.
       if (conversation && !conversation.customer_id) await getOrCreateConversation('whatsapp', callerPhone, callerProfileName);
+
+      // Silencio deliberado: el agente determinó que este turno lo está atendiendo el dueño desde
+      // su propio teléfono (mensajes que responden algo que el agente nunca dijo). No se manda ni
+      // se persiste nada saliente; el mensaje entrante ya quedó guardado.
+      if (reply.silent) {
+        await completeZavuEvent(eventId, claim.lease_token, 'completed', {
+          inbound_message_id: inbound?.id || null, silent: true, silent_reason: reply.silentReason || ''
+        });
+        return json(res, 200, { ok: true, silent: true });
+      }
 
       // Segundo chequeo, ahora que la respuesta ya está generada: entre la espera y el LLM pasan
       // 5-15 segundos más, y en ese rato el cliente puede haber mandado otra línea. Sin esto, el
@@ -1107,6 +1143,8 @@ export async function handleRequest(req, res) {
         await createHandoffTicket(packageData, {
           channel: 'whatsapp', conversationId: callerPhone, customerMessage: message, agentReply: reply.text,
           customerName: conversation?.za_customers?.full_name || '',
+          conversationUuid: conversation?.id || '', customerId: conversation?.customer_id || '',
+          alertReason: reply.handoff ? (reply.handoffReason || '') : (reply.ownerAlert || ''),
           kind: reply.handoff ? 'handoff' : 'owner_alert',
           reason: reply.handoff
             ? `Traspaso pedido por el agente: ${reply.handoffReason || 'el cliente pidió una persona o el tema no es del negocio'}`

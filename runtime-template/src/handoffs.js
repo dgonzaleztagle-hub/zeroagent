@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { agendaSupabaseRequest, agendaUsesSupabase } from './agenda.js';
 import { sendZavuAlert } from './zavu.js';
 import { getNotificationSettings } from './notification-settings.js';
+import { createOwnerActionLink } from './owner-actions.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -60,23 +61,37 @@ async function alertHandoff(ticket) {
   const { settings } = await getNotificationSettings();
   if (!settings.handoff_alert_enabled || !settings.alert_phone) return;
   if (await alertedRecently(ticket)) return;
-  // El SMS se cobra por segmento de 160 caracteres, así que dice lo justo. Lo primero es CON QUIÉN
-  // hablar: el nombre y el número del cliente, porque el dueño contesta desde su propio WhatsApp y
-  // no desde la consola (Francisco fue explícito el 11-09-2026: entrar a la app en medio del día,
-  // manejando o con su bebé en brazos, no le sirve — responde por voz desde el chat). Con el
-  // número en el SMS abre la conversación de un toque. El link a la consola queda al final y sólo
-  // si la instalación declaró CONSOLE_URL — Zavu exige verificar antes cualquier URL enviada por
-  // SMS (urls.submitForVerification).
-  const consoleUrl = String(process.env.CONSOLE_URL || '').trim();
-  const who = [ticket.customer_name, ticket.conversation_id].filter(Boolean).join(' ') || 'Un cliente';
+  // El aviso dice lo justo, y lo primero es CON QUIÉN hablar: nombre y número del cliente, porque
+  // el dueño contesta desde su propio WhatsApp y no desde la consola (Francisco, 11-09-2026:
+  // entrar a la app manejando o con su bebé en brazos no le sirve, responde por voz desde el chat).
+  // El link abre una pantalla con ESE paciente y tres botones — abrir su WhatsApp, seguir él la
+  // conversación, o no contestarle más. Si no se pudo crear cae al link de la consola, y si
+  // tampoco hay, el aviso sale sin link: una alerta sin link es mejor que una que no llega. Zavu
+  // exige verificar antes cualquier URL que salga por SMS (urls.submitForVerification).
+  const actionLink = await createOwnerActionLink({
+    conversationId: ticket.conversation_uuid, customerId: ticket.customer_id,
+    customerPhone: ticket.conversation_id, customerName: ticket.customer_name,
+    contextMessage: ticket.customer_message
+  }).catch(() => '');
+  const link = actionLink || String(process.env.CONSOLE_URL || '').trim();
+  const nombre = String(ticket.customer_name || '').trim().slice(0, 24);
+  const who = [nombre, ticket.conversation_id].filter(Boolean).join(' ') || 'Un cliente';
   const head = ticket.kind === 'owner_alert'
-    ? `ZeroAgent: ${who} está dudando, cierra tú.`
+    ? `ZeroAgent: ${who} duda, cierra tú.`
     : `ZeroAgent: ${who} pide hablar contigo.`;
-  const text = [
-    head,
-    ticket.reason ? ticket.reason.slice(0, 70) : (ticket.customer_message ? `"${ticket.customer_message.slice(0, 60)}"` : ''),
-    consoleUrl ? consoleUrl : ''
-  ].filter(Boolean).join(' ').slice(0, 300);
+  // Un SMS se cobra por segmento de 160 caracteres: primero con quién hablar y el link, y el
+  // motivo sólo con lo que quepa en ese mismo segmento (mejor un motivo corto que dos segmentos).
+  const base = [head, link].filter(Boolean).join(' ');
+  // El motivo del SMS es el que dio el modelo (alert_reason), sin el prefijo que sí se guarda en
+  // la Bandeja: en 160 caracteres no cabe "Duda del cliente (el agente sigue atendiendo): …".
+  const motivoCompleto = String(ticket.alert_reason || ticket.reason || ticket.customer_message || '').trim();
+  const espacio = 160 - base.length - 1;
+  const motivo = espacio >= 24 && motivoCompleto
+    ? (motivoCompleto.length <= espacio
+        ? motivoCompleto
+        : motivoCompleto.slice(0, espacio - 1).replace(/[\s,;.:]+\S*$/, '') + '…')
+    : '';
+  const text = (motivo ? [head, motivo, link].join(' ') : base).slice(0, 300);
   await sendZavuAlert(settings.alert_phone, text, {
     idempotencyKey: `handoff-alert:${ticket.id}`,
     subject: ticket.kind === 'owner_alert' ? 'Un cliente necesita que lo convenzas' : 'Un cliente pide hablar contigo'
@@ -109,7 +124,11 @@ export async function createHandoffTicket(packageData, input = {}) {
     const ticket = fromRow(created || existing);
     // kind y customer_name no se persisten (no existe columna): sirven sólo para redactar el aviso
     // al dueño en este mismo turno. El motivo sí queda guardado, y es lo que ve en la Bandeja.
-    const alertable = ticket ? { ...ticket, kind: input.kind || 'handoff', customer_name: String(input.customerName || '').trim() } : ticket;
+    const alertable = ticket ? {
+      ...ticket, kind: input.kind || 'handoff', customer_name: String(input.customerName || '').trim(),
+      conversation_uuid: input.conversationUuid || '', customer_id: input.customerId || '',
+      alert_reason: String(input.alertReason || '').trim()
+    } : ticket;
     if (created) await alertHandoff(alertable).catch(error => console.error('No se pudo enviar alerta de handoff:', error.message));
     return ticket;
   }

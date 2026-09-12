@@ -124,7 +124,7 @@ function ownerHandledCutoffMs() {
 // llegué" y recibió la lista de precios, porque su pregunta de la noche anterior —que el dueño ya
 // había respondido por teléfono— seguía "abierta" en el historial. Esta nota le dice al modelo que
 // esa parte ya está resuelta y que sólo conteste lo último.
-const OWNER_HANDLED_NOTE = 'Nota del sistema: los mensajes anteriores del cliente ya fueron atendidos por el negocio por otra vía (el dueño responde también desde su teléfono y esas respuestas no aparecen en este historial). Son sólo contexto: no los vuelvas a responder ni retomes preguntas de ahí. Responde únicamente los mensajes que vienen después de esta nota.';
+export const OWNER_HANDLED_NOTE = 'Nota del sistema: los mensajes anteriores del cliente ya fueron atendidos por el negocio por otra vía (el dueño responde también desde su teléfono y esas respuestas no aparecen en este historial). Son sólo contexto: no los vuelvas a responder ni retomes preguntas de ahí. Responde únicamente los mensajes que vienen después de esta nota, y sólo si traen una consulta nueva y concreta para ti. Si el mensaje nuevo responde a algo que tú no dijiste, agradece, o acepta una hora, una fecha o un precio que tú no ofreciste en este historial, entonces también es parte de esa conversación ajena: no contestes, llama la herramienta para no intervenir en este turno.';
 
 export async function loadConversationHistory(conversationId, limit = 20, options = {}) {
   if (!agendaUsesSupabase() || !conversationId) return [];
@@ -150,6 +150,14 @@ export async function loadConversationHistory(conversationId, limit = 20, option
     if (index === noteInsertedAfter) history.push({ role: 'system', content: OWNER_HANDLED_NOTE });
   });
   return history;
+}
+
+// El agente sólo puede elegir no responder en un hilo que ya venía siendo atendido por fuera: es
+// decir, uno donde quedaron mensajes del cliente sin respuesta y con rato encima (la misma señal
+// que inserta OWNER_HANDLED_NOTE). En una conversación nueva, o en una que el propio agente está
+// llevando, callarse sería perder al cliente — así que ahí la herramienta ni se le ofrece.
+export function historyAllowsSilence(history) {
+  return Array.isArray(history) && history.some(item => item?.role === 'system' && item.content === OWNER_HANDLED_NOTE);
 }
 
 export async function findConversationMessageByClientId(clientMessageId) {
