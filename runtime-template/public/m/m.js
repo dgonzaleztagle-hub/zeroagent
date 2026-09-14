@@ -668,6 +668,12 @@ $('#chat-form').addEventListener('submit', async event => {
         .catch(error => alert(error.message));
     };
     bubble.append(actions);
+    // Después de una respuesta oficial del negocio el agente manda un segundo mensaje que empuja
+    // a la reserva — por WhatsApp llegan como dos mensajes, y "Probar" tiene que mostrar lo mismo.
+    if (data.reply.followUpText) {
+      chatHistory.push({ role: 'assistant', content: data.reply.followUpText });
+      addBubble(data.reply.followUpText, 'agent');
+    }
   } catch (error) { addBubble(`Error: ${error.message}`, 'agent'); }
 });
 

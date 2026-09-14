@@ -242,6 +242,33 @@ async function completeZavuEvent(eventId, leaseToken, status = 'completed', repl
   return true;
 }
 
+// Segundo mensaje después de una respuesta oficial del negocio (ver engine.js): el bloque del
+// dueño sale intacto y este mensaje aparte empuja a la reserva. Va con su propia clave de
+// idempotencia y es best-effort a propósito: el bloque ya le llegó al cliente, así que si esto
+// falla se registra y listo — lanzar el error haría reintentar el evento completo y repetiría el
+// bloque, que es peor que quedarse sin el seguimiento.
+async function sendFollowUpMessage({ conversationId, callerPhone, text, outboundKey }) {
+  const followUpKey = `${outboundKey}:seguimiento`.slice(0, 240);
+  const deliveredStates = ['queued', 'sent', 'delivered', 'read'];
+  try {
+    let row = await findConversationMessageByClientId(followUpKey);
+    if (!row) {
+      row = await appendConversationMessage(conversationId, 'outbound', text, {}, {
+        senderType: 'agent', deliveryStatus: 'sending', clientMessageId: followUpKey
+      });
+    }
+    if (deliveredStates.includes(row?.delivery_status)) return row;
+    const provider = zavuProviderMessage(await sendZavuWhatsApp(callerPhone, text, { idempotencyKey: followUpKey }));
+    return await updateConversationMessageDelivery({
+      id: row?.id, providerMessageId: provider.id,
+      status: deliveredStates.includes(provider.status) ? provider.status : 'sent', failureReason: ''
+    }) || row;
+  } catch (error) {
+    console.error('No se pudo enviar el mensaje de seguimiento:', error.message);
+    return null;
+  }
+}
+
 async function previewAuthorized(req, body = {}) {
   if (runtimeMode === 'preview_local' && !previewKey) return true;
   if (secretMatches(req.headers['x-preview-key'] || body.accessKey, previewKey)) return true;
@@ -876,6 +903,7 @@ export async function handleRequest(req, res) {
             status: ['queued', 'sent', 'delivered', 'read'].includes(provider.status) ? provider.status : 'sent', failureReason: ''
           }) || outbound;
         }
+        if (reply.followUpText) await sendFollowUpMessage({ conversationId: conversation?.id, callerPhone, text: reply.followUpText, outboundKey });
         if (reply.handoff || reply.ownerAlert) {
           await createHandoffTicket(packageData, {
             channel: 'whatsapp', conversationId: callerPhone, customerMessage: message, agentReply: reply.text,
@@ -1293,6 +1321,7 @@ export async function handleRequest(req, res) {
           status: ['queued', 'sent', 'delivered', 'read'].includes(provider.status) ? provider.status : 'sent', failureReason: ''
         }) || outbound;
       }
+      if (reply.followUpText) await sendFollowUpMessage({ conversationId: conversation?.id, callerPhone, text: reply.followUpText, outboundKey });
       // El motivo que da el modelo se guarda tal cual: mientras todos los tickets decían
       // "Derivación automática del agente", la Bandeja no servía para entender POR QUÉ derivó —
       // que es justo lo que había que revisar cuando la primera semana derivó de más.

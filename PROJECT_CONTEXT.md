@@ -1826,3 +1826,48 @@ evento simulado CON el mensaje crudo se volvió a tomar, reconstruyó el teléfo
 respuesta sensata, la guardó, e intentó mandarla — falló ahí sólo porque el ambiente de prueba
 local no tenía las claves de WhatsApp a propósito. Ya en producción real, `franciskom.cl` respondió
 `{checked:0, recovered:0, unrecoverable:0}` — nada atorado.
+
+### Ronda de ventas: el agente cierra con horas reales · 14-09-2026 (desplegado, commits franciskom 2f39ce0 + f9ec81d)
+
+**Pedido de Daniel:** la finalidad del agente es dejar la hora tomada sin intervención humana;
+"tenemos un modelo potente, que sea un buen vendedor"; descuentos y planes sólo los ofrece
+Francisco. Se pidió probar y reportar antes de subir — se reportó y Daniel aprobó el deploy.
+
+**Corrección importante de mediciones anteriores:** producción corre `gpt-5.6-luna` (env
+`LLM_MODEL` de Vercel), no gpt-4o-mini. Las rondas previas se midieron localmente con gpt-4o-mini.
+Todo lo de esta ronda está medido con luna. Medir siempre contra el modelo de Vercel.
+
+**Números (luna, `dryRun` = mutaciones falsas, harness `ventas.mjs`/`medir.mjs` en scratchpad):**
+- Venta (casos reales: precio, domingo, "lo pienso", sin plata, pareja, hijo, domicilio, Eleva):
+  código de producción anterior 8/28 → nuevo 15/15 corrida completa + 12/12 en los más difíciles.
+- Regresión (no derivar por dolor, literales, silencio): 31/34, igual que antes. Fallan los mismos
+  3 raros: "Ya llegué" sin historial → traspaso; paciente de Eleva preguntando su hora → la
+  confunde; colega pidiendo el número → traspaso en vez de declinar.
+
+**Qué cambió (runtime, "el modelo decide, el runtime garantiza"):**
+- La respuesta literal ya no cierra el turno: sale el bloque oficial y un 2do mensaje corto con
+  horas que consulta el **runtime** (`suggestedSlotsForFollowUp`, mínimo 2 horas, completa con el
+  día siguiente). Precios del 2do mensaje se borran determinísticamente. Si piden domicilio, en vez
+  de horas del box se pide la dirección.
+- **Hora ofrecida = hora consultada en el mismo turno:** si el texto trae horas y no hubo
+  `get_availability`/create/reschedule/get_my_appointment, se devuelve al modelo una vez (caso real
+  medido: ante "no tengo plata" inventó "lunes 28 a las 17:00").
+- `avisar_al_dueno` se rechaza si todavía no se ofrecieron horas concretas.
+- Respuesta vacía de luna → reintento (antes tiraba error y el paciente quedaba sin respuesta).
+- `no_intervenir`/silencio se rechaza si el mensaje trae una consulta nueva (luna se tragaba
+  "¿tienes el lunes?" en hilos que Francisco había tocado).
+- Horas en ventanas de riesgo (`requiere_confirmacion`) no se ofrecen primero; máx. 3 horas.
+- `create_appointment` con `customer_name` (quien escribe) y `patient_name` (quien se atiende);
+  Calendar lleva el nombre del paciente. Al agendar ya no se pisa el nombre con que Francisco tenía
+  guardado al contacto (se agrega "Se presentó como: X" en notas).
+- Prompt: vendedor del centro, objeciones → alternativa concreta y aviso después; pareja → horas
+  seguidas; fuera de zona → box + aviso; nunca menciona descuentos.
+- Test `hernia` del paquete tenía un `expected_behavior` viejo (fallaba ya en HEAD): actualizado a
+  la regla vigente. Hecho "criterio profesional" conserva la lista de señales de urgencia.
+
+**Verificado en vivo** (`/api/preview/chat`, luna): precio → bloque + "hoy lunes a las 16:00, o
+mañana martes a las 08:00 y 18:00. ¿Cuál te dejo?"; dolor con las 3 respuestas → remate con horas.
+
+**Pendiente conocido:** ~1 de cada 4 casos de domicilio avisa a Francisco sin que haga falta;
+"en la tarde" a veces incluye una hora de la mañana; los 3 casos raros de arriba. Las pruebas
+gastaron saldo de la key OpenAI de Francisco (varias decenas de corridas).

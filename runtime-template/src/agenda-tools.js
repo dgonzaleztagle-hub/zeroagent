@@ -42,7 +42,7 @@ export function getAgendaToolDefinitions(packageData, catalog, options = {}) {
   return [
     { type: 'function', function: { name: 'get_availability', description: 'Consulta los horarios realmente disponibles. Úsala SIEMPRE que pregunten por horarios, disponibilidad o cupos, incluidas preguntas de sí/no como "¿tienen hora?" o "¿hay cupo?". Nunca inventes horarios ni respondas disponibilidad sin llamarla. Para saber si hay hora sólo hace falta la SEDE (Box Buin o domicilio) — el servicio exacto (evaluación, sesión respiratoria) casi no cambia la duración real y es una pregunta posterior, no un requisito para buscar hora; pásalo sólo si el cliente ya lo dijo espontáneamente.', parameters: { type: 'object', properties: { location: { type: 'string', description: 'Sede pedida por el cliente.', enum: ['Box Buin', 'Domicilio'] }, service: serviceSchema, resource: resourceSchema, date: { type: 'string', description: 'YYYY-MM-DD' } }, required: ['location', 'resource', 'date'] } } },
     { type: 'function', function: { name: 'get_my_appointment', description: 'Consulta las reservas activas del cliente que escribe. Requiere identidad verificada por canal.', parameters: { type: 'object', properties: {} } } },
-    { type: 'function', function: { name: 'create_appointment', description: 'Crea la reserva apenas tengas los datos requeridos (nombre, servicio, profesional, horario) y el cliente haya confirmado que quiere agendar ese horario. Al pedir los datos pídelos TODOS en la misma frase: nombre y apellido, RUT y correo (ej. "para dejarte tomada la hora necesito tu nombre y apellido, tu RUT para la boleta y un correo, así te llega la invitación al calendario"). Pregúntalo UNA sola vez: si el cliente no los da o responde sin alguno, AGENDA IGUAL con lo que tengas y menciona al confirmar qué dato quedó pendiente para la boleta — nunca retengas la hora esperando el RUT ni vuelvas a insistir. Salvo el nombre, ninguno de esos datos bloquea la reserva. Si la respuesta trae ask_intake_details:true, sigue el texto de intake_prompt para pedir esos datos opcionales DESPUÉS, en el mismo mensaje donde confirmas que la hora quedó agendada — nunca antes de crear la reserva. Si la respuesta trae action:"needs_manual_confirmation", NO digas que la reserva quedó agendada: sigue el mensaje que te devuelve la herramienta (el profesional debe confirmar esa hora en particular manualmente).', parameters: { type: 'object', properties: { customer_name: { type: 'string' }, email: { type: 'string', description: 'Correo del cliente, si lo dio.' }, rut: { type: 'string', description: 'RUT del cliente, si lo dio (se pide para emitir la boleta).' }, address: { type: 'string', description: 'Dirección de atención (calle, número, comuna) — obligatoria si el servicio es a domicilio.' }, age: { type: 'integer', description: 'Edad del cliente, si la dio.' }, occupation: { type: 'string', description: 'Ocupación del cliente, si la dio.' }, medical_history: { type: 'string', description: 'Antecedentes médicos importantes (lesiones, cirugías, medicamentos), si los dio.' }, extra_symptoms: { type: 'string', description: 'Otros síntomas además del motivo principal, si los dio.' }, service: serviceSchema, resource: resourceSchema, location: locationSchema, starts_at: { type: 'string', description: 'ISO 8601' }, notes: { type: 'string' } }, required: ['customer_name', 'service', 'resource', 'starts_at'] } } },
+    { type: 'function', function: { name: 'create_appointment', description: 'Crea la reserva apenas tengas los datos requeridos (nombre, servicio, profesional, horario) y el cliente haya confirmado que quiere agendar ese horario. Al pedir los datos pídelos TODOS en la misma frase: nombre y apellido, RUT y correo (ej. "para dejarte tomada la hora necesito tu nombre y apellido, tu RUT para la boleta y un correo, así te llega la invitación al calendario"). Pregúntalo UNA sola vez: si el cliente no los da o responde sin alguno, AGENDA IGUAL con lo que tengas y menciona al confirmar qué dato quedó pendiente para la boleta — nunca retengas la hora esperando el RUT ni vuelvas a insistir. Salvo el nombre, ninguno de esos datos bloquea la reserva. Si la respuesta trae ask_intake_details:true, sigue el texto de intake_prompt para pedir esos datos opcionales DESPUÉS, en el mismo mensaje donde confirmas que la hora quedó agendada — nunca antes de crear la reserva. Si la respuesta trae action:"needs_manual_confirmation", NO digas que la reserva quedó agendada: sigue el mensaje que te devuelve la herramienta (el profesional debe confirmar esa hora en particular manualmente).', parameters: { type: 'object', properties: { customer_name: { type: 'string', description: 'Nombre de quien ESCRIBE (el dueño del teléfono).' }, patient_name: { type: 'string', description: 'Nombre de quien se ATIENDE, sólo si es otra persona (hijo, mamá, pareja). Si son varias personas, una reserva por cada una.' }, email: { type: 'string', description: 'Correo del cliente, si lo dio.' }, rut: { type: 'string', description: 'RUT del cliente, si lo dio (se pide para emitir la boleta).' }, address: { type: 'string', description: 'Dirección de atención (calle, número, comuna) — obligatoria si el servicio es a domicilio.' }, age: { type: 'integer', description: 'Edad del cliente, si la dio.' }, occupation: { type: 'string', description: 'Ocupación del cliente, si la dio.' }, medical_history: { type: 'string', description: 'Antecedentes médicos importantes (lesiones, cirugías, medicamentos), si los dio.' }, extra_symptoms: { type: 'string', description: 'Otros síntomas además del motivo principal, si los dio.' }, service: serviceSchema, resource: resourceSchema, location: locationSchema, starts_at: { type: 'string', description: 'ISO 8601' }, notes: { type: 'string' } }, required: ['customer_name', 'service', 'resource', 'starts_at'] } } },
     { type: 'function', function: { name: 'update_customer_profile', description: 'Guarda correo, RUT, edad, ocupación, antecedentes médicos u otros síntomas que el cliente entrega para su ficha — típicamente respondiendo al pedido de "dejar la ficha lista" después de agendar. Es SÓLO para guardar esos datos, nunca implica crear, cambiar ni revisar ninguna reserva: no llames get_availability ni create_appointment en el mismo turno sólo porque el cliente mandó estos datos. Sólo funciona si el cliente ya agendó al menos una vez con este teléfono. Llámala apenas entregue alguno de estos datos, no esperes a tener todos.', parameters: { type: 'object', properties: { email: { type: 'string' }, rut: { type: 'string' }, age: { type: 'integer' }, occupation: { type: 'string' }, medical_history: { type: 'string' }, extra_symptoms: { type: 'string' } } } } },
     { type: 'function', function: { name: 'cancel_appointment', description: 'Cancela una reserva del mismo cliente verificado. No usar para una reserva de otra persona.', parameters: { type: 'object', properties: { reference: { type: 'string' } }, required: ['reference'] } } },
     { type: 'function', function: { name: 'reschedule_appointment', description: 'Reagenda una reserva del mismo cliente después de que eligió fecha/hora. Verifica disponibilidad y cambia atómicamente.', parameters: { type: 'object', properties: { reference: { type: 'string' }, new_starts_at: { type: 'string', description: 'ISO 8601' } }, required: ['reference', 'new_starts_at'] } } },
@@ -61,7 +61,7 @@ El texto se manda literal y completo; tú no lo reescribes, no lo resumes y no l
     // está llevando la respuesta correcta puede ser ninguna. Callarse en cualquier otro contexto
     // sería perder al cliente, por eso la herramienta no existe en esos turnos.
     ...(options.allowSilence ? [{ type: 'function', function: { name: 'no_intervenir', description: 'No manda ningún mensaje en este turno. Llámala cuando el hilo lo está llevando una persona del negocio y tú no ves sus mensajes: el último mensaje del cliente responde a algo que tú no dijiste (contesta "sí", "a las 15", "ya llegué", "gracias" sin que tú se lo hayas preguntado), o coordina algo que tú nunca ofreciste. Ante la duda, responde en vez de callarte.', parameters: { type: 'object', properties: { reason: { type: 'string', description: 'En una frase: por qué este turno no es para ti.' } }, required: ['reason'] } } }] : []),
-    { type: 'function', function: { name: 'avisar_al_dueno', description: 'Avisa al dueño para que entre él a cerrar la venta, sin dejar de atender: en el mismo turno sigues respondiendo y ofreciendo hora. Llámala cuando el cliente duda de que el tratamiento le sirva (dice que ya gastó, que nada le ha resultado, pregunta si de verdad le va a servir, da vueltas sin decidirse) o cuando falta un dato que el negocio no tiene confirmado.', parameters: { type: 'object', properties: { reason: { type: 'string', description: 'En una frase: qué duda tiene el cliente o qué dato falta.' } }, required: ['reason'] } } }
+    { type: 'function', function: { name: 'avisar_al_dueno', description: 'Avisa al dueño para que entre él a cerrar la venta, sin dejar de atender: en el mismo turno sigues respondiendo y ofreciendo hora. Es el último recurso, no el primero: úsala sólo cuando YA le ofreciste horas concretas y el cliente igual duda, pone un freno (plata, tiempo, lo va a pensar) o no la toma, o cuando pide algo que sólo el dueño puede resolver (un traslado fuera de zona, una condición de precio).', parameters: { type: 'object', properties: { reason: { type: 'string', description: 'En una frase: qué duda tiene el cliente o qué dato falta.' } }, required: ['reason'] } } }
   ];
 }
 
@@ -71,7 +71,7 @@ El texto se manda literal y completo; tú no lo reescribes, no lo resumes y no l
 // hasta las 20:00); con listas cortas responde exacto. Por eso la herramienta entrega una
 // preselección breve y repartida a lo largo del día en vez del bloque completo — la lista real
 // sigue disponible en available_slots para validar la hora que pida el cliente.
-const MAX_SLOTS_TO_OFFER = 6;
+const MAX_SLOTS_TO_OFFER = 3; // un vendedor ofrece dos o tres opciones, no la lista entera
 
 function pickSlotShortlist(slots) {
   if (slots.length <= MAX_SLOTS_TO_OFFER) return slots;
@@ -121,7 +121,18 @@ function ownerAppointment(dashboard, reference, callerPhone) {
   return { appointment };
 }
 
+// Modo ensayo, sólo para medir el comportamiento del agente contra la agenda real: las lecturas
+// (disponibilidad, reservas) van de verdad, pero ninguna escritura toca la base ni manda la
+// invitación de Google Calendar. El servidor nunca pasa este flag; lo usa el medidor.
+const MUTATING_TOOLS = new Set(['create_appointment', 'cancel_appointment', 'reschedule_appointment', 'update_customer_profile']);
+
 export async function executeAgendaTool(packageData, name, args = {}, context = {}) {
+  if (context.dryRun === true && MUTATING_TOOLS.has(name)) {
+    if (name === 'create_appointment') {
+      return { ok: true, action: 'created', dry_run: true, received: args, appointment: { status: 'confirmed', reference: 'ZA-ENSAYO', starts_at: args.starts_at, cuando_local: args.starts_at } };
+    }
+    return { ok: true, action: { cancel_appointment: 'cancelled', reschedule_appointment: 'rescheduled', update_customer_profile: 'profile_updated' }[name], dry_run: true, received: args };
+  }
   try {
     const config = agendaConfig(packageData);
     if (!config) return { error: 'agenda_disabled' };
@@ -180,14 +191,23 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
       const tz = config.timezone || 'America/Santiago';
       const hourFmt = new Intl.DateTimeFormat('es-CL', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
       const availableSlots = slots.map(iso => ({ at: iso, hora_local: hourFmt.format(new Date(iso)) }));
-      const shortlist = pickSlotShortlist(availableSlots);
+      // Para ofrecer primero se prefieren horas que el agente puede cerrar solo: una hora dentro de
+      // una franja de riesgo (ej. cuando Francisco puede estar en Eleva Salud) pasa a confirmación
+      // manual al reservarla, así que ofrecerla de entrada es prometer algo que no depende del
+      // agente. Siguen siendo reservables si el cliente las pide (están en available_slots); sólo
+      // si el día no tiene otras, se ofrecen igual.
+      for (const slot of availableSlots) {
+        if (findRiskWindow(packageData, resource.name, slot.at)) slot.requiere_confirmacion = true;
+      }
+      const closableSlots = availableSlots.filter(slot => !slot.requiere_confirmacion);
+      const shortlist = pickSlotShortlist(closableSlots.length ? closableSlots : availableSlots);
       return {
         ok: true, service: service.name, resource: resource.name, date: args.date, timezone: tz,
         available_slots: availableSlots,
         total_disponibles: availableSlots.length,
         ofrecer_primero: shortlist.map(slot => slot.hora_local),
         nota: availableSlots.length > shortlist.length
-          ? `TODAS las horas libres de ese día son las de "available_slots" (${availableSlots.length} en total, de ${availableSlots[0].hora_local} a ${availableSlots[availableSlots.length - 1].hora_local}). En tu mensaje ofrece sólo las de "ofrecer_primero" para no abrumar, y dile que hay más horas si ninguna le acomoda. Si el cliente pide otra hora, búscala en "available_slots": si está ahí, está libre y la agendas sin decir que no hay. Nunca ofrezcas una hora que no esté en "available_slots".`
+          ? `TODAS las horas libres de ese día son las de "available_slots" (${availableSlots.length} en total, de ${availableSlots[0].hora_local} a ${availableSlots[availableSlots.length - 1].hora_local}). En tu mensaje ofrece sólo las de "ofrecer_primero" para no abrumar, y dile que hay más horas si ninguna le acomoda. Si el cliente pide otra hora, búscala en "available_slots": si está ahí, está libre y la agendas sin decir que no hay. Nunca ofrezcas una hora que no esté en "available_slots". Las marcadas "requiere_confirmacion" no las ofrezcas tú: al reservarlas quedan esperando confirmación manual del profesional; sólo se toman si el cliente pide exactamente esa hora.`
           : 'Estas son todas las horas libres del día: ofrécelas tal cual, sin agregar ninguna más.'
       };
     }
@@ -276,7 +296,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
       // Reusa createAgendaAppointment (ya cubre local/Supabase y el bump de segmento del
       // cliente) en vez de duplicar la llamada RPC — antes esta rama saltaba ese bump.
       const appointment = await createAgendaAppointment(packageData, {
-        customer_name: String(args.customer_name || '').trim(), customer_phone: context.callerPhone, customer_email: String(args.email || '').trim(),
+        customer_name: String(args.customer_name || '').trim(), patient_name: String(args.patient_name || '').trim(), customer_phone: context.callerPhone, customer_email: String(args.email || '').trim(),
         customer_rut: String(args.rut || '').trim(), customer_address: String(args.address || '').trim(),
         customer_age: args.age, customer_occupation: String(args.occupation || '').trim(),
         customer_medical_history: String(args.medical_history || '').trim(), customer_extra_symptoms: String(args.extra_symptoms || '').trim(),

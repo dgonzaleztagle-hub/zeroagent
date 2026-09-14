@@ -399,6 +399,13 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
   const serviceName = cleanText(input.service);
   const resourceName = cleanText(input.resource);
   const customerName = cleanText(input.customer_name);
+  // Quien se atiende no siempre es quien escribe: una mamá agenda para su hijo desde su propio
+  // teléfono. El cliente se identifica por teléfono, así que si el nombre del paciente viajara como
+  // customer_name, la ficha de la mamá pasaría a llamarse como el hijo. Se guarda aparte: en las
+  // notas de la cita y como título del evento de Calendar, que es donde Francisco lo busca.
+  const patientName = cleanText(input.patient_name, 120);
+  const bookedForOther = Boolean(patientName) && patientName.toLowerCase() !== customerName.toLowerCase();
+  const calendarTitleName = bookedForOther ? patientName : customerName;
   // Normalizado a un único formato (E.164 Chile) sea cual sea el origen (WhatsApp ya normalizado
   // en el ingreso del webhook, reserva pública en texto libre, consola) — antes cada camino guardaba
   // el teléfono como llegaba y "9 1234 5678"/"+56 9 1234 5678"/"+56912345678" podían crear tres
@@ -434,7 +441,7 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
   const riskWindow = findRiskWindow(packageData, resourceName, startsAt);
   const effectiveConfirmationMode = riskWindow ? 'manual' : config.confirmation_mode;
   const riskNote = riskWindow ? `[Franja de riesgo] ${riskWindow.reason || 'Posible compromiso del profesional en otro lugar a esta hora.'} Confirmar disponibilidad real antes de aceptar.` : '';
-  const notesWithRisk = [cleanText(input.notes, 800), riskNote].filter(Boolean).join(' — ').slice(0, 800);
+  const notesWithRisk = [bookedForOther ? `Paciente: ${patientName} (agendó ${customerName})` : '', cleanText(input.notes, 800), riskNote].filter(Boolean).join(' — ').slice(0, 800);
   const checkDurationMinutes = Number(service.duration_minutes) || 30;
   await assertNotBusyOnGoogleCalendar(startsAt, new Date(new Date(startsAt).getTime() + checkDurationMinutes * 60_000).toISOString());
   if (supabaseSettings()) {
@@ -443,11 +450,27 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
     // no manda `location` explícito (típico del bot de WhatsApp) — usar sólo `explicitLocation`
     // acá dejaba el evento de Calendar sin color pese a que la cita sí tenía sede conocida.
     const location = explicitLocation || dashboard.catalog.locations.find(item => item.id === resource.location_id) || null;
+    // El nombre que el dueño le puso al contacto manda sobre el que escribe la persona al agendar
+    // (mismo criterio que la sincronización de contactos, 09-09-2026). La RPC pisa full_name en
+    // cada reserva que no es pública, y el dueño de franciskom guarda sus contactos en iCloud, así
+    // que la sincronización diaria con Google nunca lo reparaba: una reserva por WhatsApp borraba
+    // para siempre su "Paciente Fulano" o su "S1399". Sólo se respeta un nombre real — si la
+    // ficha tenía el teléfono o estaba vacía, entra el nombre nuevo. El nombre con que se presentó
+    // queda en las notas si es distinto.
+    let bookingCustomerName = customerName;
+    if (source === 'whatsapp') {
+      const existingCustomer = (await agendaSupabaseRequest(`/rest/v1/za_customers?phone=eq.${encodeURIComponent(customerPhone)}&select=full_name`).catch(() => null))?.[0];
+      const ownerName = String(existingCustomer?.full_name || '').trim();
+      if (ownerName && !/^[+0-9 ]+$/.test(ownerName) && ownerName.toLowerCase() !== customerName.toLowerCase()) bookingCustomerName = ownerName;
+    }
+    const bookingNotes = bookingCustomerName !== customerName && customerName
+      ? [`Se presentó como: ${customerName}`, notesWithRisk].filter(Boolean).join(' — ').slice(0, 800)
+      : notesWithRisk;
     const result = await agendaSupabaseRequest('/rest/v1/rpc/za_request_appointment', {
       method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({
-        p_customer_name: customerName, p_customer_phone: customerPhone, p_service_id: service.id, p_resource_id: resource.id,
+        p_customer_name: bookingCustomerName, p_customer_phone: customerPhone, p_service_id: service.id, p_resource_id: resource.id,
         p_starts_at: startsAt, p_source: source, p_location_id: location?.id || resource.location_id || null,
-        p_notes: notesWithRisk, p_confirmation_mode: effectiveConfirmationMode,
+        p_notes: bookingNotes, p_confirmation_mode: effectiveConfirmationMode,
         p_minimum_notice_hours: Number(config.rules?.minimum_notice_hours || 0),
         p_maximum_advance_days: Number(config.rules?.maximum_advance_days ?? 730),
         p_pending_ttl_minutes: pendingConfirmationTtlMinutes(config),
@@ -464,7 +487,7 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
       // event_id, un reintento acá crearía un segundo evento y una segunda invitación por correo.
       if (appointment.google_calendar_event_id) return;
       const eventId = await createGoogleCalendarEvent({
-        summary: `${customerName} — ${serviceName}`,
+        summary: `${calendarTitleName} — ${serviceName}`,
         description: [`Servicio: ${serviceName}`, `Teléfono: ${customerPhone}`, notesWithRisk].filter(Boolean).join('\n'),
         startIso: appointment.starts_at, endIso: appointment.ends_at,
         attendeeEmail: customerEmail || null, colorId: colorIdForLocation(location?.name || '')
@@ -535,7 +558,7 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
   await saveAgendaState(packageData, state);
   await syncGoogleCalendarBestEffort(async () => {
     const eventId = await createGoogleCalendarEvent({
-      summary: `${customerName} — ${serviceName}`,
+      summary: `${calendarTitleName} — ${serviceName}`,
       description: [`Servicio: ${serviceName}`, `Teléfono: ${customerPhone}`, notesWithRisk].filter(Boolean).join('\n'),
       startIso: appointment.starts_at, endIso: new Date(endTime).toISOString(),
       attendeeEmail: customerEmail || null, colorId: colorIdForLocation(appointment.location)
