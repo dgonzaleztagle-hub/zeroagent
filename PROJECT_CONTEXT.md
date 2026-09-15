@@ -1959,3 +1959,43 @@ espalda baja?" → "hace como 2 meses" → remate con 3 horas reales.
 del bloque); sobre-aviso ocasional en domicilio. **Pendiente:** probar si el saludo automático de
 WhatsApp Business llega a Zavu (necesita que Francisco lo active); semana sin intervención de
 Francisco para medir errores reales.
+
+### Revisión 1er día con los cambios (14-09 19:00 → 15-09 14:20) · 15-09-2026 — sin tocar código
+
+Daniel le dijo a Francisco "déjalo que la cague, después parchas": semana de observar. Bot no pausado.
+El bot habló en 6 conversaciones; silenciados/traspasados respetados.
+- **Bien:** Esteban Cares (pide última hora de hoy → ofrece 18:30/19:00 → pide 20:00 → "la última es
+  19:00, ¿te la dejo?" → agenda, pide sólo RUT/correo, calla después). Elenis: precio → pregunta
+  cercana ✓; ante "tengo hernias, consultaré con el médico" responde bien y ofrece horas.
+- **Carolina Pereda:** "Hola Francisco bien y tu??" (le contesta a Francisco, invisible para Zavu) →
+  pide mover a martes → bot ofrece 22-09 → elige 19:00 → `not_found` (su hora no está en nuestra
+  agenda) → sin aviso → ella "jajaja si caché, tranqui, nos vemos el martes" → bot "Perfecto, nos
+  vemos el martes". Daniel sospecha, y las señales lo apoyan, que Francisco la coordinó por fuera.
+  Confirmar con Francisco que quedó el martes 22 19:00.
+- **Parches pendientes (acumular para fin de semana, esperar insight de Francisco):**
+  1. reschedule/cancel `not_found` → owner_alert automático con lo pedido; nunca confirmar el cambio.
+  2. "Ok / gracias" a la pregunta cercana → ofrecer horas (el nudge sólo detectaba otra pregunta, no
+     despedidas tipo "si necesitas una hora, escríbeme").
+  3. `customer_name` de relleno ("No confirmado") → usar el nombre guardado o pedirlo (quedó "Se
+     presentó como: No confirmado" en la reserva de Esteban).
+  4. Contacto personal (Valentina Pradenas Contadora, versión previa al prompt nuevo): el bot le
+     contestó como si fuera Francisco ("me salió demasiado formalito 😅").
+- Francisco no ha usado ningún link de acción del SMS; 0 avisos generados desde el 14-09 19:00.
+
+### "Sesión", nunca "evaluación" · 15-09-2026 (desplegado fe1a2de)
+
+Feedback de Francisco: la gente se confunde cuando el bot dice que se agendó "la evaluación"; él
+evalúa Y trata en la misma hora. Cambios:
+- **Supabase de franciskom (en vivo):** `za_services` "Evaluación · Box Buin" → "Sesión · Box Buin",
+  "Evaluación · Eleva Salud" → "Sesión · Eleva Salud" (mismos ids; reservas, Calendar futuro, consola
+  y página pública toman el nombre nuevo solos). "Atención a domicilio" y las respiratorias no cambian.
+- Paquete (franciskom + plantilla): config de servicios, hecho "criterio profesional", test hernia y
+  regla en `system_prompt` ("lo que se agenda es una sesión… nunca 'evaluación'"). Se mantuvo la frase
+  de Francisco "prefiere evaluarte" (verbo, es suya). Textos oficiales intactos ("🧩 Evaluación
+  completa" es parte de lo que incluye la sesión). Script: `sesion_no_evaluacion.mjs` (scratchpad).
+- `agenda-tools.js`: descripción de get_availability. `public/landing.html` (sólo franciskom): las
+  etiquetas de precio "Evaluación general" → "Sesión general".
+- **Ojo Studio:** su base (caída) sigue con los nombres viejos; si se regenera el paquete desde Studio
+  hay que aplicar el mismo cambio.
+Medido con luna: ventas 15/15, fluidez 15/15, post-agenda 9/9; ningún texto de reserva dice
+"evaluación". En vivo: "Tengo mañana a las 08:00, 17:30 o 18:30 para una sesión, ¿cuál te dejo?".
