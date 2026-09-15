@@ -1,4 +1,4 @@
-import { agendaConfig, agendaSupabaseRequest, agendaUsesSupabase, getAgendaDashboard, getAvailableSlots, createAgendaAppointment, updateAgendaAppointment, rescheduleAgendaAppointment, findRiskWindow, isActiveAgendaAppointment, asIso } from './agenda.js';
+import { agendaConfig, agendaSupabaseRequest, agendaUsesSupabase, getAgendaDashboard, getAvailableSlots, createAgendaAppointment, updateAgendaAppointment, rescheduleAgendaAppointment, findRiskWindow, isActiveAgendaAppointment, asIso, listUpcomingAppointmentsForPhone } from './agenda.js';
 import { updateCustomerIntakeRecord } from './customer-records.js';
 
 // Match de catálogo tolerante: el LLM puede pasar el nombre con otra capitalización o sin tildes.
@@ -42,10 +42,10 @@ export function getAgendaToolDefinitions(packageData, catalog, options = {}) {
   return [
     { type: 'function', function: { name: 'get_availability', description: 'Consulta los horarios realmente disponibles. Úsala SIEMPRE que pregunten por horarios, disponibilidad o cupos, incluidas preguntas de sí/no como "¿tienen hora?" o "¿hay cupo?". Nunca inventes horarios ni respondas disponibilidad sin llamarla. Para saber si hay hora sólo hace falta la SEDE (Box Buin o domicilio) — el servicio exacto (evaluación, sesión respiratoria) casi no cambia la duración real y es una pregunta posterior, no un requisito para buscar hora; pásalo sólo si el cliente ya lo dijo espontáneamente.', parameters: { type: 'object', properties: { location: { type: 'string', description: 'Sede pedida por el cliente.', enum: ['Box Buin', 'Domicilio'] }, service: serviceSchema, resource: resourceSchema, date: { type: 'string', description: 'YYYY-MM-DD' } }, required: ['location', 'resource', 'date'] } } },
     { type: 'function', function: { name: 'get_my_appointment', description: 'Consulta las reservas activas del cliente que escribe. Requiere identidad verificada por canal.', parameters: { type: 'object', properties: {} } } },
-    { type: 'function', function: { name: 'create_appointment', description: 'Crea la reserva apenas tengas los datos requeridos (nombre, servicio, profesional, horario) y el cliente haya confirmado que quiere agendar ese horario. Al pedir los datos pídelos TODOS en la misma frase: nombre y apellido, RUT y correo (ej. "para dejarte tomada la hora necesito tu nombre y apellido, tu RUT para la boleta y un correo, así te llega la invitación al calendario"). Pregúntalo UNA sola vez: si el cliente no los da o responde sin alguno, AGENDA IGUAL con lo que tengas y menciona al confirmar qué dato quedó pendiente para la boleta — nunca retengas la hora esperando el RUT ni vuelvas a insistir. Salvo el nombre, ninguno de esos datos bloquea la reserva. Si la respuesta trae ask_intake_details:true, sigue el texto de intake_prompt para pedir esos datos opcionales DESPUÉS, en el mismo mensaje donde confirmas que la hora quedó agendada — nunca antes de crear la reserva. Si la respuesta trae action:"needs_manual_confirmation", NO digas que la reserva quedó agendada: sigue el mensaje que te devuelve la herramienta (el profesional debe confirmar esa hora en particular manualmente).', parameters: { type: 'object', properties: { customer_name: { type: 'string', description: 'Nombre de quien ESCRIBE (el dueño del teléfono).' }, patient_name: { type: 'string', description: 'Nombre de quien se ATIENDE, sólo si es otra persona (hijo, mamá, pareja). Si son varias personas, una reserva por cada una.' }, email: { type: 'string', description: 'Correo del cliente, si lo dio.' }, rut: { type: 'string', description: 'RUT del cliente, si lo dio (se pide para emitir la boleta).' }, address: { type: 'string', description: 'Dirección de atención (calle, número, comuna) — obligatoria si el servicio es a domicilio.' }, age: { type: 'integer', description: 'Edad del cliente, si la dio.' }, occupation: { type: 'string', description: 'Ocupación del cliente, si la dio.' }, medical_history: { type: 'string', description: 'Antecedentes médicos importantes (lesiones, cirugías, medicamentos), si los dio.' }, extra_symptoms: { type: 'string', description: 'Otros síntomas además del motivo principal, si los dio.' }, service: serviceSchema, resource: resourceSchema, location: locationSchema, starts_at: { type: 'string', description: 'ISO 8601' }, notes: { type: 'string' } }, required: ['customer_name', 'service', 'resource', 'starts_at'] } } },
-    { type: 'function', function: { name: 'update_customer_profile', description: 'Guarda correo, RUT, edad, ocupación, antecedentes médicos u otros síntomas que el cliente entrega para su ficha — típicamente respondiendo al pedido de "dejar la ficha lista" después de agendar. Es SÓLO para guardar esos datos, nunca implica crear, cambiar ni revisar ninguna reserva: no llames get_availability ni create_appointment en el mismo turno sólo porque el cliente mandó estos datos. Sólo funciona si el cliente ya agendó al menos una vez con este teléfono. Llámala apenas entregue alguno de estos datos, no esperes a tener todos.', parameters: { type: 'object', properties: { email: { type: 'string' }, rut: { type: 'string' }, age: { type: 'integer' }, occupation: { type: 'string' }, medical_history: { type: 'string' }, extra_symptoms: { type: 'string' } } } } },
-    { type: 'function', function: { name: 'cancel_appointment', description: 'Cancela una reserva del mismo cliente verificado. No usar para una reserva de otra persona.', parameters: { type: 'object', properties: { reference: { type: 'string' } }, required: ['reference'] } } },
-    { type: 'function', function: { name: 'reschedule_appointment', description: 'Reagenda una reserva del mismo cliente después de que eligió fecha/hora. Verifica disponibilidad y cambia atómicamente.', parameters: { type: 'object', properties: { reference: { type: 'string' }, new_starts_at: { type: 'string', description: 'ISO 8601' } }, required: ['reference', 'new_starts_at'] } } },
+    { type: 'function', function: { name: 'create_appointment', description: 'Crea la reserva apenas tengas los datos requeridos (nombre, servicio, profesional, horario) y el cliente haya confirmado que quiere agendar ese horario. Al pedir los datos pídelos TODOS en la misma frase: nombre y apellido, RUT y correo (ej. "para dejarte tomada la hora necesito tu nombre y apellido, tu RUT para la boleta y un correo, así te llega la invitación al calendario"). Pregúntalo UNA sola vez: si el cliente no los da o responde sin alguno, AGENDA IGUAL con lo que tengas y menciona al confirmar qué dato quedó pendiente para la boleta — nunca retengas la hora esperando el RUT ni vuelvas a insistir. Salvo el nombre, ninguno de esos datos bloquea la reserva. Si la respuesta trae ask_intake_details:true, sigue el texto de intake_prompt para pedir esos datos opcionales DESPUÉS, en el mismo mensaje donde confirmas que la hora quedó agendada — nunca antes de crear la reserva. Si la respuesta trae action:"needs_manual_confirmation", NO digas que la reserva quedó agendada: sigue el mensaje que te devuelve la herramienta (el profesional debe confirmar esa hora en particular manualmente).', parameters: { type: 'object', properties: { customer_name: { type: 'string', description: 'Nombre y apellido de quien ESCRIBE (el dueño del teléfono). Una dirección (calle y número) nunca es un nombre.' }, patient_name: { type: 'string', description: 'Nombre de quien se ATIENDE, sólo si es otra persona (hijo, mamá, pareja). Si son varias personas, una reserva por cada una.' }, email: { type: 'string', description: 'Correo del cliente, si lo dio.' }, rut: { type: 'string', description: 'RUT del cliente, si lo dio (se pide para emitir la boleta).' }, address: { type: 'string', description: 'Dirección de atención (calle, número, comuna) — obligatoria si el servicio es a domicilio.' }, service: serviceSchema, resource: resourceSchema, location: locationSchema, date: { type: 'string', description: 'Día de la hora, YYYY-MM-DD.' }, time: { type: 'string', description: 'Hora local HH:MM, tal como viene en hora_local de get_availability (ej. 18:30). Nunca conviertas zonas horarias.' }, notes: { type: 'string' } }, required: ['customer_name', 'service', 'resource', 'date', 'time'] } } },
+    { type: 'function', function: { name: 'update_customer_profile', description: 'Guarda el RUT o el correo que el cliente entrega después de agendar. Es SÓLO para guardar esos datos: no implica crear, cambiar ni revisar ninguna reserva. Llámala apenas entregue alguno.', parameters: { type: 'object', properties: { email: { type: 'string' }, rut: { type: 'string' } } } } },
+    { type: 'function', function: { name: 'cancel_appointment', description: 'Cancela una reserva del cliente que escribe, sólo si lo pidió explícitamente. Si tiene una sola reserva activa no hace falta la referencia.', parameters: { type: 'object', properties: { reference: { type: 'string', description: 'Referencia ZA-... sólo si la tienes de una herramienta en este turno; si no, omítela.' } } } } },
+    { type: 'function', function: { name: 'reschedule_appointment', description: 'Cambia la hora de una reserva del cliente que escribe, después de que eligió día y hora. Si tiene una sola reserva activa no hace falta la referencia. Si el cambio no se puede, la reserva original queda intacta y la respuesta trae alternativas reales de ese día: ofrécelas. Nunca canceles para cambiar una hora.', parameters: { type: 'object', properties: { reference: { type: 'string', description: 'Referencia ZA-... sólo si la tienes de una herramienta en este turno; si no, omítela.' }, date: { type: 'string', description: 'Día nuevo, YYYY-MM-DD.' }, time: { type: 'string', description: 'Hora local nueva HH:MM, tal como viene en hora_local de get_availability.' } }, required: ['date', 'time'] } } },
     ...(literalReplies(packageData).length ? [{ type: 'function', function: { name: 'responder_textual', description: `Envía una respuesta oficial del negocio TAL CUAL fue escrita por el dueño. Úsala SIEMPRE que el mensaje del cliente caiga en uno de estos casos, en vez de redactar tú la respuesta:
 ${literalReplies(packageData).map(item => `- "${item.id}": ${item.when}`).join('\n')}
 El texto se manda literal y completo; tú no lo reescribes, no lo resumes y no le agregas nada antes ni después.`, parameters: { type: 'object', properties: { id: { type: 'string', enum: literalReplies(packageData).map(item => item.id), description: 'Cuál de las respuestas oficiales corresponde.' } }, required: ['id'] } } }] : []),
@@ -121,6 +121,37 @@ function ownerAppointment(dashboard, reference, callerPhone) {
   return { appointment };
 }
 
+// La referencia de una reserva no sobrevive entre turnos: el historial guarda el texto, no el
+// resultado de las herramientas. Camilo (franciskom, 14-09-2026) pidió cambiar su hora, el primer
+// intento sí tenía la referencia y el segundo, un turno después, ya no: "No encontré esa reserva"
+// con su hora intacta. Si la referencia falta o no calza, se resuelve por el teléfono verificado.
+async function resolveOwnedAppointment(packageData, dashboard, reference, callerPhone) {
+  if (!callerPhone) return { error: 'identity_required', message: 'No hay teléfono verificado para consultar o modificar la reserva.' };
+  if (String(reference || '').trim()) {
+    const owned = ownerAppointment(dashboard, reference, callerPhone);
+    if (!owned.error || owned.error === 'ownership_not_verified') return owned;
+  }
+  const upcoming = await listUpcomingAppointmentsForPhone(packageData, callerPhone, { graceMinutes: 0 });
+  if (!upcoming.length) return { error: 'not_found', message: 'Este número no tiene reservas próximas activas.' };
+  if (upcoming.length > 1) return { error: 'which_appointment', message: 'El cliente tiene más de una reserva próxima: pregúntale cuál quiere cambiar, nombrando día y hora.', appointments: upcoming.map(item => ({ reference: item.reference, starts_at: item.starts_at })) };
+  const match = (dashboard.appointments || []).find(item => item.id === upcoming[0].id || item.reference === upcoming[0].reference);
+  return { appointment: match || { ...upcoming[0], customer_phone: callerPhone } };
+}
+
+// Día y hora locales (lo que el modelo lee en hora_local) → instante. Antes el modelo mandaba un
+// ISO con offset calculado por él, y Chile cambia de horario en septiembre: un offset viejo corre la
+// hora una completa y la reserva choca con otra cosa del Calendar.
+function localDateTimeToIso(date, time, timeZone) {
+  const day = String(date || '').trim();
+  const match = /^(\d{1,2}):(\d{2})/.exec(String(time || '').trim());
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !match) return null;
+  return asIso(`${day}T${match[1].padStart(2, '0')}:${match[2]}`, timeZone);
+}
+
+// Un nombre con números o con forma de calle es una dirección leída como nombre (Rodolfo, 14-09:
+// "Eduardo Ríos Mackenna 1544" terminó como "¿Cuál te dejo para Eduardo Ríos?").
+const looksLikeAddress = value => /\d/.test(String(value || '')) || /^\s*(calle|pasaje|psje|avenida|av\.?|camino|villa|poblaci[oó]n|block|depto)\b/i.test(String(value || ''));
+
 // Modo ensayo, sólo para medir el comportamiento del agente contra la agenda real: las lecturas
 // (disponibilidad, reservas) van de verdad, pero ninguna escritura toca la base ni manda la
 // invitación de Google Calendar. El servidor nunca pasa este flag; lo usa el medidor.
@@ -129,9 +160,10 @@ const MUTATING_TOOLS = new Set(['create_appointment', 'cancel_appointment', 'res
 export async function executeAgendaTool(packageData, name, args = {}, context = {}) {
   if (context.dryRun === true && MUTATING_TOOLS.has(name)) {
     if (name === 'create_appointment') {
-      return { ok: true, action: 'created', dry_run: true, received: args, appointment: { status: 'confirmed', reference: 'ZA-ENSAYO', starts_at: args.starts_at, cuando_local: args.starts_at } };
+      if (looksLikeAddress(args.customer_name) || looksLikeAddress(args.patient_name)) return { error: 'name_looks_like_address', message: 'Ese nombre parece una dirección, no una persona. Pídele al cliente su nombre y apellido; la dirección va en address.' };
+      return { ok: true, action: 'created', dry_run: true, received: args, appointment: { status: 'confirmed', reference: 'ZA-ENSAYO', starts_at: `${args.date}T${args.time}`, cuando_local: `${args.date} ${args.time}` } };
     }
-    return { ok: true, action: { cancel_appointment: 'cancelled', reschedule_appointment: 'rescheduled', update_customer_profile: 'profile_updated' }[name], dry_run: true, received: args };
+    if (name !== 'reschedule_appointment') return { ok: true, action: { cancel_appointment: 'cancelled', update_customer_profile: 'profile_updated' }[name], dry_run: true, received: args };
   }
   try {
     const config = agendaConfig(packageData);
@@ -221,7 +253,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
     if (name === 'update_customer_profile') {
       if (!context.callerPhone) return { error: 'identity_required', message: 'No hay teléfono verificado para esta conversación.' };
       try {
-        await updateCustomerIntakeRecord(packageData, context.callerPhone, args, {
+        await updateCustomerIntakeRecord(packageData, context.callerPhone, { email: args.email, rut: args.rut }, {
           source: 'whatsapp', sourceMessageId: context.messageId, operationKey: context.operationKey, createdBy: 'agent'
         });
         return { ok: true, action: 'profile_updated' };
@@ -243,7 +275,8 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
       if (service.bookable === false) return { ok: true, action: 'not_bookable_here', message: service.redirect_note || `"${service.name}" no se agenda por este canal — indícale al cliente que coordine directamente con ese lugar.` };
       // Un reintento de la misma operación debe ser idempotente, pero un cliente sí puede reservar
       // varias sesiones futuras del mismo servicio. Sólo se deduplica la cita exacta.
-      const requestedIso = asIso(args.starts_at, config.timezone || 'America/Santiago');
+      if (looksLikeAddress(args.customer_name) || looksLikeAddress(args.patient_name)) return { error: 'name_looks_like_address', message: 'Ese nombre parece una dirección, no una persona. Pídele al cliente su nombre y apellido; la dirección va en address.' };
+      const requestedIso = args.date && args.time ? localDateTimeToIso(args.date, args.time, config.timezone || 'America/Santiago') : asIso(args.starts_at, config.timezone || 'America/Santiago');
       const location = findByName(dashboard.catalog.locations, args.location);
       // Validar que la hora pedida sea futura y cumpla el aviso mínimo ANTES de mirar franjas de
       // riesgo: findRiskWindow sólo compara día-de-semana + hora, así que una fecha pasada que cae
@@ -327,30 +360,80 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
       // la confirmación hacía que el modelo esperara la respuesta en vez de agendar (medido con
       // gpt-4o-mini: se quedaba pidiendo estos datos indefinidamente y nunca llamaba la herramienta,
       // incluso con el cliente diciendo explícitamente "agéndala ya").
-      const intakeMissing = !args.email && !args.rut && args.age == null && !args.occupation && !args.medical_history && !args.extra_symptoms;
-      return { ok: true, action: 'created', appointment: { reference: appointment.reference, starts_at: appointment.starts_at, cuando_local: createdWhen, status: appointment.status }, ...(intakeMissing ? { ask_intake_details: true, intake_prompt: 'La reserva ya quedó creada. Ahora, en este mismo mensaje donde confirmas la hora, aprovecha de decir algo como "aprovechemos de dejar tu ficha lista" y pedir en un solo bloque: correo, RUT (se usa para la boleta), edad, ocupación, antecedentes médicos importantes (lesiones, cirugías, medicamentos) y otros síntomas además del motivo principal. Es sólo para la ficha, no vuelvas a preguntar si no responde. Cuando el cliente conteste (en este turno o en uno posterior), guarda lo que haya dado llamando update_customer_profile — no basta con agradecer en el texto, si no se llama la herramienta se pierde.' } : {}) };
+      const missingIntake = [!args.rut ? 'RUT (para la boleta)' : '', !args.email ? 'correo (para la invitación al calendario)' : ''].filter(Boolean);
+      return { ok: true, action: 'created', appointment: { reference: appointment.reference, starts_at: appointment.starts_at, cuando_local: createdWhen, status: appointment.status }, ...(missingIntake.length ? { ask_intake_details: true, intake_prompt: `La reserva ya quedó creada. En este mismo mensaje, al confirmar la hora, pide una sola vez lo que falta: ${missingIntake.join(' y ')}. Nada más: ni edad, ni ocupación, ni antecedentes, ni síntomas — eso lo conversa Francisco en la consulta. Si no lo manda, no insistas. Cuando lo mande, guárdalo con update_customer_profile.` } : {}) };
     }
     if (name === 'cancel_appointment') {
-      const owned = ownerAppointment(dashboard, args.reference, context.callerPhone); if (owned.error) return owned;
+      const owned = await resolveOwnedAppointment(packageData, dashboard, args.reference, context.callerPhone); if (owned.error) return owned;
       if (!isActiveAgendaAppointment(owned.appointment)) return { error: 'invalid_status', message: 'Esa reserva ya no se puede cancelar.' };
       await updateAgendaAppointment(packageData, owned.appointment.id, 'cancelled');
       return { ok: true, action: 'cancelled', reference: owned.appointment.reference };
     }
     if (name === 'reschedule_appointment') {
-      const owned = ownerAppointment(dashboard, args.reference, context.callerPhone); if (owned.error) return owned;
+      const owned = await resolveOwnedAppointment(packageData, dashboard, args.reference, context.callerPhone); if (owned.error) return owned;
       if (!isActiveAgendaAppointment(owned.appointment)) return { error: 'invalid_status', message: 'Esa reserva ya no se puede reagendar.' };
-      const appointment = await rescheduleAgendaAppointment(packageData, { id: owned.appointment.id, new_starts_at: args.new_starts_at, requester_phone: context.callerPhone });
+      const current = owned.appointment;
+      const tz = config.timezone || 'America/Santiago';
+      const whenFmt = new Intl.DateTimeFormat('es-CL', { timeZone: tz, dateStyle: 'short', timeStyle: 'short' });
+      const hourFmt = new Intl.DateTimeFormat('es-CL', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
+      const dayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+      const newIso = args.date && args.time ? localDateTimeToIso(args.date, args.time, tz) : asIso(args.new_starts_at, tz);
+      if (!newIso) return { error: 'invalid_datetime', message: 'Falta el día (YYYY-MM-DD) o la hora (HH:MM) nueva.' };
+      const newTime = new Date(newIso).getTime();
+      const newDay = dayFmt.format(new Date(newIso));
+      const original = { reference: current.reference, cuando_local: whenFmt.format(new Date(current.starts_at)) };
+      // Alternativas reales del mismo día, con la misma disponibilidad que usa get_availability:
+      // lo que se ofrece después de un rechazo tiene que poder tomarse.
+      const alternativesSameDay = async () => {
+        const slots = await getAvailableSlots(packageData, { service: current.service, resource: current.resource, date: newDay }).catch(() => []);
+        return slots.filter(iso => new Date(iso).getTime() !== newTime)
+          .sort((a, b) => Math.abs(new Date(a).getTime() - newTime) - Math.abs(new Date(b).getTime() - newTime))
+          .slice(0, 3).sort().map(iso => hourFmt.format(new Date(iso)));
+      };
+      const unchanged = async (reason, extra = {}) => ({
+        error: reason, original_unchanged: true, original, dia_pedido: newDay,
+        alternativas_mismo_dia: await alternativesSameDay(),
+        guidance: 'La reserva original sigue igual, no se perdió. Díselo claro y ofrécele las alternativas reales de este día; si no le sirven, consulta otro día con get_availability. Nunca la canceles para cambiarla.',
+        ...extra
+      });
+      if (newTime === new Date(current.starts_at).getTime()) {
+        return { ok: true, action: 'already_matched', reference: current.reference, cuando_local: original.cuando_local, message: 'La reserva ya está en ese horario; no hubo que cambiar nada.' };
+      }
+      if (newTime < Date.now()) return unchanged('Esa hora ya pasó.');
+      // Se verifica contra la disponibilidad real ANTES de escribir. Si la hora nueva se cruza con la
+      // propia reserva (moverla media hora el mismo día), la disponibilidad la ve ocupada por ella
+      // misma: en ese caso decide la función atómica de la base.
+      const duration = Number((dashboard.catalog.services || []).find(item => normName(item.name) === normName(current.service))?.duration_minutes) || 60;
+      const overlapsItself = Math.abs(newTime - new Date(current.starts_at).getTime()) < duration * 60_000;
+      if (!overlapsItself) {
+        const slots = await getAvailableSlots(packageData, { service: current.service, resource: current.resource, date: newDay }).catch(() => null);
+        if (Array.isArray(slots) && !slots.some(iso => new Date(iso).getTime() === newTime)) {
+          return unchanged(`Las ${hourFmt.format(new Date(newIso))} de ese día no están disponibles.`);
+        }
+      }
+      if (context.dryRun === true) {
+        return { ok: true, action: 'rescheduled', dry_run: true, reference: current.reference, cuando_local: whenFmt.format(new Date(newIso)), received: args };
+      }
+      let appointment;
+      try {
+        appointment = await rescheduleAgendaAppointment(packageData, { id: current.id, new_starts_at: newIso, requester_phone: context.callerPhone });
+      } catch (error) {
+        const message = String(error.message || 'No se pudo cambiar la hora.');
+        const availabilityProblem = /ocupad|disponib|bloquead|aviso m[ií]nimo|anticipaci|pasado|conflict|overlap|solap/i.test(message);
+        return unchanged(message, availabilityProblem ? {} : {
+          owner_alert: `No pude cambiar la hora de ${current.reference} (${original.cuando_local}) a ${whenFmt.format(new Date(newIso))}: ${message.slice(0, 160)}. La reserva original sigue igual.`,
+          guidance: 'Hubo un problema técnico al cambiarla. Dile que su hora original sigue igual y que Francisco ya quedó avisado para dejarle el cambio; no le ofrezcas otras horas.'
+        });
+      }
       const riskHandoff = appointment.risk_window
-        ? await requestHandoff(`La reagenda ${appointment.reference || owned.appointment.reference} al ${appointment.starts_at} requiere confirmar disponibilidad humana: ${appointment.risk_window.reason || 'franja de riesgo configurada'}.`, context)
+        ? await requestHandoff(`La reagenda ${appointment.reference || current.reference} al ${appointment.starts_at} requiere confirmar disponibilidad humana: ${appointment.risk_window.reason || 'franja de riesgo configurada'}.`, context)
         : null;
-      const rescheduledTz = config.timezone || 'America/Santiago';
-      const rescheduledWhen = new Intl.DateTimeFormat('es-CL', { timeZone: rescheduledTz, dateStyle: 'short', timeStyle: 'short' }).format(new Date(appointment.starts_at));
       return {
         ok: true,
         action: appointment.risk_window ? 'rescheduled_needs_manual_confirmation' : 'rescheduled',
-        reference: appointment.reference || owned.appointment.reference,
+        reference: appointment.reference || current.reference,
         starts_at: appointment.starts_at,
-        cuando_local: rescheduledWhen,
+        cuando_local: whenFmt.format(new Date(appointment.starts_at)),
         status: appointment.status,
         ...(riskHandoff?.event_id ? { event_id: riskHandoff.event_id } : {}),
         ...(appointment.risk_window ? { message: 'La nueva hora quedó pendiente de confirmación humana porque cae en una franja de riesgo.' } : {})

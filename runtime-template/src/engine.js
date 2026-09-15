@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { executeAgendaTool, getAgendaToolDefinitions, literalReplies } from './agenda-tools.js';
-import { getAgendaDashboard } from './agenda.js';
+import { getAgendaDashboard, listUpcomingAppointmentsForPhone } from './agenda.js';
 import { BASE_BEHAVIOR } from './base-behavior.js';
 import { AGENDA_BEHAVIOR } from './agenda-behavior.js';
 import { liveInjectedFacts } from './business-data.js';
@@ -224,7 +224,16 @@ export async function answerWithGroq(packageData, message, context = {}) {
     // lista real en vez de escribir el nombre libre y fallar la primera vez contra el match exacto
     // de agenda-tools.js (encontrado en vivo: "evaluación" vs "Evaluación · Box Buin" fallaba
     // siempre al primer intento, y esa primera falla contaminaba el tono de la respuesta final).
-    const tools = getAgendaToolDefinitions(packageData, catalogSource, { allowSilence: context.allowSilence === true });
+    // Si quien escribe ya tiene su hora tomada, esa venta está cerrada. Con Alexis (14-09-2026) el
+    // bot siguió pidiéndole ficha y antecedentes después de agendar, y cuando llegó al box ("Llegué /
+    // Hola") le contestó "¿En qué te puedo ayudar?". Con hora tomada el agente sólo atiende pedidos
+    // concretos y puede callarse ante avisos, saludos o agradecimientos.
+    const upcomingAppointments = Array.isArray(context.upcomingAppointments)
+      ? context.upcomingAppointments
+      : (agendaEnabled && context.callerPhone ? await listUpcomingAppointmentsForPhone(packageData, context.callerPhone).catch(() => []) : []);
+    const hasBooking = upcomingAppointments.length > 0;
+    const allowSilence = context.allowSilence === true || hasBooking;
+    const tools = getAgendaToolDefinitions(packageData, catalogSource, { allowSilence });
     const businessTimeZone = staticAgendaConfig.timezone || 'America/Santiago';
     const nowLabel = new Intl.DateTimeFormat('es-CL', { timeZone: businessTimeZone, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
     // Prefijo estático (cacheable): comportamiento base + identidad. Los hechos, que cambian por
@@ -255,7 +264,7 @@ NO AGENDABLES POR ESTE CANAL (existen y puedes informar de ellos, pero NO tomas 
           : '';
         const tz = businessTimeZone;
         return `CATÁLOGO DE AGENDA (ofrece SÓLO esto; al llamar herramientas usa estos nombres exactos, sin la parte entre paréntesis).${externalDetail}
-Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.${(catalogSource.locations || []).length ? ` Sedes: ${names(catalogSource.locations)}.` : ''} Zona horaria del negocio: ${tz}. Las herramientas devuelven horarios en formato ISO/UTC: preséntaselos SIEMPRE al cliente en la hora local de ${tz}, nunca en UTC.`;
+Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.${(catalogSource.locations || []).length ? ` Sedes: ${names(catalogSource.locations)}.` : ''} Zona horaria del negocio: ${tz}. Las herramientas devuelven horarios en formato ISO/UTC: preséntaselos SIEMPRE al cliente en la hora local de ${tz}, nunca en UTC. Para agendar o cambiar una hora pasa date (YYYY-MM-DD) y time con la hora_local tal cual, sin convertir zonas.`;
       })() : '',
       packageData.agent?.system_prompt ? `DIRECTIVAS ESPECÍFICAS APROBADAS POR EL NEGOCIO (complementan las reglas anteriores, nunca las contradicen):\n${packageData.agent.system_prompt}` : ''
     ].filter(Boolean).join('\n\n');
@@ -265,6 +274,11 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
         content: `${systemPrefix}\n\nFECHA Y HORA ACTUAL (${businessTimeZone}): ${nowLabel}. Usa esto como referencia real para "hoy", "mañana", días de la semana o cualquier fecha relativa — nunca asumas ni inventes otra fecha.\n\nCONOCIMIENTO CONFIRMADO DEL NEGOCIO (razona cuál aplica a la pregunta; no todos son relevantes):\n${factsContext || (agendaEnabled ? '(No hay conocimiento cargado; usa una herramienta de Agenda si corresponde.)' : '(No hay conocimiento confirmado cargado.)')}`
       },
       ...history,
+      ...(hasBooking ? [{ role: 'system', content: (() => {
+        const fmt = new Intl.DateTimeFormat('es-CL', { timeZone: businessTimeZone, weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', hour12: false });
+        const list = upcomingAppointments.map(item => `${fmt.format(new Date(item.starts_at))}${item.service ? ` (${item.service})` : ''}`).join('; ');
+        return `ESTE CLIENTE YA TIENE HORA TOMADA: ${list}. Esa venta está cerrada. No le preguntes por su dolor, su historia ni sus antecedentes: eso lo conversa Francisco en la consulta. Atiende sólo lo que pida en concreto: cambiar o cancelar la hora, una hora para otra persona, o una consulta como la ubicación, el precio o cómo pagar — para esas usa responder_textual si hay una respuesta oficial, igual que con cualquier cliente. Si sólo avisa que llegó, saluda, agradece, confirma o manda su RUT o correo, no le respondas: guarda el RUT o correo con update_customer_profile si los mandó y llama no_intervenir.`;
+      })() }] : []),
       { role: 'user', content: String(message) }
     ];
     const toolTrace = [];
@@ -290,6 +304,12 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     const extraLiterals = [];
     let emptyRetried = false;
     let hoursRetried = false;
+    let closingRetried = false;
+    let askFirstRetried = false;
+    let echoRetried = false;
+    let literalSuggested = null;
+    const asksPermissionToBook = /(te gustar[ií]a|quieres|deseas|prefieres|te parece)\s+que\s+(te\s+)?(busque|busquemos|veamos|revise|revisemos|agende|agendemos|deje)|¿\s*(te\s+)?(dejo|busco|agendo|reservo|vemos|buscamos)\s+(una\s+)?hora|¿\s*vemos\s+una\s+hora|\b(puedo|te puedo|podemos)\s+(buscarte|agendarte|ofrecerte|reservarte|buscar|agendar)\b|¿\s*qu[eé]\s+d[ií]a\s+te\s+(acomoda|sirve|queda)|¿\s*te\s+acomoda\s+(atenderte|el\s+box|en\s+el\s+box|alguna\s+de\s+esas)|¿\s*te\s+(gustar[ií]a|interesa|animas\s+a)\s+(tomar|agendar|reservar|coordinar|pedir)\s+(una\s+)?(hora|evaluaci)/i;
+    const postponesSale = /cuando (tengas|puedas|quieras|est[eé]s list[ao]|lo tengas|decidas)|me escribes cuando|escr[ií]beme cuando/i;
     let activeTools = tools;
     const usage = () => ({ inputTokens: totalInputTokens, outputTokens: totalOutputTokens });
     const literalResult = followUpText => {
@@ -317,6 +337,35 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     // vemos"): no traen preguntas ni piden hora, precio o disponibilidad.
     const bringsNewRequest = /\?|\b(tienes|tiene|tienen|hay|cu[aá]nto|precio|valor|agendar|agenda|reservar|otra hora|disponib|horario)\b/i.test(String(message || ''));
     const HOUR_PATTERN = /\b\d{1,2}:\d{2}\b|\ba las \d{1,2}\b/i;
+    const lastAssistantText = [...history].reverse().find(item => item.role === 'assistant')?.content || '';
+    const hourChosenByClient = time => {
+      const match = /^(\d{1,2}):(\d{2})/.exec(String(time || '').trim());
+      if (!match) return true;
+      const hour = Number(match[1]); const minutes = match[2];
+      const hours = [hour, hour > 12 ? hour - 12 : null].filter(value => value != null);
+      const mentions = text => hours.some(h => new RegExp(`(^|[^\\d])0?${h}[:.]${minutes}\\b`).test(text)
+        || (minutes === '00' && new RegExp(`\\b(a las|las|tipo|como a las)\\s+0?${h}\\b|\\b0?${h}\\s*(hrs?|horas)\\b`, 'i').test(text))
+        || (minutes === '30' && new RegExp(`\\b0?${h}\\s*y\\s*media\\b`, 'i').test(text)));
+      return mentions(String(message || '')) || mentions(lastAssistantText);
+    };
+    // Ritmo de venta acordado con Daniel (14-09-2026, a partir de cómo conversa Francisco): a quien
+    // pregunta algo seco (valor, ubicación, horario) primero se le pregunta con cercanía qué le
+    // molesta; cuando cuenta su dolor, como mucho una pregunta más; y en el mensaje siguiente, horas.
+    // Quien pide hora directo recibe horas de inmediato, y quien no contesta la pregunta, también.
+    const PAIN = /duel|dolor|molest|lesi[oó]n|contractur|lumbag|hernia|ci[aá]tic|flema|\btos\b|respir|espalda|cuello|rodilla|hombro|cadera|pierna|brazo|mu[ñn]eca|tobillo|cabeza|migra|mareo|postura|cirug|operad|esguince|tendin|tratar|tratamiento/i;
+    const ASKS_FOR_HOURS = /\bhoras?\b|agend|reserv|disponib|cupo|\b(hoy|ma[ñn]ana|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|semana)\b/i;
+    const isOpenQuestion = text => /\?/.test(String(text || '')) && !HOUR_PATTERN.test(String(text || ''));
+    const userTurns = [...history.filter(item => item.role === 'user').map(item => item.content), String(message || '')];
+    const toldPain = userTurns.some(text => PAIN.test(text));
+    const askedForHours = ASKS_FOR_HOURS.test(String(message || ''));
+    const lastAssistantAsked = isOpenQuestion(lastAssistantText);
+    const firstPainIndex = history.findIndex(item => item.role === 'user' && PAIN.test(item.content));
+    const questionsSincePain = firstPainIndex === -1 ? 0 : history.slice(firstPainIndex + 1).filter(item => item.role === 'assistant' && isOpenQuestion(item.content)).length;
+    const salesContext = toldPain || askedForHours || history.some(item => item.role === 'assistant' && /\$\s?\d/.test(item.content));
+    // Ya toca ofrecer horas: pidió hora, ya se le preguntó una vez después de contar su dolor, o
+    // no contestó la última pregunta con algo sobre su dolor.
+    const offerDue = askedForHours
+      || (PAIN.test(String(message || '')) ? questionsSincePain >= 1 : lastAssistantAsked && salesContext);
     const concreteOfferMade = () => history.some(item => item.role === 'assistant' && HOUR_PATTERN.test(item.content))
       || toolTrace.some(item => item.name === 'get_availability' && item.result?.ok && (item.result.available_slots || []).length);
     // Horas reales para el seguimiento de un bloque oficial, consultadas por el runtime y no por el
@@ -375,14 +424,23 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
       }
       const calls = assistantMessage.tool_calls || [];
       if (!calls.length) {
-        if (literalSent) return literalResult(assistantMessage.content);
+        if (literalSent) {
+          const draftFollowUp = String(assistantMessage.content || '').trim();
+          if (literalSuggested && !closingRetried && round < 4 && draftFollowUp && !/SIN_SEGUIMIENTO/i.test(draftFollowUp) && !HOUR_PATTERN.test(draftFollowUp)) {
+            closingRetried = true;
+            messages.push({ role: 'assistant', content: draftFollowUp });
+            messages.push({ role: 'system', content: `Ese segundo mensaje NO se envió: no trae horas. Escríbelo ofreciendo estas horas reales: ${literalSuggested}, y termina con "¿cuál te dejo?".` });
+            continue;
+          }
+          return literalResult(assistantMessage.content);
+        }
         const rawText = String(assistantMessage.content || '').trim();
         // gpt-5.6-luna a veces devuelve un mensaje vacío, sin texto ni herramientas (medido
         // 14-09-2026). Antes eso lanzaba error: en el webhook el evento quedaba fallido y el
         // paciente sin respuesta. En un hilo donde callar está permitido, el vacío es silencio; en
         // cualquier otro, se le pide una vez más que conteste antes de rendirse.
         if (!rawText) {
-          if (context.allowSilence === true && !bringsNewRequest) {
+          if (allowSilence && !bringsNewRequest) {
             return {
               text: '', silent: true, silentReason: 'respuesta vacía del modelo en un hilo atendido por el dueño',
               confidence: 'deliberate_silence', source: [], handoff: false, ownerAlert: null,
@@ -407,7 +465,50 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           messages.push({ role: 'system', content: 'Ese mensaje NO se envió: menciona horas que no consultaste en este turno. Consulta get_availability para el día o los días que vas a ofrecer y ofrece sólo horas que salgan de esa consulta. Si no ibas a ofrecer horas nuevas, reescribe el mensaje sin horas concretas.' });
           continue;
         }
-        const validation = validateMutationClaims(rawText, toolTrace);
+        // Cerrar con horas no puede depender de que el modelo lo recuerde. Con instrucciones más
+        // sueltas (14-09-2026) volvió a terminar en "¿quieres que te busque una hora?" o a soltar un
+        // freno con "cuando tengas el dinero, escríbeme", sin ofrecer nada concreto. Si el mensaje
+        // pide permiso para buscar o deja la hora para después y no trae horas, se le devuelve una vez.
+        // "¿Te refieres a dolor en esas zonas?" es justo lo que Francisco describió como hablar de
+        // psicólogo: devolverle al cliente lo que acaba de decir para que lo aclare. Se le devuelve
+        // una vez para que lo interprete de la forma natural y siga.
+        if (rawText && round < 3 && !echoRetried && /¿\s*(te\s+refieres|a\s+qu[eé]\s+te\s+refieres|quisiste\s+decir|qu[eé]\s+quieres\s+decir)/i.test(rawText)) {
+          echoRetried = true;
+          messages.push({ role: 'assistant', content: rawText });
+          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: le pide al cliente que aclare lo que ya dijo. Interprétalo de la forma más natural (si nombra partes del cuerpo, es dolor o molestia ahí) y sigue la conversación sin repetir sus palabras.' });
+          continue;
+        }
+        // La otra mitad del ritmo: quien cuenta su dolor por primera vez sin decir hace cuánto ni si
+        // tiene exámenes recibe una pregunta cercana antes que las horas. Con las instrucciones
+        // sueltas el modelo saltaba directo a ofrecer ("me duele la espalda baja" → horas), y esa
+        // pregunta es la que genera cercanía con quien escribe seco.
+        const firstPainNow = PAIN.test(String(message || '')) && firstPainIndex === -1;
+        const caseAlreadyDescribed = /\b(hace|desde)\b|\bmes(es)?\b|\bañ?os?\b|semana|d[ií]as|examen|ex[aá]menes|resonancia|radiograf|ecograf|diagn[oó]stic|tratamiento|kine/i.test(String(message || ''));
+        const answeringDataRequest = /direcci[oó]n|comuna|nombre|rut\b|correo/i.test(lastAssistantText) && /\?/.test(lastAssistantText);
+        if (rawText && agendaEnabled && !hasBooking && !handoffReason && round < 3 && !askFirstRetried && firstPainNow && !askedForHours && !caseAlreadyDescribed && !answeringDataRequest && HOUR_PATTERN.test(rawText)) {
+          askFirstRetried = true;
+          messages.push({ role: 'assistant', content: rawText });
+          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: es la primera vez que cuenta su dolor y todavía no sabes nada de su caso. Antes de ofrecer horas, escríbele un mensaje corto y cercano con UNA sola pregunta por lo que más falta (por ejemplo, hace cuánto le molesta). Sin horas en este mensaje; las ofreces cuando conteste.' });
+          continue;
+        }
+        const oneQuestionTooMany = offerDue && salesContext && /\?/.test(rawText) && !toolTrace.some(item => ['create_appointment', 'reschedule_appointment', 'cancel_appointment'].includes(item.name));
+        if (rawText && agendaEnabled && !hasBooking && !handoffReason && round < 3 && !closingRetried && !HOUR_PATTERN.test(rawText) && (asksPermissionToBook.test(rawText) || postponesSale.test(rawText) || oneQuestionTooMany)) {
+          closingRetried = true;
+          messages.push({ role: 'assistant', content: rawText });
+          messages.push({ role: 'system', content: oneQuestionTooMany && !asksPermissionToBook.test(rawText) && !postponesSale.test(rawText)
+            ? 'Ese mensaje NO se envió: ya es momento de ofrecer la hora, no de seguir preguntando. Consulta la agenda y remata con dos o tres horas reales ("Francisco prefiere no aventurarse a darte un diagnóstico y prefiere evaluarte: tengo ... ¿cuál te dejo?"). Puedes reconocer en media frase lo que te contó.'
+            : 'Ese mensaje NO se envió: pide permiso para buscar hora o deja la hora para después sin ofrecer nada concreto. Consulta la agenda y ofrécele dos o tres horas reales (si puso un freno de plata o de tiempo, en una fecha más adelante). Mantén el resto de lo que ibas a decir.' });
+          continue;
+        }
+        let validation = validateMutationClaims(rawText, toolTrace);
+        // "Le aviso a Francisco" sin haber llamado la herramienta: antes se reemplazaba por
+        // "Todavía no dejé ese aviso. ¿Quieres que le pida al equipo que te escriba?" y el paciente
+        // quedaba colgado (Camilo, 14-09-2026, pidiendo cambiar una hora que no se pudo). Si el
+        // modelo decidió avisar, el runtime cumple el aviso y deja el texto.
+        if (!validation.ok && validation.blockedTool === 'request_human_handoff') {
+          ownerAlert = ownerAlert || `El agente le dijo al cliente que te avisaba. Último mensaje del cliente: "${String(message || '').slice(0, 200)}"`;
+          validation = { ok: true, text: rawText };
+        }
         const text = validation.text;
         if (!text) throw new Error('Groq devolvió una respuesta vacía');
         const handoff = toolTrace.some(item => item.name === 'request_human_handoff' && item.result?.ok);
@@ -430,11 +531,11 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
         // Silencio deliberado: se corta acá, sin volver a pasar por el modelo y sin texto. El
         // llamador es el que no envía nada (ver server.js), así el silencio es del runtime y no
         // depende de que el modelo produzca una respuesta vacía.
-        if (name === 'no_intervenir' && context.allowSilence === true && !literalSent && bringsNewRequest) {
+        if (name === 'no_intervenir' && allowSilence && !literalSent && bringsNewRequest) {
           answerTool({ ok: false, action: 'new_request', message: 'El cliente hace una consulta nueva para ti (pregunta o pide hora, precio o disponibilidad): respóndela y avanza hacia la hora, aunque parte del hilo lo haya atendido otra persona.' });
           continue;
         }
-        if (name === 'no_intervenir' && context.allowSilence === true && !literalSent) {
+        if (name === 'no_intervenir' && allowSilence && !literalSent) {
           return {
             text: '', silent: true, silentReason: String(args?.reason || '').slice(0, 300),
             confidence: 'deliberate_silence', source: [], handoff: false, ownerAlert: null,
@@ -443,13 +544,40 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
         }
         if (name === 'responder_textual') {
           const chosen = literalReplies(packageData).find(item => item.id === args?.id);
+          // Un bloque oficial se manda una vez por conversación: después del de precios, "las piernas,
+          // cuello y cintura" volvía a recibir el mismo bloque (medido 14-09-2026).
+          const literalKey = text => String(text || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+          if (chosen && !literalSent && history.some(item => item.role === 'assistant' && literalKey(item.content) === literalKey(chosen.text))) {
+            answerTool({ ok: false, action: 'already_sent', message: 'Ese bloque oficial ya se lo mandaste antes en esta conversación. No lo repitas: responde con tus palabras a lo que dijo ahora.' });
+            continue;
+          }
+          // Un bloque puede declarar qué tiene que traer el mensaje para aplicar ("match"). "Cómo es la
+          // sesión" se pegaba ante cualquier relato de dolor o ante "¿es una hernia?", sin que nadie
+          // hubiera preguntado cómo es la sesión.
+          if (chosen && chosen.match && !(() => { try { return new RegExp(chosen.match, 'i').test(String(message || '')); } catch { return true; } })()) {
+            answerTool({ ok: false, action: 'not_asked', message: `El cliente no preguntó eso ("${chosen.id}"). No se envió: responde tú a lo que dijo, con tus palabras y usando el conocimiento confirmado del negocio (ahí suele estar la respuesta).` });
+            continue;
+          }
+          if (chosen && !literalSent && hasBooking) {
+            literalSent = chosen;
+            return literalResult('');
+          }
           if (chosen && !literalSent) {
             literalSent = chosen;
             // Quien pide atención a domicilio no recibe horas del box: esas horas no consideran el
             // traslado, y ofrecérselas le prometía un horario que a domicilio puede no existir (medido
             // 14-09-2026). Para domicilio lo que falta es la dirección.
             const wantsHomeVisit = /domicilio|a (mi |la )?casa|vengan|venir a/i.test(String(message || ''));
-            const suggested = wantsHomeVisit ? null : await suggestedSlotsForFollowUp().catch(() => null);
+            const warmUp = !wantsHomeVisit && !offerDue && !toldPain;
+            const suggested = wantsHomeVisit || warmUp ? null : await suggestedSlotsForFollowUp().catch(() => null);
+            literalSuggested = suggested;
+            if (warmUp) {
+              answerTool({
+                ok: true, action: 'literal_sent', id: chosen.id,
+                instruccion: 'Ese bloque oficial ya le llegó al cliente tal cual, en un mensaje aparte. Todavía no sabemos qué le pasa: escribe UN segundo mensaje corto con una sola pregunta cercana y abierta sobre qué le está molestando o qué le gustaría tratar (por ejemplo "Cuéntame, ¿qué te está molestando?"). No ofrezcas horas todavía, no repitas nada del bloque y no hagas más de una pregunta.'
+              });
+              continue;
+            }
             answerTool({
               ok: true, action: 'literal_sent', id: chosen.id,
               horas_sugeridas: suggested || 'no se encontraron horas en los próximos días',
@@ -462,16 +590,32 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
             answerTool({ ok: true, action: 'literal_sent', id: chosen.id, instruccion: 'Este segundo bloque oficial también se envió, junto al primero. Sigue con el mensaje corto que avanza hacia la hora.' });
             continue;
           }
-          answerTool({ ok: false, message: 'Ya se enviaron las respuestas oficiales de este turno; no mandes otra.' });
+          // Sin este caso aparte, un id que ya no existe como respuesta oficial (tratamiento_respiratorio
+          // pasó a conocimiento el 14-09-2026) recibía "ya se enviaron las respuestas oficiales" y el
+          // modelo terminaba en "no tengo ese dato confirmado", 2 de 4 veces.
+          answerTool(chosen
+            ? { ok: false, message: 'Ya se enviaron las respuestas oficiales de este turno; no mandes otra.' }
+            : { ok: false, action: 'unknown_reply', message: 'No hay una respuesta oficial con ese id. Responde tú con tus palabras usando el conocimiento confirmado del negocio: ahí está la información.' });
           continue;
         }
-        if (name === 'avisar_al_dueno' && !concreteOfferMade()) {
+        // Una hora se toma o se cambia sólo si el cliente la eligió: tiene que estar en su mensaje o en
+        // el último mensaje del agente que él está respondiendo. Rodolfo (14-09-2026) mandó su
+        // dirección ("Eduardo Ríos Mackenna 1544, Buin") y el modelo agendó a "Eduardo" a las 19:00,
+        // una hora que nadie había elegido en ese intercambio.
+        if ((name === 'create_appointment' || name === 'reschedule_appointment') && !hourChosenByClient(args?.time)) {
+          answerTool({ ok: false, action: 'confirm_first', message: `Todavía no hay una hora elegida por el cliente para ${args?.time || 'esa hora'}: no está en su mensaje ni en tu último mensaje. No se agendó nada. Ofrécele las horas reales y espera que elija.` });
+          continue;
+        }
+        if (name === 'avisar_al_dueno' && !hasBooking && !concreteOfferMade()) {
           answerTool({ ok: false, action: 'offer_first', message: 'Todavía no le ofreciste horas concretas a este cliente. No se avisó al dueño: primero consulta la disponibilidad y ofrécele dos o tres horas reales. Si con eso sigue dudando, ahí sí avisa.' });
           continue;
         }
         const result = await executeAgendaTool(packageData, name, args, context);
         if (name === 'avisar_al_dueno' && result?.ok) ownerAlert = String(args?.reason || 'El cliente necesita que el dueño entre a la conversación.').slice(0, 400);
         if (name === 'request_human_handoff' && result?.ok) handoffReason = String(args?.reason || '').slice(0, 400);
+        // Una herramienta puede pedir el aviso ella misma (un cambio de hora que falló por un
+        // problema técnico): el dueño se entera aunque el modelo no llame avisar_al_dueno.
+        if (result?.owner_alert) ownerAlert = String(result.owner_alert).slice(0, 400);
         answerTool(result);
       }
       // Mientras se escribe el seguimiento de un bloque oficial no tiene sentido elegir otro bloque,

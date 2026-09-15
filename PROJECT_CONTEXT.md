@@ -1871,3 +1871,91 @@ mañana martes a las 08:00 y 18:00. ¿Cuál te dejo?"; dolor con las 3 respuesta
 **Pendiente conocido:** ~1 de cada 4 casos de domicilio avisa a Francisco sin que haga falta;
 "en la tarde" a veces incluye una hora de la mañana; los 3 casos raros de arriba. Las pruebas
 gastaron saldo de la key OpenAI de Francisco (varias decenas de corridas).
+
+### Audios de Francisco + casos reales del 14-09: reagendar, post-agenda y direcciones · 14-09-2026 (desplegado c5baaf5)
+
+**Lo que pidió Francisco (audios transcritos por Daniel):**
+- Probar con un prompt menos rígido, y dejar que el bot se equivoque sin intervenir para medir
+  errores reales (Daniel pidió permiso y Francisco aceptó).
+- Idea suya: activar el mensaje de bienvenida de WhatsApp Business ("Hola, soy Francisco
+  Martínez… ¿cuál sería su dolor o motivo de consulta?") para números nuevos que llegan de
+  Instagram. **Pendiente verificar**: si ese saludo llega a Zavu (lo que Francisco manda desde su
+  teléfono NO llega) y si la función sigue activa con coexistencia; el saludo también sale a quien
+  vuelve tras ~14 días sin escribir.
+- Alexis: agendó bien, pero después el bot le pidió "como cien datos" (ficha completa) y le
+  preguntó "¿a qué te refieres con que no has tenido lesiones importantes?". Francisco: "si ya está
+  agendado, lo demás sobra; es como hacerle la anamnesis por WhatsApp".
+- Un paciente coordinado por teléfono mandó su dirección y el bot la tomó como nombre (en la base es
+  Rodolfo: "Eduardo Ríos Mackenna 1544" → "¿Cuál te dejo para Eduardo Ríos?").
+
+**Reglas confirmadas por Daniel:** después de agendar el bot no se vuelve a meter (no silencio
+total: atiende pedidos concretos, calla ante "llegué/gracias/datos"); ficha = RUT, correo, nombre
+(teléfono ya está); reagendar "imposible que falle" (mirar Rishtedar); una dirección nunca es un
+nombre; prompt nuevo limpio en vez de parches.
+
+**Caso grave encontrado leyendo Supabase (no lo mencionó Francisco):** Camilo Arenas pidió a las
+16:17 mover su hora de las 18:00. El 1er intento falló con "ocupado en Google Calendar" (causa más
+probable: el modelo mandaba ISO con offset calculado por él, y Chile cambió a -03:00 el 06-09), el
+2do con "No encontré esa reserva" (la referencia no sobrevive entre turnos: el historial guarda
+texto, no resultados de herramientas) y el aviso prometido se reemplazó por "Todavía no dejé ese
+aviso". Nadie se enteró. Pasó con la versión desplegada esa madrugada.
+
+**Qué se cambió (patrón Rishtedar `reschedule_reservation`):**
+- `reschedule_appointment`/`cancel_appointment` resuelven la reserva por el teléfono verificado si
+  la referencia falta o no calza (`listUpcomingAppointmentsForPhone`, consulta liviana nueva en
+  agenda.js). Reciben `date` + `time` local (no ISO); `create_appointment` igual.
+- Antes de escribir, la hora nueva se verifica contra `getAvailableSlots`; si no se puede, la
+  respuesta trae `original_unchanged: true` + `alternativas_mismo_dia` reales. Error técnico (no de
+  disponibilidad) → `owner_alert` automático.
+- Promesa de aviso sin herramienta → el runtime cumple el aviso (ownerAlert) en vez de retractarse.
+- Reserva próxima (≤3 h de gracia) → nota de sistema "venta cerrada", `no_intervenir` habilitado,
+  sin seguimiento de horas tras un literal, aviso al dueño sin exigir oferta previa.
+- Ficha post-agenda: sólo RUT y correo faltantes, una vez. `update_customer_profile` sólo guarda eso.
+- Crear/cambiar exige que la hora esté en el mensaje del cliente o en el último mensaje del agente
+  (`hourChosenByClient`); nombres con dígitos o forma de calle se rechazan.
+
+**Verificación:** reagendar contra la agenda real con reserva de prueba insertada directo en la
+base (sin Calendar ni SMS) y borrada al final: 8/8. Conversaciones post-agenda con luna (Alexis,
+Camilo, Rodolfo, ficha): 18/18 en fk. Ventas 15/15. Regresión 29/34 (diferencias de redacción en
+casos "declina" y los raros de siempre). Smoke en vivo OK. Harnesses nuevos en scratchpad:
+`fixture_reagendar.mjs`, `probar_reagendar.mjs`, `postventa.mjs`, `fluidez.mjs`.
+**Ojo al probar:** la plantilla (`runtime-template/agent-package.json`) NO tiene los literales de
+Francisco; toda medición de comportamiento va contra el clon de franciskom.
+
+### Prompt limpio + ritmo de venta "cercanía primero" · 14-09-2026 (desplegado cdde1a8)
+
+**Pedido:** Francisco dio permiso para menos rigidez; Daniel pidió reescribir desde cero en vez de
+parchar. Después de ver el primer resultado (el bot casi dejó de indagar), Daniel describió cómo
+conversa Francisco: aunque le pregunten sólo el valor o la ubicación, indaga un poco sin ser
+entrometido y después ofrece agenda — "generar cercanía para después devolver el golpe con un
+agendamiento real". Regla confirmada con ejemplo:
+- Pregunta seca (valor/ubicación/horario) sin contar qué le pasa → respuesta + UNA pregunta cercana
+  ("Cuéntame, ¿qué te está molestando?"), sin horas.
+- Cuenta su dolor → como mucho una pregunta por lo que falte (ninguna si ya lo contó todo).
+- Mensaje siguiente → remate con horas reales.
+- Pide hora directo, o no contesta la pregunta → horas altiro. Nunca más de dos mensajes sin horas.
+
+**Prompt (agent-package de franciskom):** `system_prompt`, `role`, `tone_policy` y el hecho
+"criterio profesional" reescritos; todas las reglas que funcionaban siguen (dichas una vez). Se
+quitó a propósito "sin relleno empático" y la lista larga de dolores. `horario_atencion` y
+`tratamiento_respiratorio` pasaron de literal a conocimiento; `como_es_la_sesion` lleva `match`
+(sólo si preguntan cómo es, nunca con algo respiratorio). `AGENDA_BEHAVIOR` (compartido) más corto:
+salió lo que el runtime garantiza. Prompt: 16,7k → ~13k caracteres, prohibiciones 118 → ~76.
+
+**Garantías de runtime nuevas (engine.js):** pregunta antes de horas en el primer relato de dolor sin
+detalles (`firstPainNow`, exento si responde a un pedido de datos); horas en vez de otra pregunta
+cuando ya toca (`offerDue`); cierres que piden permiso ("¿te busco/te dejo/te gustaría tomar una
+hora?", "puedo buscarte") o posponen ("cuando tengas…") se devuelven una vez; "¿te refieres a…?" se
+devuelve una vez; un literal se manda una vez por conversación; literal con `match` que no calza →
+`not_asked`; id de literal inexistente → `unknown_reply` (antes decía "ya se enviaron" y el modelo
+terminaba en "no tengo ese dato"); el seguimiento de un literal con horas consultadas no puede salir
+sin horas; tras un literal seco sin dolor, el seguimiento es la pregunta cercana.
+
+**Medido (luna, clon fk2):** fluidez 29/30 (+ el fallo corregido 4/4), ventas 28/30 (los 2 de
+domicilio corregidos, 8/8), post-agenda 9/9, regresión 31/34. En vivo: "Hola, valor?" → precios +
+"Cuéntame, ¿qué te está molestando…?" → "Me duele la espalda baja" → "¿Hace cuánto te duele la
+espalda baja?" → "hace como 2 meses" → remate con 3 horas reales.
+**Menores conocidos:** tras la ubicación a veces agrega "el box queda en El Recurso" (repite parte
+del bloque); sobre-aviso ocasional en domicilio. **Pendiente:** probar si el saludo automático de
+WhatsApp Business llega a Zavu (necesita que Francisco lo active); semana sin intervención de
+Francisco para medir errores reales.

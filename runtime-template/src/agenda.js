@@ -301,6 +301,33 @@ export function findRiskWindow(packageData, resourceName, startsAtIso) {
     && String(item.starts_at).slice(0, 5) <= time && String(item.ends_at).slice(0, 5) > time) || null;
 }
 
+// Reservas activas de un teléfono que todavía no terminan (con margen para quien llega tarde).
+// Consulta puntual por cliente, no getAgendaDashboard(): se usa en cada mensaje entrante para
+// saber si quien escribe ya tiene su hora tomada, y el dashboard trae todas las citas históricas.
+export async function listUpcomingAppointmentsForPhone(packageData, phone, { graceMinutes = 180 } = {}) {
+  const config = agendaConfig(packageData);
+  if (!config || !phone) return [];
+  const normalized = normalizeChilePhone(cleanText(phone, 40)) || cleanText(phone, 40);
+  const since = new Date(Date.now() - graceMinutes * 60_000).toISOString();
+  if (supabaseSettings()) {
+    const digits = String(normalized).replace(/\D/g, '');
+    const variants = [...new Set([normalized, `+${digits}`, digits])].map(value => `"${value}"`).join(',');
+    const customers = await agendaSupabaseRequest(`/rest/v1/za_customers?select=id&phone=in.(${encodeURIComponent(variants)})`);
+    const ids = (customers || []).map(item => item.id);
+    if (!ids.length) return [];
+    const rows = await agendaSupabaseRequest(`/rest/v1/za_appointments?select=id,reference,status,starts_at,ends_at,expires_at,za_services(name),za_resources(name),za_locations(name)&customer_id=in.(${ids.join(',')})&status=in.(confirmed,pending_confirmation)&starts_at=gte.${encodeURIComponent(since)}&order=starts_at.asc`);
+    return (rows || []).filter(item => isActiveAgendaAppointment(item)).map(item => ({
+      id: item.id, reference: item.reference, status: item.status, starts_at: item.starts_at,
+      service: item.za_services?.name, resource: item.za_resources?.name, location: item.za_locations?.name
+    }));
+  }
+  const dashboard = await getAgendaDashboard(packageData);
+  const target = String(normalized).replace(/\D/g, '');
+  return (dashboard.appointments || []).filter(item => isActiveAgendaAppointment(item)
+    && String(normalizeChilePhone(item.customer_phone) || item.customer_phone || '').replace(/\D/g, '') === target
+    && new Date(item.starts_at).getTime() >= Date.parse(since));
+}
+
 export async function getAgendaDashboard(packageData) {
   const config = agendaConfig(packageData);
   if (!config) return null;
