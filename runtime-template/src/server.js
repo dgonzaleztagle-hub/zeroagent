@@ -8,7 +8,7 @@ import { recordUsage } from './metrics.js';
 import { agendaConfig, agendaSupabaseRequest, agendaSupabaseUpload, agendaUsesSupabase, appendAgendaFeedbackLocal, createAgendaAppointment, createAgendaAvailabilityBlock, createAgendaAvailabilityRule, bulkUpdateCustomers, createManualCustomer, deleteAgendaAvailabilityBlock, deleteAgendaAvailabilityRule, getAgendaDashboard, getAvailableSlots, getCustomerDetail, importAgendaCustomers, listCustomers, normalizeChilePhone, rescheduleAgendaAppointment, updateAgendaAppointment, updateAgendaFeedback, updateAppointmentNotes, updateCustomerSettings } from './agenda.js';
 import { parseContactsFile } from './contacts-import.js';
 import { dispatchAgendaOutbox } from './outbox.js';
-import { verifyZavuSignature, sendZavuWhatsApp, zavuDeliveryUpdate, zavuEventId, zavuProviderMessage } from './zavu.js';
+import { verifyZavuSignature, sendZavuWhatsApp, zavuDeliveryUpdate, zavuEventId, zavuProviderMessage, zavuOwnerEcho } from './zavu.js';
 import { appendConversationMessage, createOperator, findConversationMessageByClientId, getAgentControl, getConversationInbox, getOrCreateConversation, historyAllowsSilence, inboundDebounceMs, loadConversationHistory, reclaimStaleHandoff, supersededByNewerInbound, syncWhatsappProfileNames, updateAgentControl, updateConversationMessageDelivery, updateConversationOperation } from './conversations.js';
 import { addKnowledgeSuggestion, currentConfirmedFacts, listKnowledgeSuggestions } from './knowledge.js';
 import { createHandoffTicket, listHandoffTickets, updateHandoffTicket } from './handoffs.js';
@@ -1180,6 +1180,37 @@ export async function handleRequest(req, res) {
       claim = await claimZavuEvent(eventId, event.type);
       if (!claim?.acquired) return json(res, 200, { ok: true, duplicate: true, status: claim?.status || 'processing' });
 
+      // Eco de lo que Francisco contesta desde su propia app de WhatsApp (coexistencia): se revisa
+      // ANTES del callback genérico de entrega porque también llega como message.sent, y sin este
+      // chequeo zavuDeliveryUpdate lo trataba como estado de un envío nuestro — como nunca calzaba
+      // con ningún mensaje que nosotros hubiéramos mandado, se perdía en silencio. Guardarlo como
+      // mensaje saliente real (sender_type 'human', no 'agent') es lo que permite que el agente vea
+      // en el historial lo que Francisco ya dijo, en vez de adivinarlo por el tiempo transcurrido.
+      const ownerEcho = zavuOwnerEcho(event);
+      if (ownerEcho) {
+        const echoPhone = normalizeChilePhone(ownerEcho.customerPhone) || ownerEcho.customerPhone;
+        const echoConversation = await getOrCreateConversation('whatsapp', echoPhone, '');
+        const echoKey = `zavu:echo:${ownerEcho.messageId || eventId}`.slice(0, 240);
+        const echoRow = await appendConversationMessage(echoConversation?.id, 'outbound', ownerEcho.text, {}, {
+          senderType: 'human',
+          deliveryStatus: ['queued', 'sending', 'sent', 'delivered', 'read', 'failed'].includes(ownerEcho.status) ? ownerEcho.status : 'delivered',
+          clientMessageId: echoKey, providerMessageId: ownerEcho.messageId || null
+        });
+        // Mismo mecanismo que el botón "tomar" de la consola: mientras la conversación está en
+        // handoff, el webhook de mensajes entrantes ni siquiera llama al modelo (ver el chequeo de
+        // conversation.status más abajo). reclaimStaleHandoff ya existía y ya miraba el último
+        // mensaje humano saliente para devolver la conversación sola — antes nunca tenía un eco real
+        // que mirar, así que nunca se activaba con esta causa. Ahora sí: el bot se calla apenas
+        // Francisco contesta a mano, y se retoma solo a las HANDOFF_AUTO_RETURN_HOURS (12h por
+        // defecto) desde su último mensaje real en ese hilo.
+        if (echoConversation?.id && echoConversation.status !== 'handoff') {
+          await updateConversationOperation(echoConversation.id, { status: 'handoff', needs_human: true, handoff_reason: 'Francisco está respondiendo directamente desde su WhatsApp' }).catch(error => {
+            console.error('[zavu] no se pudo pasar la conversación a handoff tras el eco:', error.message);
+          });
+        }
+        await completeZavuEvent(eventId, claim.lease_token, 'completed', { echo: true, conversation_id: echoConversation?.id || null, conversation_message_id: echoRow?.id || null });
+        return json(res, 200, { ok: true, echo: true, matched: Boolean(echoRow) });
+      }
       // Los callbacks de delivery actualizan el mensaje que ya existe; también son
       // eventos durables, por lo que reentregarlos no vuelve a mutar nada relevante.
       const deliveryUpdate = zavuDeliveryUpdate(event);

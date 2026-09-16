@@ -1999,3 +1999,47 @@ evalúa Y trata en la misma hora. Cambios:
   hay que aplicar el mismo cambio.
 Medido con luna: ventas 15/15, fluidez 15/15, post-agenda 9/9; ningún texto de reserva dice
 "evaluación". En vivo: "Tengo mañana a las 08:00, 17:30 o 18:30 para una sesión, ¿cuál te dejo?".
+
+### Límite de Zavu agotado + el bot ahora se calla cuando Francisco contesta a mano · 15-09-2026 (desplegado c95b769)
+
+**Lo que pasó con el plan de Zavu:** a Francisco le llegó el aviso de que se acabaron los 2.000
+mensajes gratis del mes. Investigado a fondo:
+- **No fue por las pruebas de esta sesión** — todas corrieron con `dryRun` contra el modelo directo o
+  `/api/preview/chat`, que nunca llaman a Zavu; confirmado además que ningún número de prueba
+  aparece en las 188 conversaciones reales de la cuenta.
+- **El envío ya estaba pausado en el momento de revisarlo** (`Sending is paused` en el dashboard de
+  Zavu) — no era "se va a topar", ya estaba topado.
+- **La cuenta real (24-08 a 15-09): 2.803 mensajes**, entrantes y salientes. Soporte de Zavu dijo
+  primero que sólo cuenta lo enviado — no cuadraba (sólo 265 mensajes salientes rastreables). Contando
+  ambos sentidos desde el reseteo real (1 de cada mes): **2.033 desde el 01-09**, recién por encima
+  de 2.000 — coincide casi exacto con el momento del aviso.
+- **Por qué el cálculo original quedó corto:** se estimó pensando en tráfico de pacientes; el número
+  de Francisco es también su número personal (pareja, contadora, colegio de su hija…), y el plan
+  cuenta absolutamente todo lo que pasa por ese WhatsApp. Solución: subir a Zavu Pro (US$20/mes, sin
+  tope de WhatsApp) — Daniel gestiona el pago, no es algo que se automatice.
+
+**Hallazgo mayor en el camino, con arreglo real:** al preguntarle a la IA de Zavu por los "echo" de
+coexistencia, salió que lo que Francisco escribe desde su propia app de WhatsApp SÍ se reenvía a
+nuestro webhook — como `message.sent` con `source: "whatsapp_business_app"` y el texto completo
+(confirmado con el esquema oficial en `docs.zavu.dev/guides/receiving-messages/events`). Nuestro
+código lo trataba como una confirmación de entrega genérica: como nunca calzaba con ningún mensaje
+nuestro, se descartaba en silencio. Verificado en el panel de Zavu que esos eventos SÍ estaban
+llegando con 200 OK — la nota del 08-09 ("cero eventos message.sent") ya no aplicaba y nadie lo
+había vuelto a comprobar.
+
+**Arreglado en dos partes:**
+1. `zavuOwnerEcho()` (zavu.js) distingue el eco de un envío nuestro; se revisa ANTES del callback
+   genérico de entrega en el webhook. El eco se guarda como mensaje saliente real
+   (`sender_type: 'human'`) en la conversación del cliente — el agente ve de verdad lo que Francisco
+   dijo, no lo adivina por el tiempo transcurrido (mecanismo viejo, `OWNER_HANDLED_NOTE` a los 15 min,
+   sigue como respaldo).
+2. **El bot se calla de verdad para ese hilo:** al llegar el primer eco de una conversación, se marca
+   `status: 'handoff'` — el mismo mecanismo que ya usa el botón "tomar" de la consola, que hace que el
+   webhook de mensajes entrantes ni llame al modelo. `reclaimStaleHandoff` (ya existía, miraba el
+   último mensaje humano saliente) ahora por fin tiene datos reales que mirar, y devuelve el hilo al
+   bot solo a las `HANDOFF_AUTO_RETURN_HOURS` (12h por defecto) desde el último mensaje real de
+   Francisco ahí.
+
+**Verificado:** 10/10 pruebas internas, parser probado contra el payload oficial de Zavu. El primer
+eco real posterior al deploy todavía no se ha dado (queda por confirmar en vivo con el próximo
+mensaje que Francisco mande a mano).

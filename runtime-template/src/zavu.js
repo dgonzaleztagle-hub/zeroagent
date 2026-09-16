@@ -127,6 +127,28 @@ export function zavuEventId(event, rawBody = '') {
   return `sha256:${createHash('sha256').update(String(rawBody || JSON.stringify(event || {}))).digest('hex')}`;
 }
 
+// En coexistencia, lo que Francisco contesta desde la app nativa de WhatsApp (no por nuestra API)
+// llega como un message.sent con source:"whatsapp_business_app": Zavu documenta que ese caso NO es
+// un estado de entrega de un envío nuestro — es un mensaje nuevo que nunca pasó por acá y hay que
+// guardarlo. Antes esto no se distinguía y zavuDeliveryUpdate lo trataba como delivery-update: como
+// no calzaba con ningún providerMessageId ya guardado, se descartaba en silencio (comprobado el
+// 08-09-2026: "cero eventos message.sent" — en ese entonces de verdad no llegaba nada; confirmado
+// el 15-09-2026 que ahora sí llegan, y se estaban perdiendo).
+export function zavuOwnerEcho(event) {
+  if (String(event?.type || '') !== 'message.sent') return null;
+  const data = event?.data || {};
+  if (String(data.source || '') !== 'whatsapp_business_app') return null;
+  const customerPhone = String(data.to || '').trim();
+  const text = String(data.text || '').trim();
+  if (!customerPhone || !text) return null;
+  return {
+    messageId: String(data.messageId || '').trim(),
+    customerPhone,
+    text,
+    status: String(data.status || 'delivered').toLowerCase()
+  };
+}
+
 export function zavuDeliveryUpdate(event) {
   const eventType = String(event?.type || '');
   const status = ({
