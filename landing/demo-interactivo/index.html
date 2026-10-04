@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Demo interactivo · ZeroAgent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Manrope:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/client-console.css">
+  <link rel="stylesheet" href="/client-console-layout.css">
+  <link rel="stylesheet" href="/client-console-tour.css">
+</head>
+<body>
+  <style>.app-shell{visibility:hidden}html.za-ready .app-shell{visibility:visible}</style>
+  <script>document.documentElement.classList.add("za-ready");</script>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Navegación principal">
+      <div class="brand"><span class="brand-mark">··</span><span><strong id="business-name">Cargando…</strong><small>Centro de operación</small></span></div>
+      <nav class="nav">
+        <button class="nav-item active" data-view="overview"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 3v2M12 19v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M3 12h2M19 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"></path></svg></span><b>Hoy</b><em id="nav-attention"></em></button>
+        <button class="nav-item" data-view="inbox"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg></span><b>Conversaciones</b><em id="nav-conversations"></em></button>
+        <button class="nav-item agenda-module" data-view="agenda"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"></rect><path d="M16 2v4M8 2v4M3 10h18"></path></svg></span><b>Agenda</b></button>
+        <button class="nav-item" data-view="clientes"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"></path></svg></span><b>Clientes</b></button>
+        <button class="nav-item" data-view="quality"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5v6c0 5 3.4 8.7 8 11 4.6-2.3 8-6 8-11V5z"></path><path d="m9 12 2 2 4-4"></path></svg></span><b>Calidad</b><em id="nav-feedback"></em></button>
+        <button class="nav-item" data-view="business"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="14" rx="2"></rect><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M3 12h18"></path></svg></span><b>Negocio</b></button>
+      </nav>
+      <div class="sidebar-foot"><div class="agent-presence"><i class="live-dot"></i><span><strong id="sidebar-status">Agente activo</strong><small id="sidebar-version">Versión aprobada</small></span></div><span class="powered">Tecnología por ZeroAgent · un producto <a href="https://hojacero.cl" target="_blank" rel="noopener">hojacero.cl</a></span></div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div><span class="page-kicker" id="page-kicker">OPERACIÓN DE HOY</span><h1 id="page-title">Buenos días</h1><p id="page-subtitle">Aquí está lo que necesita atención.</p></div>
+        <div class="top-actions"><span class="sync-state"><i></i> En vivo</span><button class="icon-button" id="refresh-button" aria-label="Actualizar">↻</button><button class="pause-button" id="agent-toggle">Pausar agente</button><span class="profile-button" id="profile-avatar" aria-label="Identidad del negocio">··</span></div>
+      </header>
+
+      <section class="view active" id="view-overview">
+        <div class="attention-banner" id="attention-strip"></div>
+        <div class="today-stats">
+          <div class="stat-card"><strong id="metric-attention">—</strong><span>derivaciones abiertas</span></div>
+          <div class="stat-card"><strong id="metric-bookings">—</strong><span>atenciones futuras</span></div>
+          <div class="stat-card"><strong id="metric-overdue">—</strong><span>solicitudes vencidas</span></div>
+          <div class="stat-card"><strong id="metric-feedback">—</strong><span>correcciones abiertas</span></div>
+        </div>
+        <section class="today-lead"><h2 id="today-title">Todo bajo control.</h2><p id="today-copy">Si una conversación necesita a una persona, aparecerá aquí.</p></section>
+        <section><div class="section-heading"><div><span class="section-label">ACCIÓN</span><h2>Prioridad ahora</h2></div><button class="text-button" data-go="inbox">Ver conversaciones →</button></div><div id="priority-queue" class="priority-list"></div></section>
+        <section class="agenda-module"><div class="section-heading"><div><span class="section-label">AGENDA</span><h2>Próximas atenciones</h2></div><button class="text-button" data-go="agenda">Abrir calendario →</button></div><div id="today-appointments" class="compact-bookings"></div></section>
+        <section class="activity-section"><div class="section-heading"><div><span class="section-label">ACTIVIDAD</span><h2>Qué cambió recientemente</h2></div></div><div id="owner-activity" class="activity-timeline"></div></section>
+      </section>
+
+      <section class="view" id="view-inbox">
+        <div class="view-heading"><div><p>Toma el control cuando haga falta y devuelve el caso al agente al terminar.</p></div><div class="filter-pills" id="conversation-filters"><button class="active" data-inbox-filter="all">Todas</button><button data-inbox-filter="attention">Necesitan humano</button><button data-inbox-filter="mine">Asignadas</button></div></div>
+        <div class="inbox-layout">
+          <aside class="thread-panel"><label class="search-box"><span>⌕</span><input id="conversation-search" type="search" placeholder="Buscar nombre, teléfono o mensaje"></label><div class="thread-summary"><strong id="thread-total">0 conversaciones</strong><span>Más recientes primero</span></div><div id="thread-list" class="thread-list"></div></aside>
+          <section class="conversation-panel"><div id="conversation-empty" class="empty-state"><span class="empty-symbol">↙</span><strong>Elige una conversación</strong><p>Verás el historial completo, datos del contacto y controles de atención.</p></div><div id="conversation-content" hidden></div></section>
+        </div>
+      </section>
+
+      <section class="view agenda-module" id="view-agenda">
+        <div class="view-heading"><div><p>La misma disponibilidad para WhatsApp, web y equipo interno.</p></div><button class="primary-button" id="open-manual-booking">＋ Nueva reserva</button></div>
+        <nav class="subnav" aria-label="Secciones de agenda"><button class="active" data-agenda-view="calendar">Calendario</button><button data-agenda-view="bookings">Reservas</button><button data-agenda-view="services">Servicios</button><button data-agenda-view="team">Equipo</button><button data-agenda-view="availability">Disponibilidad</button></nav>
+        <div class="agenda-toolbar"><div id="resource-tabs" class="resource-tabs"></div><span class="timezone" id="agenda-timezone"></span></div>
+        <div id="agenda-calendar" class="agenda-pane"><div class="calendar-head"><button class="icon-button" data-calendar-shift="-1">‹</button><strong id="calendar-range">Esta semana</strong><button class="icon-button" data-calendar-shift="1">›</button><div class="calendar-mode"><button class="active" data-calendar-mode="week">Semana</button><button data-calendar-mode="day">Día</button></div></div><div id="week-calendar" class="week-calendar"></div></div>
+        <div id="agenda-bookings" class="agenda-pane" hidden><div class="section-heading"><div><h2>Todas las reservas</h2><p>Abre cualquier fila para revisar o cambiar su estado.</p></div></div><div id="appointment-list" class="appointment-list"></div></div>
+        <div id="agenda-services" class="agenda-pane" hidden><div class="section-heading"><div><h2>Servicios</h2><p>Duración, precio y capacidad usados por el agente.</p></div><span class="managed-note">Catálogo aprobado</span></div><div id="service-list" class="catalog-grid"></div></div>
+        <div id="agenda-team" class="agenda-pane" hidden><div class="section-heading"><div><h2>Equipo agendable</h2><p>Personas, sedes y servicios que puede recibir cada una.</p></div><span class="managed-note">Configuración aprobada</span></div><div id="resource-list" class="people-grid"></div></div>
+        <div id="agenda-availability" class="agenda-pane" hidden><div class="availability-layout"><section><div class="section-heading"><div><h2>Horario semanal</h2><p>Sin bloques definidos el agente no ofrecerá horas.</p></div><button class="primary-button" id="open-hours">Agregar horario</button></div><div id="rule-list" class="rule-list"></div><div class="section-heading" style="margin-top:26px"><div><h2>Bloqueos</h2><p>Turno en otro centro, traslado, vacaciones — no son reservas.</p></div><button class="primary-button" id="open-block">Bloquear horario</button></div><div id="blocks-list" class="rule-list"></div></section><aside class="availability-note"><span>Cómo funciona</span><h3>Disponibilidad real, no promesas.</h3><p>El agente cruza duración, profesional, bloqueos y reservas existentes antes de ofrecer una hora.</p></aside></div></div>
+      </section>
+
+      <section class="view" id="view-clientes">
+        <div class="view-heading"><div><p id="customer-view-copy">Contactos y datos de admisión reunidos desde la conversación y la agenda.</p></div></div>
+        <div class="agenda-toolbar">
+          <label class="search-box" style="flex:1;max-width:340px"><span>⌕</span><input id="customer-search" type="search" placeholder="Buscar por nombre o teléfono"></label>
+          <nav class="subnav" style="margin:0;border:0" aria-label="Filtro de segmento">
+            <button class="active" data-segment-filter="todos">Todos</button><button data-segment-filter="frio">Frío</button><button data-segment-filter="caliente">Caliente</button><button data-segment-filter="cliente">Cliente</button><button data-segment-filter="revisar">Revisar</button>
+          </nav>
+          <button type="button" class="outline-button" id="open-new-customer">+ Agregar contacto</button>
+        </div>
+        <p id="customer-total" style="margin:16px 2px 0;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.06em"></p>
+        <div class="bulk-bar" id="customer-bulk-bar" hidden><span id="customer-bulk-count"></span><div><button type="button" class="text-button" id="customer-bulk-clear">Cancelar selección</button><button type="button" class="primary-button" id="customer-bulk-mute">🔇 Silenciar seleccionados</button></div></div>
+        <div id="customer-list" class="appointment-list"></div>
+      </section>
+
+      <section class="view" id="view-quality">
+        <div class="view-heading"><div><p>El equipo reporta; ZeroAgent revisa, prueba y publica cambios seguros.</p></div></div>
+        <nav class="subnav"><button class="active" data-quality-view="playground">Probar agente</button><button data-quality-view="reviews">Conversaciones evaluadas</button><button data-quality-view="corrections">Correcciones enviadas</button><button data-quality-view="knowledge">Conocimiento</button></nav>
+        <div id="quality-playground" class="quality-pane"><div class="playground-layout"><section class="playground-chat"><div class="section-heading"><div><h2>Conversación de prueba</h2><p>Intenta confundirlo, pregunta excepciones y revisa límites.</p></div><button class="outline-button" id="playground-reset">Nueva prueba</button></div><div id="playground-messages" class="playground-messages"></div><form id="playground-form" class="playground-composer"><textarea id="playground-input" rows="2" required placeholder="Escribe una pregunta real…"></textarea><button class="primary-button">Enviar</button></form></section><aside class="playground-review"><span class="section-label">EVALUACIÓN</span><h3>¿Respondió correctamente?</h3><p>Selecciona una respuesta para aprobarla o explicar cómo debió contestar.</p><div id="playground-selection" class="review-empty">Aún no hay una respuesta seleccionada.</div></aside></div></div>
+        <div id="quality-reviews" class="quality-pane" hidden><div id="approved-list" class="feedback-list"></div></div>
+        <div id="quality-corrections" class="quality-pane" hidden><div class="correction-intro"><strong>Las correcciones no cambian producción por sí solas.</strong><p>Primero se revisan, se convierten en una regla o dato comprobable y pasan pruebas.</p></div><div id="feedback-list" class="feedback-list"></div></div>
+        <div id="quality-knowledge" class="quality-pane" hidden>
+          <div class="availability-layout">
+            <section>
+              <span class="section-label">SUGERIR UN DATO NUEVO</span>
+              <form id="knowledge-suggestion-form" style="display:grid;gap:12px;margin:14px 0 26px">
+                <label>Categoría<input id="knowledge-category" required placeholder="Ej: políticas, servicios…"></label>
+                <label>Asunto<input id="knowledge-subject" required placeholder="Ej: convenio isapre"></label>
+                <label>Dato completo<textarea id="knowledge-value" rows="3" required placeholder="Escribe el dato tal como quieres que el agente lo use…"></textarea></label>
+                <button class="primary-button" type="submit">Enviar sugerencia</button>
+              </form>
+              <p id="knowledge-suggestions-note" class="review-status"></p>
+              <div id="knowledge-pending-suggestions" class="catalog-grid" style="margin-bottom:18px"></div>
+              <span class="section-label">LO QUE EL AGENTE SABE HOY</span>
+              <div id="knowledge-facts" class="catalog-grid" style="margin-top:14px"></div>
+
+              <hr style="border:none;border-top:1px solid var(--border-color, #e5e5e5);margin:28px 0">
+
+              <span class="section-label">DATOS DEL NEGOCIO (se usan de inmediato)</span>
+              <p class="review-status">Precios, direcciones, teléfonos, horarios. Esto lo usa el agente en la próxima respuesta, sin pasar por revisión.</p>
+              <form id="business-data-form" style="display:grid;gap:12px;margin:14px 0 18px">
+                <label>Nombre del dato<input id="business-data-label" required placeholder="Ej: Precio evaluación general"></label>
+                <label>Valor<input id="business-data-value" required placeholder="Ej: $36.000 · 45-60 min"></label>
+                <label>Categoría (opcional)<input id="business-data-category" placeholder="Ej: precios, ubicación, contacto…"></label>
+                <button class="primary-button" type="submit">Guardar dato</button>
+              </form>
+              <div id="business-data-list" class="catalog-grid"></div>
+
+              <span class="section-label" style="margin-top:22px;display:block">INFO SUELTA (se usa de inmediato)</span>
+              <p class="review-status">Contexto que no calza en una ficha — indicaciones de llegada, políticas informales, etc.</p>
+              <form id="business-info-form" style="display:grid;gap:12px;margin:14px 0 18px">
+                <label>Información<textarea id="business-info-text" rows="3" required placeholder="Ej: Estamos en zona rural; enviamos un link de Google Maps para llegar directo…"></textarea></label>
+                <button class="primary-button" type="submit">Guardar info</button>
+              </form>
+              <div id="business-info-list" class="catalog-grid"></div>
+            </section>
+            <aside class="availability-note"><span>Cómo funciona</span><h3>Dos velocidades distintas.</h3><p>Una <strong>sugerencia</strong> queda pendiente de revisión — el mismo circuito de aprobación que las correcciones. <strong>Datos</strong> e <strong>Info</strong> los mantienes tú mismo y el agente los usa de inmediato, sin pasar por el equipo — pensados para hechos objetivos que tú ya conoces bien (precio, dirección, cómo llegar).</p></aside>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-business">
+        <div class="view-heading"><div><p>Información que usa la operación y preferencias del equipo.</p></div><button class="outline-button" id="open-business-knowledge">Actualizar información</button></div>
+        <nav class="subnav"><button class="active" data-business-view="profile">Datos y sedes</button><button data-business-view="people">Equipo y permisos</button><button data-business-view="notifications">Notificaciones</button><button data-business-view="integrations">Integraciones</button><button data-business-view="ai">IA y plan</button></nav>
+        <div id="business-profile" class="business-pane"><div class="settings-layout"><section><span class="section-label">IDENTIDAD</span><h3 id="business-profile-name">Cargando…</h3><p id="business-description"></p><div id="location-list" class="settings-list"></div></section><aside class="settings-note"><strong>Información aprobada</strong><p>Los cambios importantes se envían a revisión antes de modificar lo que responde el agente.</p></aside></div></div>
+        <div id="business-people" class="business-pane" hidden><div id="team-list" class="people-grid"></div></div>
+        <div id="business-notifications" class="business-pane" hidden>
+          <form id="notification-settings-form" style="display:grid;gap:12px;max-width:420px;margin-bottom:22px">
+            <label>Teléfono para alertas por WhatsApp<input id="notif-alert-phone" placeholder="+56 9…"></label>
+            <p class="review-status" id="notif-phone-note">Usa el mismo canal de WhatsApp del agente (Zavu) para avisar a este número.</p>
+            <button class="primary-button" type="submit">Guardar</button>
+            <p class="form-error" id="notification-settings-error"></p>
+          </form>
+          <div class="toggle-list">
+            <label><span><strong>Conversación necesita humano</strong><small>WhatsApp real al número de arriba, apenas ocurre.</small></span><input type="checkbox" id="notif-handoff" checked></label>
+          </div>
+          <p class="capability-note">En esta versión, las alertas operativas por WhatsApp se envían solo cuando una conversación necesita atención humana.</p>
+        </div>
+        <div id="business-integrations" class="business-pane" hidden><div class="integration-grid"><article><span class="integration-status" id="integration-zavu-status">—</span><h3>WhatsApp · Zavu</h3><p id="integration-zavu-copy">Verificando estado del canal…</p></article><article><span class="integration-status ok">CONECTADO</span><h3>Base del negocio</h3><p>Datos y agenda disponibles.</p></article><article><span class="integration-status ok">DISPONIBLE</span><h3>Alertas de atención</h3><p>Se configuran en Notificaciones y usan el canal WhatsApp del agente.</p></article><article><span class="integration-status" id="integration-google-status">—</span><h3>Google Calendar</h3><p id="integration-google-copy">Cargando estado…</p><a class="outline-button" id="google-calendar-connect" href="/auth/google?return_to=/agenda">Conectar Google Calendar</a><button class="text-button" id="google-calendar-disconnect" hidden type="button">Desconectar</button></article></div></div>
+        <div id="business-ai" class="business-pane" hidden>
+          <div class="ai-plan-head"><div><span class="section-label">IA DEL NEGOCIO</span><h2>Modelo, consumo y plan</h2><p>Elige la IA que atiende a tus clientes. Las claves propias viajan directo al vault y nunca se vuelven a mostrar ni se guardan en este navegador.</p></div><span class="integration-status" id="ai-plan-status">NO CONFIGURADO</span></div>
+          <p id="ai-action-status" class="capability-note" role="status" aria-live="polite"></p>
+          <div class="ai-plan-grid">
+            <article><span class="section-label">CONFIGURACIÓN ACTUAL</span><h3 id="ai-current-name">Sin datos publicados</h3><p id="ai-current-detail">El runtime todavía no informa proveedor ni modelo.</p><div id="ai-agent-list" class="ai-agent-list" hidden></div></article>
+            <article class="ai-config-card"><span class="section-label">CLAVE PROPIA · BYOK</span><h3>Usar tu proveedor</h3><p id="ai-byok-copy">La clave se cifra en el servidor y no vuelve al navegador.</p><form id="ai-byok-form" class="ai-config-form"><label>Proveedor<select id="ai-byok-provider"><option value="openai">OpenAI</option><option value="groq">Groq</option><option value="compatible">Compatible con OpenAI</option></select></label><label>Modelo<input id="ai-byok-model" required autocomplete="off" placeholder="Identificador del modelo"></label><label id="ai-byok-base-row" hidden>URL base HTTPS<input id="ai-byok-base" type="url" inputmode="url" autocomplete="off" placeholder="https://api.proveedor.com/v1"></label><label>API key<input id="ai-byok-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="Se enviará una sola vez"></label><p id="ai-byok-key-state" class="form-note"></p><button class="primary-button" type="submit">Activar clave propia</button></form></article>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="booking-dialog" class="dialog"><form class="dialog-card" id="booking-form"><div class="dialog-head"><div><span class="section-label">AGENDA</span><h2 id="booking-dialog-title">Nueva solicitud</h2></div><button class="close-button" type="button" data-close-dialog="booking-dialog">×</button></div><p id="booking-mode-note" class="form-note"></p><label>Cliente<input id="booking-name" required></label><label>Teléfono<input id="booking-phone" required placeholder="+56 9…"></label><label>Correo (datos de admisión)<input id="booking-email" type="email" placeholder="opcional"></label><div class="form-grid"><label>Servicio<select id="booking-service"></select></label><label>Profesional<select id="booking-resource"></select></label></div><label>Sede<select id="booking-location"></select></label><label>Fecha y hora<input id="booking-starts" type="datetime-local" required></label><label>Nota interna<textarea id="booking-notes" rows="3"></textarea></label><div class="dialog-actions"><button type="button" class="outline-button" data-close-dialog="booking-dialog">Cancelar</button><button class="primary-button" id="booking-submit">Crear solicitud</button></div><p id="booking-error" class="form-error"></p></form></dialog>
+  <dialog id="hours-dialog" class="dialog"><form class="dialog-card" id="hours-form"><div class="dialog-head"><div><span class="section-label">DISPONIBILIDAD</span><h2>Agregar horario</h2></div><button class="close-button" type="button" data-close-dialog="hours-dialog">×</button></div><label>Profesional<select id="hours-resource"></select></label><div class="form-grid"><label>Día<select id="hours-day"><option value="1">Lunes</option><option value="2">Martes</option><option value="3">Miércoles</option><option value="4">Jueves</option><option value="5">Viernes</option><option value="6">Sábado</option><option value="0">Domingo</option></select></label><label>Desde<input id="hours-start" type="time" value="09:00"></label></div><label>Hasta<input id="hours-end" type="time" value="18:00"></label><div class="dialog-actions"><button type="button" class="outline-button" data-close-dialog="hours-dialog">Cancelar</button><button class="primary-button">Guardar horario</button></div><p id="hours-error" class="form-error"></p></form></dialog>
+  <dialog id="block-dialog" class="dialog"><form class="dialog-card" id="block-form"><div class="dialog-head"><div><span class="section-label">DISPONIBILIDAD</span><h2>Bloquear horario</h2></div><button class="close-button" type="button" data-close-dialog="block-dialog">×</button></div><label>Profesional<select id="block-resource" required></select></label><label>Motivo<input id="block-reason" required placeholder="Ej: compromiso externo"></label><label>Desde<input id="block-starts" type="datetime-local" required></label><label>Hasta<input id="block-ends" type="datetime-local" required></label><div class="dialog-actions"><button type="button" class="outline-button" data-close-dialog="block-dialog">Cancelar</button><button class="primary-button">Bloquear</button></div><p id="block-error" class="form-error"></p></form></dialog>
+  <dialog id="appointment-detail-dialog" class="dialog"><div class="dialog-card appointment-detail" id="appointment-detail"></div></dialog>
+  <dialog id="customer-detail-dialog" class="dialog"><div class="dialog-card appointment-detail" id="customer-detail"></div></dialog>
+  <dialog id="new-customer-dialog" class="dialog"><form class="dialog-card" id="new-customer-form"><div class="dialog-head"><div><span class="section-label">CLIENTES</span><h2>Agregar contacto</h2></div><button class="close-button" type="button" data-close-dialog="new-customer-dialog">×</button></div><p class="form-note">Úsalo para dejar listo a alguien que todavía no reserva ni escribe — por ejemplo, para poder marcarlo como "no contestar" antes de su primer mensaje.</p><label>Nombre (opcional)<input id="new-customer-name" placeholder="Si no lo sabes, se usa el teléfono"></label><label>Teléfono<input id="new-customer-phone" required placeholder="+56 9…"></label><div class="dialog-actions"><button type="button" class="outline-button" data-close-dialog="new-customer-dialog">Cancelar</button><button class="primary-button" id="new-customer-submit">Agregar</button></div><p id="new-customer-error" class="form-error"></p></form></dialog>
+  <div class="operation-toast" id="operation-toast" role="status" aria-live="polite" hidden></div>
+  <script src="/client-console-v2.js"></script>
+</body>
+</html>
