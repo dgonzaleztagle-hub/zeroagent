@@ -182,7 +182,7 @@ export async function getGoogleCalendarStatus() {
     accountEmail: settings?.google_account_email || '',
     connectedAt: settings?.connected_at || null,
     targetCalendarId: settings?.google_calendar_id || 'primary',
-    locationCalendars: settings?.location_calendars && typeof settings.location_calendars === 'object' ? settings.location_calendars : {},
+    calendarRoutes: settings?.calendar_routes && typeof settings.calendar_routes === 'object' ? settings.calendar_routes : {},
     calendars: Array.isArray(settings?.calendar_ids) ? settings.calendar_ids : [],
     travelBufferMinutes: Number(settings?.travel_buffer_minutes) || 0
   };
@@ -215,20 +215,22 @@ export async function setGoogleCalendarTarget(calendarId) {
   });
 }
 
-// Calendario propio por sede (ej. "Atención a domicilio" -> calendario "Domicilios"): las citas
-// que crea el bot en esa sede se escriben ahí en vez del calendario destino general. calendarId
-// vacío quita la asignación y esa sede vuelve al calendario destino.
-export async function setGoogleCalendarLocationCalendar(locationName, calendarId) {
-  const name = clean(locationName, 200);
-  if (!name) throw new Error('Falta la sede a asignar.');
+// Calendario propio por "ruta": el nombre de una sede (ej. "Box Buin (El Recurso)") o
+// "delivery:mobile" para toda atención a domicilio — un domicilio nunca resuelve a una sede, así
+// que se identifica por el modo de entrega del servicio. Las citas que crea el bot en esa ruta se
+// escriben en el calendario asignado en vez del calendario destino general. calendarId vacío quita
+// la asignación y esa ruta vuelve al calendario destino.
+export async function setGoogleCalendarRoute(routeKey, calendarId) {
+  const key = clean(routeKey, 200);
+  if (!key) throw new Error('Falta la sede o el tipo de atención a asignar.');
   const settings = await storedSettings();
   const known = Array.isArray(settings?.calendar_ids) ? settings.calendar_ids : [];
   const id = clean(calendarId, 300);
   if (id && known.length && !known.some(cal => cal.id === id)) throw new Error('Ese calendario no está en la lista de calendarios de esta cuenta.');
-  const next = { ...(settings?.location_calendars && typeof settings.location_calendars === 'object' ? settings.location_calendars : {}) };
-  if (id) next[name] = id; else delete next[name];
+  const next = { ...(settings?.calendar_routes && typeof settings.calendar_routes === 'object' ? settings.calendar_routes : {}) };
+  if (id) next[key] = id; else delete next[key];
   await agendaSupabaseRequest(`/rest/v1/za_google_calendar_settings?id=eq.${SETTINGS_ID}`, {
-    method: 'PATCH', body: JSON.stringify({ location_calendars: next, updated_at: new Date().toISOString() })
+    method: 'PATCH', body: JSON.stringify({ calendar_routes: next, updated_at: new Date().toISOString() })
   });
 }
 
@@ -327,7 +329,7 @@ async function calendarContext() {
   // vieja, antes de tener este scope), cae de vuelta al único calendario que se conocía antes.
   return {
     accessToken, calendarId,
-    locationCalendars: settings.location_calendars && typeof settings.location_calendars === 'object' ? settings.location_calendars : {},
+    calendarRoutes: settings.calendar_routes && typeof settings.calendar_routes === 'object' ? settings.calendar_routes : {},
     busyCalendarIds: knownIds.length ? knownIds : [calendarId],
     travelBufferMinutes: Number(settings.travel_buffer_minutes) || 0
   };
@@ -346,11 +348,14 @@ export function colorIdForLocation(locationName) {
   return LOCATION_COLOR_IDS[locationName] || null;
 }
 
-// Calendario donde se escribe la cita de una sede: el asignado a esa sede si todavía existe en la
-// cuenta (pudo borrarse en Google), si no el calendario destino general.
-function calendarIdForLocation(ctx, locationName) {
-  const mapped = ctx.locationCalendars[locationName];
-  return mapped && ctx.busyCalendarIds.includes(mapped) ? mapped : ctx.calendarId;
+// Calendario donde se escribe una cita: el primero asignado entre sus rutas (más específica
+// primero) que todavía exista en la cuenta (pudo borrarse en Google); si no, el calendario destino.
+function calendarIdForRoute(ctx, routeKeys) {
+  for (const key of routeKeys) {
+    const mapped = ctx.calendarRoutes[key];
+    if (mapped && ctx.busyCalendarIds.includes(mapped)) return mapped;
+  }
+  return ctx.calendarId;
 }
 
 // Sólo devuelve rangos ocupados (sin título, invitados ni ningún otro detalle del evento —
@@ -399,10 +404,10 @@ export async function getGoogleCalendarBusyIntervals(startIso, endIso) {
 // usaba a mano — no es algo que construyamos nosotros, es comportamiento nativo de Calendar.
 // Devuelve { eventId, calendarId } — el calendarId hay que guardarlo junto al evento, porque
 // actualizar/borrar después tiene que ir al MISMO calendario donde se creó.
-export async function createGoogleCalendarEvent({ summary, description, startIso, endIso, attendeeEmail, colorId, locationName }) {
+export async function createGoogleCalendarEvent({ summary, description, startIso, endIso, attendeeEmail, colorId, locationName, deliveryMode }) {
   const ctx = await calendarContext();
   if (!ctx) return null;
-  const calendarId = calendarIdForLocation(ctx, locationName || '');
+  const calendarId = calendarIdForRoute(ctx, [deliveryMode ? `delivery:${deliveryMode}` : '', locationName || ''].filter(Boolean));
   const payload = { summary, description, start: { dateTime: startIso }, end: { dateTime: endIso } };
   if (colorId) payload.colorId = colorId;
   if (attendeeEmail) payload.attendees = [{ email: attendeeEmail }];

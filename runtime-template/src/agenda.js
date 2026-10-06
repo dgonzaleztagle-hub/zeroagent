@@ -334,7 +334,7 @@ export async function getAgendaDashboard(packageData) {
   if (supabaseSettings()) {
     const [locations, services, resources, links, appointments, availabilityRules, availabilityBlocks, feedback] = await Promise.all([
       agendaSupabaseRequest('/rest/v1/za_locations?active=eq.true&select=id,name,address,timezone'),
-      agendaSupabaseRequest('/rest/v1/za_services?active=eq.true&select=id,name,duration_minutes,price_clp,bookable,redirect_note'),
+      agendaSupabaseRequest('/rest/v1/za_services?active=eq.true&select=id,name,duration_minutes,price_clp,bookable,redirect_note,delivery_mode'),
       agendaSupabaseRequest('/rest/v1/za_resources?active=eq.true&select=id,name,specialty,location_id'),
       agendaSupabaseRequest('/rest/v1/za_resource_services?select=resource_id,service_id'),
       fetchAllAgendaRows('/rest/v1/za_appointments?select=id,reference,status,source,starts_at,ends_at,expires_at,notes,za_customers(full_name,phone,email),za_services(name,duration_minutes),za_resources(name),za_locations(name)&order=starts_at.asc'),
@@ -517,7 +517,7 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
         summary: `${calendarTitleName} — ${serviceName}`,
         description: [`Servicio: ${serviceName}`, `Teléfono: ${customerPhone}`, notesWithRisk].filter(Boolean).join('\n'),
         startIso: appointment.starts_at, endIso: appointment.ends_at,
-        attendeeEmail: customerEmail || null, colorId: colorIdForLocation(location?.name || ''), locationName: location?.name || ''
+        attendeeEmail: customerEmail || null, colorId: colorIdForLocation(location?.name || ''), locationName: location?.name || '', deliveryMode: service.delivery_mode || ''
       });
       if (!created) return;
       const { eventId, calendarId } = created;
@@ -590,7 +590,7 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
       summary: `${calendarTitleName} — ${serviceName}`,
       description: [`Servicio: ${serviceName}`, `Teléfono: ${customerPhone}`, notesWithRisk].filter(Boolean).join('\n'),
       startIso: appointment.starts_at, endIso: new Date(endTime).toISOString(),
-      attendeeEmail: customerEmail || null, colorId: colorIdForLocation(appointment.location), locationName: appointment.location
+      attendeeEmail: customerEmail || null, colorId: colorIdForLocation(appointment.location), locationName: appointment.location, deliveryMode: service.delivery_mode || ''
     });
     if (!created) return;
     const { eventId, calendarId } = created;
