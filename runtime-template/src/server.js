@@ -18,7 +18,7 @@ import { findOperatorByPin, operatorSessionFromRequest, sessionSetCookieHeader, 
 import { getPublicAiAccount, resolveRuntimeLlmConfig, updateAiSelection } from './ai-account.js';
 import { applyOwnerAction, loadOwnerAction, ownerActionPage } from './owner-actions.js';
 import { appendCustomerRecordEntry, listCustomerRecord } from './customer-records.js';
-import { buildGoogleAuthUrl, completeGoogleCalendarConnection, disconnectGoogleCalendar, getGoogleCalendarStatus, refreshGoogleCalendarList, setGoogleCalendarBuffer, setGoogleCalendarTarget, signGoogleOAuthState, verifyGoogleOAuthState } from './google-calendar.js';
+import { buildGoogleAuthUrl, completeGoogleCalendarConnection, disconnectGoogleCalendar, getGoogleCalendarStatus, refreshGoogleCalendarList, setGoogleCalendarBuffer, setGoogleCalendarLocationCalendar, setGoogleCalendarTarget, signGoogleOAuthState, verifyGoogleOAuthState } from './google-calendar.js';
 import { syncGoogleContacts } from './google-contacts.js';
 
 // Capturar errores de inicialización en vez de dejar que el módulo falle al
@@ -535,6 +535,7 @@ export async function handleRequest(req, res) {
       const body = await readJson(req);
       if (!(await dashboardAuthorized(req, body))) return json(res, 401, { error: 'Acceso al dashboard no autorizado.' });
       if (body.calendarId !== undefined) await setGoogleCalendarTarget(body.calendarId);
+      if (body.locationCalendar) await setGoogleCalendarLocationCalendar(body.locationCalendar.location, body.locationCalendar.calendarId);
       if (body.bufferMinutes !== undefined) await setGoogleCalendarBuffer(body.bufferMinutes);
       return json(res, 200, await getGoogleCalendarStatus());
     } catch (error) { return json(res, 422, { error: error.message }); }

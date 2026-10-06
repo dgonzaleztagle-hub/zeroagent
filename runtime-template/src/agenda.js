@@ -513,24 +513,26 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
       // za_request_appointment dedupea reintentos devolviendo la fila existente — si ya tiene
       // event_id, un reintento acá crearía un segundo evento y una segunda invitación por correo.
       if (appointment.google_calendar_event_id) return;
-      const eventId = await createGoogleCalendarEvent({
+      const created = await createGoogleCalendarEvent({
         summary: `${calendarTitleName} — ${serviceName}`,
         description: [`Servicio: ${serviceName}`, `Teléfono: ${customerPhone}`, notesWithRisk].filter(Boolean).join('\n'),
         startIso: appointment.starts_at, endIso: appointment.ends_at,
-        attendeeEmail: customerEmail || null, colorId: colorIdForLocation(location?.name || '')
+        attendeeEmail: customerEmail || null, colorId: colorIdForLocation(location?.name || ''), locationName: location?.name || ''
       });
-      if (!eventId) return;
+      if (!created) return;
+      const { eventId, calendarId } = created;
       // Ventana angosta pero real: si un cancelar llegó mientras Google creaba el evento (dos
       // llamadas de red), no dejar el evento vivo en Calendar para una cita ya cancelada acá.
       const freshRows = await agendaSupabaseRequest(`/rest/v1/za_appointments?id=eq.${encodeURIComponent(appointment.id)}&select=status`);
       if (['cancelled', 'rejected'].includes(freshRows?.[0]?.status)) {
-        await deleteGoogleCalendarEvent(eventId);
+        await deleteGoogleCalendarEvent(eventId, calendarId);
         return;
       }
       await agendaSupabaseRequest(`/rest/v1/za_appointments?id=eq.${encodeURIComponent(appointment.id)}`, {
-        method: 'PATCH', body: JSON.stringify({ google_calendar_event_id: eventId })
+        method: 'PATCH', body: JSON.stringify({ google_calendar_event_id: eventId, google_calendar_id: calendarId })
       });
       appointment.google_calendar_event_id = eventId;
+      appointment.google_calendar_id = calendarId;
     });
     await alertNewBookingBestEffort({ ...appointment, customer_phone: customerPhone }, {
       source, config, customerName, serviceName, locationName: location?.name || ''
@@ -584,23 +586,26 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
   state.appointments.push(appointment);
   await saveAgendaState(packageData, state);
   await syncGoogleCalendarBestEffort(async () => {
-    const eventId = await createGoogleCalendarEvent({
+    const created = await createGoogleCalendarEvent({
       summary: `${calendarTitleName} — ${serviceName}`,
       description: [`Servicio: ${serviceName}`, `Teléfono: ${customerPhone}`, notesWithRisk].filter(Boolean).join('\n'),
       startIso: appointment.starts_at, endIso: new Date(endTime).toISOString(),
-      attendeeEmail: customerEmail || null, colorId: colorIdForLocation(appointment.location)
+      attendeeEmail: customerEmail || null, colorId: colorIdForLocation(appointment.location), locationName: appointment.location
     });
-    if (!eventId) return;
+    if (!created) return;
+    const { eventId, calendarId } = created;
     // Misma ventana angosta que en la rama Supabase: si un cancelar llegó mientras Google creaba
     // el evento, no dejar el evento vivo en Calendar para una cita ya cancelada acá.
     const freshState = await loadAgendaState(packageData);
     const freshAppointment = freshState.appointments.find(item => item.id === appointment.id);
     if (!freshAppointment || ['cancelled', 'rejected'].includes(freshAppointment.status)) {
-      await deleteGoogleCalendarEvent(eventId);
+      await deleteGoogleCalendarEvent(eventId, calendarId);
       return;
     }
     appointment.google_calendar_event_id = eventId;
+    appointment.google_calendar_id = calendarId;
     freshAppointment.google_calendar_event_id = eventId;
+    freshAppointment.google_calendar_id = calendarId;
     await saveAgendaState(packageData, freshState);
   });
   await alertNewBookingBestEffort(appointment, {
@@ -625,7 +630,7 @@ export async function updateAgendaAppointment(packageData, id, status) {
     const appointment = Array.isArray(result) ? result[0] : result;
     if (['confirmed', 'completed'].includes(status)) await bumpCustomerSegment(appointment.customer_id, 'cliente');
     if (['cancelled', 'rejected'].includes(status) && appointment.google_calendar_event_id) {
-      await syncGoogleCalendarBestEffort(() => deleteGoogleCalendarEvent(appointment.google_calendar_event_id));
+      await syncGoogleCalendarBestEffort(() => deleteGoogleCalendarEvent(appointment.google_calendar_event_id, appointment.google_calendar_id));
     }
     return appointment;
   }
@@ -662,7 +667,7 @@ export async function updateAgendaAppointment(packageData, id, status) {
   appointment.updated_at = new Date().toISOString();
   await saveAgendaState(packageData, state);
   if (['cancelled', 'rejected'].includes(status) && appointment.google_calendar_event_id) {
-    await syncGoogleCalendarBestEffort(() => deleteGoogleCalendarEvent(appointment.google_calendar_event_id));
+    await syncGoogleCalendarBestEffort(() => deleteGoogleCalendarEvent(appointment.google_calendar_event_id, appointment.google_calendar_id));
   }
   return appointment;
 }
@@ -775,7 +780,7 @@ export async function rescheduleAgendaAppointment(packageData, { id, new_starts_
     });
     const appointment = Array.isArray(result) ? result[0] : result;
     if (appointment.google_calendar_event_id && !sameTime) {
-      await syncGoogleCalendarBestEffort(() => updateGoogleCalendarEventTime(appointment.google_calendar_event_id, { startIso: appointment.starts_at, endIso: appointment.ends_at }));
+      await syncGoogleCalendarBestEffort(() => updateGoogleCalendarEventTime(appointment.google_calendar_event_id, { startIso: appointment.starts_at, endIso: appointment.ends_at, calendarId: appointment.google_calendar_id }));
     }
     return { ...appointment, risk_window: riskWindow || null };
   }
@@ -816,7 +821,7 @@ export async function rescheduleAgendaAppointment(packageData, { id, new_starts_
   appointment.updated_at = new Date().toISOString();
   await saveAgendaState(packageData, state);
   if (appointment.google_calendar_event_id && !sameTime) {
-    await syncGoogleCalendarBestEffort(() => updateGoogleCalendarEventTime(appointment.google_calendar_event_id, { startIso: appointment.starts_at, endIso: new Date(targetEnd).toISOString() }));
+    await syncGoogleCalendarBestEffort(() => updateGoogleCalendarEventTime(appointment.google_calendar_event_id, { startIso: appointment.starts_at, endIso: new Date(targetEnd).toISOString(), calendarId: appointment.google_calendar_id }));
   }
   return appointment;
 }

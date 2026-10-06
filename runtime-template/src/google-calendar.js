@@ -182,6 +182,7 @@ export async function getGoogleCalendarStatus() {
     accountEmail: settings?.google_account_email || '',
     connectedAt: settings?.connected_at || null,
     targetCalendarId: settings?.google_calendar_id || 'primary',
+    locationCalendars: settings?.location_calendars && typeof settings.location_calendars === 'object' ? settings.location_calendars : {},
     calendars: Array.isArray(settings?.calendar_ids) ? settings.calendar_ids : [],
     travelBufferMinutes: Number(settings?.travel_buffer_minutes) || 0
   };
@@ -211,6 +212,23 @@ export async function setGoogleCalendarTarget(calendarId) {
   if (known.length && !known.some(cal => cal.id === id)) throw new Error('Ese calendario no está en la lista de calendarios de esta cuenta.');
   await agendaSupabaseRequest(`/rest/v1/za_google_calendar_settings?id=eq.${SETTINGS_ID}`, {
     method: 'PATCH', body: JSON.stringify({ google_calendar_id: id, updated_at: new Date().toISOString() })
+  });
+}
+
+// Calendario propio por sede (ej. "Atención a domicilio" -> calendario "Domicilios"): las citas
+// que crea el bot en esa sede se escriben ahí en vez del calendario destino general. calendarId
+// vacío quita la asignación y esa sede vuelve al calendario destino.
+export async function setGoogleCalendarLocationCalendar(locationName, calendarId) {
+  const name = clean(locationName, 200);
+  if (!name) throw new Error('Falta la sede a asignar.');
+  const settings = await storedSettings();
+  const known = Array.isArray(settings?.calendar_ids) ? settings.calendar_ids : [];
+  const id = clean(calendarId, 300);
+  if (id && known.length && !known.some(cal => cal.id === id)) throw new Error('Ese calendario no está en la lista de calendarios de esta cuenta.');
+  const next = { ...(settings?.location_calendars && typeof settings.location_calendars === 'object' ? settings.location_calendars : {}) };
+  if (id) next[name] = id; else delete next[name];
+  await agendaSupabaseRequest(`/rest/v1/za_google_calendar_settings?id=eq.${SETTINGS_ID}`, {
+    method: 'PATCH', body: JSON.stringify({ location_calendars: next, updated_at: new Date().toISOString() })
   });
 }
 
@@ -309,6 +327,7 @@ async function calendarContext() {
   // vieja, antes de tener este scope), cae de vuelta al único calendario que se conocía antes.
   return {
     accessToken, calendarId,
+    locationCalendars: settings.location_calendars && typeof settings.location_calendars === 'object' ? settings.location_calendars : {},
     busyCalendarIds: knownIds.length ? knownIds : [calendarId],
     travelBufferMinutes: Number(settings.travel_buffer_minutes) || 0
   };
@@ -325,6 +344,13 @@ const LOCATION_COLOR_IDS = {
 
 export function colorIdForLocation(locationName) {
   return LOCATION_COLOR_IDS[locationName] || null;
+}
+
+// Calendario donde se escribe la cita de una sede: el asignado a esa sede si todavía existe en la
+// cuenta (pudo borrarse en Google), si no el calendario destino general.
+function calendarIdForLocation(ctx, locationName) {
+  const mapped = ctx.locationCalendars[locationName];
+  return mapped && ctx.busyCalendarIds.includes(mapped) ? mapped : ctx.calendarId;
 }
 
 // Sólo devuelve rangos ocupados (sin título, invitados ni ningún otro detalle del evento —
@@ -371,33 +397,38 @@ export async function getGoogleCalendarBusyIntervals(startIso, endIso) {
 // llamador lo trate como "no hay nada que guardar", no como error). El invitado por correo hace
 // que Calendar le mande a el/la paciente el mismo aviso con confirmar/rechazar que Francisco ya
 // usaba a mano — no es algo que construyamos nosotros, es comportamiento nativo de Calendar.
-export async function createGoogleCalendarEvent({ summary, description, startIso, endIso, attendeeEmail, colorId }) {
+// Devuelve { eventId, calendarId } — el calendarId hay que guardarlo junto al evento, porque
+// actualizar/borrar después tiene que ir al MISMO calendario donde se creó.
+export async function createGoogleCalendarEvent({ summary, description, startIso, endIso, attendeeEmail, colorId, locationName }) {
   const ctx = await calendarContext();
   if (!ctx) return null;
+  const calendarId = calendarIdForLocation(ctx, locationName || '');
   const payload = { summary, description, start: { dateTime: startIso }, end: { dateTime: endIso } };
   if (colorId) payload.colorId = colorId;
   if (attendeeEmail) payload.attendees = [{ email: attendeeEmail }];
   // sendUpdates=all: sin esto Google NO manda el correo de invitación aunque haya attendees —
   // el default de la API es "none". Es justo el comportamiento que Francisco pidió replicar
   // (el correo con confirmar/rechazar que ya usa a mano).
-  const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(ctx.calendarId)}/events?sendUpdates=all`, {
+  const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?sendUpdates=all`, {
     method: 'POST',
     headers: { authorization: `Bearer ${ctx.accessToken}`, 'content-type': 'application/json' },
     body: JSON.stringify(payload)
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(result.error?.message || `Google respondió ${response.status} al crear el evento.`);
-  return result.id;
+  return { eventId: result.id, calendarId };
 }
 
 // Sólo actualiza el evento que NOSOTROS creamos (por eventId propio) — nunca busca ni toca
 // eventos existentes por título/fecha. Si el evento ya no existe en Google (borrado a mano),
 // lo tratamos como no-op en vez de reventar el reagendamiento.
-export async function updateGoogleCalendarEventTime(eventId, { startIso, endIso }) {
+// calendarId = el guardado con la cita; ausente en citas anteriores a este campo (siempre vivieron
+// en el calendario destino general).
+export async function updateGoogleCalendarEventTime(eventId, { startIso, endIso, calendarId }) {
   if (!eventId) return;
   const ctx = await calendarContext();
   if (!ctx) return;
-  const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(ctx.calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=all`, {
+  const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId || ctx.calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=all`, {
     method: 'PATCH',
     headers: { authorization: `Bearer ${ctx.accessToken}`, 'content-type': 'application/json' },
     body: JSON.stringify({ start: { dateTime: startIso }, end: { dateTime: endIso } })
@@ -407,11 +438,11 @@ export async function updateGoogleCalendarEventTime(eventId, { startIso, endIso 
   throw new Error(result.error?.message || `Google respondió ${response.status} al actualizar el evento.`);
 }
 
-export async function deleteGoogleCalendarEvent(eventId) {
+export async function deleteGoogleCalendarEvent(eventId, calendarId) {
   if (!eventId) return;
   const ctx = await calendarContext();
   if (!ctx) return;
-  const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(ctx.calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=all`, {
+  const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId || ctx.calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=all`, {
     method: 'DELETE',
     headers: { authorization: `Bearer ${ctx.accessToken}` }
   });
