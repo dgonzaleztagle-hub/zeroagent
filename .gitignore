@@ -36,3 +36,7 @@ runtime-template/storage/
 # Temporales
 *.log
 ov_check.json
+
+# Experimento flujo de nodos: copias del runtime de franciskom (datos del negocio); sólo se versionan flow.js, flow.v1.js e INFORME.md
+experimentos/flujo-nodos/runtime/
+experimentos/flujo-nodos/runtime-v1/

@@ -43,6 +43,24 @@
         "runtime-template/_local-preview-wrapper.mjs"
       ],
       "port": 4620
+    },
+    {
+      "name": "franciskom-ventas-preview",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "--env-file=runtime-template/.env.preview-owner-actions",
+        "C:/Users/dgonz/AppData/Local/Temp/claude/C--proyectos-creador-agentes/bc8206a7-2e7c-4258-b5c5-89df3edbf6b0/scratchpad/fk/_local-preview-wrapper.mjs"
+      ],
+      "port": 4620
+    },
+    {
+      "name": "franciskom-consola-solo-lectura",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "--env-file=runtime-template/.env.franciskom",
+        "C:/Users/dgonz/AppData/Local/Temp/claude/C--proyectos-creador-agentes/98827f48-22b7-464a-84b0-2048f6346410/scratchpad/tools/ui-mock.mjs"
+      ],
+      "port": 8091
     }
   ]
 }

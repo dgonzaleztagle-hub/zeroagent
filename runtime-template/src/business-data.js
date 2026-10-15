@@ -82,13 +82,26 @@ export async function addBusinessInfo(packageData, input = {}) {
 
 // Hechos listos para el contexto del LLM, en el mismo formato {id, category, subject, value}
 // que ya usa engine.js para las confirmed_facts horneadas — así se mezclan sin distinción.
+// Hechos confirmados del agente (za_knowledge_facts): reemplazan a los confirmed_facts horneados
+// en el paquete cuando el negocio ya los tiene en la base. Se marcan from_knowledge_table para que
+// engine.js sepa que la base es la fuente y no mezcle con el paquete.
+export async function listKnowledgeFacts() {
+  if (!agendaUsesSupabase()) return [];
+  const rows = await agendaSupabaseRequest('/rest/v1/za_knowledge_facts?active=eq.true&select=id,category,subject,value,visibility&order=category.asc,subject.asc&limit=200');
+  return (rows || []).map(item => ({ ...item, visibility: item.visibility === 'internal' ? 'internal' : 'public', from_knowledge_table: true }));
+}
+
 export async function liveInjectedFacts(packageData) {
-  const [data, info] = await Promise.all([
+  const [knowledge, data, info] = await Promise.all([
+    // Si la tabla todavía no existe (negocio sin la migración) o la consulta falla, se sigue con
+    // el paquete: un error acá nunca puede dejar al agente sin conocimiento.
+    listKnowledgeFacts().catch(() => []),
     listBusinessData(packageData).catch(() => []),
     listBusinessInfo(packageData).catch(() => [])
   ]);
   return [
-    ...data.map(item => ({ id: item.id, category: item.category || 'general', subject: item.label, value: item.value })),
-    ...info.map(item => ({ id: item.id, category: 'info', subject: 'Información del negocio', value: item.text }))
+    ...knowledge,
+    ...data.map(item => ({ id: item.id, category: item.category || 'general', subject: item.label, value: item.value, visibility: 'public' })),
+    ...info.map(item => ({ id: item.id, category: 'info', subject: 'Información del negocio', value: item.text, visibility: 'public' }))
   ];
 }

@@ -114,3 +114,9 @@ button:disabled{cursor:not-allowed;opacity:.48}
 .ai-agent-list{display:grid;gap:7px;margin-top:16px;padding-top:12px;border-top:1px solid var(--line)}.ai-agent-list::before{content:"Agentes del negocio";color:var(--green-2);font-size:8px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}.ai-agent-row{display:flex;justify-content:space-between;gap:10px;padding:9px;border-radius:8px;background:var(--soft)}.ai-agent-row strong,.ai-agent-row small{display:block}.ai-agent-row strong{font-size:10px}.ai-agent-row small{margin-top:3px;color:var(--muted);font-size:8px}
 #ai-action-status:empty{display:none}.capability-note.is-error{border-color:var(--danger);background:var(--danger-soft);color:var(--danger)}
 @media(max-width:980px){.ai-plan-grid{grid-template-columns:1fr}.ai-plan-grid article{min-height:0}}
+.mute-toggle{transition:transform .12s,background .2s,border-color .2s}.mute-toggle:active{transform:scale(.97)}.mute-toggle.saving{opacity:.65;cursor:progress;animation:mutepulse .9s ease-in-out infinite}.mute-toggle.just-changed{animation:mutedone 1.1s ease-out}@keyframes mutepulse{50%{opacity:.4}}@keyframes mutedone{0%{box-shadow:0 0 0 0 var(--danger)}40%{box-shadow:0 0 0 6px transparent;transform:scale(1.02)}100%{box-shadow:0 0 0 0 transparent}}
+.bulk-bar.idle{background:transparent;border:1px dashed var(--line);color:var(--muted,#6f6f68);font-weight:600}.bulk-bar button:disabled{opacity:.45;cursor:not-allowed}
+
+/* Hilo que el dueño ya está contestando: no es pendiente, pero se distingue del bot. */
+.status-pill.owner{background:var(--green);color:#fff}
+.status-pill.muted{background:#ebece7;color:var(--muted)}

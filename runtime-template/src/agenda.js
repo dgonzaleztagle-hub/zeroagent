@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { colorIdForLocation, createGoogleCalendarEvent, deleteGoogleCalendarEvent, getGoogleCalendarBusyIntervals, updateGoogleCalendarEventTime } from './google-calendar.js';
 import { sendZavuAlert } from './zavu.js';
+import { conversationActivity } from './conversations.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 function statePathFor(packageData) {
@@ -1046,14 +1047,19 @@ export async function createManualCustomer(packageData, input = {}) {
 export async function listCustomers(packageData) {
   if (!agendaConfig(packageData)) throw new Error('Agenda v1 no está habilitada en este paquete.');
   if (agendaUsesSupabase()) {
-    const [customers, appointments] = await Promise.all([
+    const [customers, appointments, conversations] = await Promise.all([
       fetchAllAgendaRows('/rest/v1/za_customers?select=id,full_name,phone,email,segment,bot_muted,created_at&order=full_name.asc'),
-      fetchAllAgendaRows('/rest/v1/za_appointments?select=id,customer_id,starts_at,status&order=starts_at.desc')
+      fetchAllAgendaRows('/rest/v1/za_appointments?select=id,customer_id,starts_at,status&order=starts_at.desc'),
+      conversationActivity()
     ]);
+    const lastContact = new Map();
+    for (const item of conversations || []) if (item.customer_id && !lastContact.has(item.customer_id)) lastContact.set(item.customer_id, item.last_at);
+    // Los que escribieron hace poco van primero: es a quien el dueño necesita silenciar o pausar
+    // (su esposa, un amigo), y en orden alfabético quedaban perdidos entre cientos (12-10-2026).
     return (customers || []).map(customer => {
       const own = (appointments || []).filter(item => item.customer_id === customer.id);
-      return { ...customer, appointment_count: own.length, last_visit: own[0]?.starts_at || null };
-    });
+      return { ...customer, appointment_count: own.length, last_visit: own[0]?.starts_at || null, last_contact_at: lastContact.get(customer.id) || null };
+    }).sort((a, b) => String(b.last_contact_at || '').localeCompare(String(a.last_contact_at || '')));
   }
   const state = await loadAgendaState(packageData);
   const byPhone = new Map();
@@ -1066,8 +1072,9 @@ export async function listCustomers(packageData) {
   return [...byPhone.values()].map(customer => {
     const sorted = [...customer.appointments].sort((a, b) => b.starts_at.localeCompare(a.starts_at));
     const { appointments, ...rest } = customer;
-    return { ...rest, appointment_count: appointments.length, last_visit: sorted[0]?.starts_at || null };
-  });
+    const lastContactAt = appointments.map(item => item.created_at || '').sort().pop() || null;
+    return { ...rest, appointment_count: appointments.length, last_visit: sorted[0]?.starts_at || null, last_contact_at: lastContactAt };
+  }).sort((a, b) => String(b.last_contact_at || '').localeCompare(String(a.last_contact_at || '')));
 }
 
 export async function getCustomerDetail(packageData, customerId) {

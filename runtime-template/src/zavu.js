@@ -25,8 +25,18 @@ export async function sendZavuWhatsApp(to, text, options = {}) {
 // sí le llega a ese mismo teléfono — y no depende de que instale ni configure nada, que es
 // justo lo que se necesita para un dueño poco tecnológico con iPhone. Canal configurable por si
 // mañana se habilita el canal de correo del sender (167 veces más barato por mensaje).
+// Un SMS con un caracter fuera de GSM-7 (a con tilde, "·", "…") se manda como Unicode: 70 caracteres
+// por segmento en vez de 160, y cada segmento se cobra. Para el canal SMS se quitan acentos y signos.
+export function toGsmSafe(text) {
+  return String(text || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[·•]/g, '-').replace(/…/g, '...').replace(/[“”«»]/g, '"').replace(/[‘’]/g, "'")
+    .replace(/[¿¡]/g, '').replace(/[^\x20-\x7e]/g, ' ').replace(/\s{2,}/g, ' ').trim();
+}
+
 export async function sendZavuAlert(to, text, options = {}) {
   const channel = String(process.env.ALERT_CHANNEL || 'sms_oneway').trim() || 'sms_oneway';
+  if (channel.startsWith('sms')) text = toGsmSafe(text).slice(0, 160);
   const send = body => sendZavuMessage(to, body, { ...options, channel, subject: options.subject || 'Aviso ZeroAgent' });
   try {
     return await send(text);
@@ -132,21 +142,47 @@ export function zavuEventId(event, rawBody = '') {
 // un estado de entrega de un envío nuestro — es un mensaje nuevo que nunca pasó por acá y hay que
 // guardarlo. Antes esto no se distinguía y zavuDeliveryUpdate lo trataba como delivery-update: como
 // no calzaba con ningún providerMessageId ya guardado, se descartaba en silencio (comprobado el
-// 08-09-2026: "cero eventos message.sent" — en ese entonces de verdad no llegaba nada; confirmado
-// el 15-09-2026 que ahora sí llegan, y se estaban perdiendo).
+// 08-09-2026: "cero eventos message.sent").
+// CORRECCIÓN 08-10-2026: lo del 15-09 ("ahora sí llegan") era falso — esos message.sent eran los
+// estados de entrega de los mensajes del propio bot. En franciskom nunca llegó un eco: Zavu no
+// tiene registro de ningún mensaje escrito por Francisco desde la app (284 salientes = los del
+// bot) y su panel muestra "WhatsApp Business App Sync: Not synced". Este código está bien, pero
+// no se activa hasta que Zavu entregue los ecos.
+// Cualquier cosa que mande el dueño cuenta como "estoy atendiendo yo", no sólo el texto: Francisco
+// contesta mucho por audio, con stickers y manda la boleta en PDF. Antes un eco sin texto se
+// descartaba y el bot seguía hablando en ese hilo.
 export function zavuOwnerEcho(event) {
   if (String(event?.type || '') !== 'message.sent') return null;
   const data = event?.data || {};
   if (String(data.source || '') !== 'whatsapp_business_app') return null;
   const customerPhone = String(data.to || '').trim();
+  if (!customerPhone) return null;
   const text = String(data.text || '').trim();
-  if (!customerPhone || !text) return null;
+  const kind = String(data.messageType || '').trim().toLowerCase();
   return {
     messageId: String(data.messageId || '').trim(),
     customerPhone,
-    text,
+    text: text || mediaPlaceholder(kind),
     status: String(data.status || 'delivered').toLowerCase()
   };
+}
+
+const MEDIA_LABELS = { audio: 'audio', voice: 'audio', ptt: 'audio', image: 'imagen', sticker: 'sticker', video: 'video', document: 'documento', location: 'ubicación', contacts: 'contacto', reaction: 'reacción' };
+
+export function mediaPlaceholder(kind = '') {
+  return `[${MEDIA_LABELS[String(kind || '').toLowerCase()] || 'mensaje sin texto'}]`;
+}
+
+// Lo que entra de un cliente y no es texto. Antes se descartaba antes de guardarse: la consola no
+// lo mostraba, el historial no lo tenía y el bot, al recibir después un "Ok", se presentaba como si
+// nadie hubiera escrito (franciskom, 08-10-2026; 414 eventos así desde agosto). Ahora se guarda
+// como "[audio]" / "[imagen]" y el webhook decide si corresponde contestar.
+export function zavuInboundMedia(event) {
+  const data = event?.data || {};
+  const kind = String(data.messageType || data.type || '').trim().toLowerCase();
+  if (!kind || kind === 'text') return null;
+  const caption = String(data.text || data.caption || '').trim();
+  return { kind, caption, placeholder: mediaPlaceholder(kind) };
 }
 
 export function zavuDeliveryUpdate(event) {

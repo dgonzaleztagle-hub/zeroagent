@@ -6,6 +6,7 @@ import { getAgendaDashboard, listUpcomingAppointmentsForPhone } from './agenda.j
 import { BASE_BEHAVIOR } from './base-behavior.js';
 import { AGENDA_BEHAVIOR } from './agenda-behavior.js';
 import { liveInjectedFacts } from './business-data.js';
+import { detectInternalLeak, dropRepeatedSentences, fixRelativeDays, isCourtesyOnly, repeatsLastAgentMessage, upcomingDaysTable } from './turn-guards.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -124,6 +125,27 @@ function patternMatchesCompletedClaim(pattern, text) {
   return true;
 }
 
+// Un turno que cambió la reserva nunca termina callado: tras anular una hora de verdad, el guard
+// de repetición llevó al modelo a no_intervenir y el paciente no supo que se la anularon
+// (replay 11-10-2026).
+function changedBookingThisTurn(toolTrace) {
+  return successfulAction(toolTrace, 'cancel_appointment', ['cancelled'])
+    || successfulAction(toolTrace, 'reschedule_appointment', ['rescheduled', 'rescheduled_needs_manual_confirmation'])
+    || successfulAction(toolTrace, 'create_appointment', ['created']);
+}
+
+// Texto determinista para cuando el modelo no logra redactar la confirmación de un cambio hecho.
+function bookingChangeNotice(toolTrace) {
+  const last = [...toolTrace].reverse().find(item => item?.result?.ok === true
+    && ['cancel_appointment', 'reschedule_appointment', 'create_appointment'].includes(item?.name)
+    && ['cancelled', 'rescheduled', 'rescheduled_needs_manual_confirmation', 'created'].includes(item.result.action));
+  if (!last) return '';
+  const when = last.result.cuando_local || last.result.appointment?.cuando_local || '';
+  if (last.result.action === 'cancelled') return `Tu hora${when ? ` del ${when}` : ''} quedó anulada.`;
+  if (last.result.action === 'created') return `Tu hora quedó agendada${when ? ` para el ${when}` : ''}.`;
+  return `Tu hora quedó cambiada${when ? ` para el ${when}` : ''}.`;
+}
+
 function successfulAction(toolTrace, tool, allowedActions) {
   return toolTrace.some(item => {
     if (item?.name !== tool || item.result?.ok !== true) return false;
@@ -133,7 +155,7 @@ function successfulAction(toolTrace, tool, allowedActions) {
   });
 }
 
-function claimHasEvidence(claim, toolTrace) {
+function claimHasEvidence(claim, toolTrace, appointmentOnFile = false) {
   if (claim.evidence === 'created') return successfulAction(toolTrace, 'create_appointment', ['created']);
   if (claim.evidence === 'cancelled') return successfulAction(toolTrace, 'cancel_appointment', ['cancelled']);
   if (claim.evidence === 'rescheduled') return successfulAction(toolTrace, 'reschedule_appointment', ['rescheduled']);
@@ -146,6 +168,9 @@ function claimHasEvidence(claim, toolTrace) {
   if (claim.evidence === 'appointment') {
     if (successfulAction(toolTrace, 'create_appointment', ['created', 'already_has_active_appointment'])) return true;
     if (successfulAction(toolTrace, 'reschedule_appointment', ['rescheduled'])) return true;
+    // "Tu hora sigue agendada" con la hora en el contexto del turno es cierto. Sin esto, tras negarse
+    // a anular, el paciente recibía "No pude confirmar esa operación de forma segura" (replay 11-10-2026).
+    if (appointmentOnFile) return true;
     return toolTrace.some(item => item?.name === 'get_my_appointment'
       && item.result?.ok === true
       && Array.isArray(item.result.appointments)
@@ -154,11 +179,11 @@ function claimHasEvidence(claim, toolTrace) {
   return false;
 }
 
-export function validateMutationClaims(text, toolTrace = []) {
+export function validateMutationClaims(text, toolTrace = [], { appointmentOnFile = false } = {}) {
   const normalizedText = normalizedClaimText(text);
   const trace = Array.isArray(toolTrace) ? toolTrace : [];
   const unsupported = MUTATION_CLAIMS.find(claim => claim.patterns.some(pattern => patternMatchesCompletedClaim(pattern, normalizedText))
-    && !claimHasEvidence(claim, trace));
+    && !claimHasEvidence(claim, trace, appointmentOnFile && !successfulAction(trace, 'cancel_appointment', ['cancelled'])));
   if (!unsupported) return { ok: true, text };
   // El texto de respaldo tiene que hablar de lo que el modelo afirmó sin evidencia, no de "tu
   // reserva" siempre: caso real (franciskom, 10-09-2026) una paciente preguntó si Francisco
@@ -185,8 +210,17 @@ export async function answerWithGroq(packageData, message, context = {}) {
   // Datos/Info que el propio dueño cargó desde su consola: van primero porque son la fuente
   // más reciente (no esperaron rebuild), y no pasaron por curación de Daniel+Claude como sí
   // pasan las confirmed_facts horneadas — ver business-data.js.
-  const liveFacts = await liveInjectedFacts(packageData).catch(() => []);
-  const facts = [...liveFacts, ...bakedFacts];
+  const liveFacts = await liveInjectedFacts(packageData).catch(() => null);
+  // Si el negocio ya tiene su conocimiento en la base (za_knowledge_facts), esa es la única fuente:
+  // los hechos horneados en el paquete quedan sólo como respaldo para un negocio sin Supabase o
+  // para cuando la consulta falla. Mezclar ambas fuentes es lo que dejó vivo un hecho obsoleto.
+  const dbHasKnowledge = Array.isArray(liveFacts) && liveFacts.some(fact => fact.from_knowledge_table);
+  const allFacts = dbHasKnowledge ? liveFacts : [...(liveFacts || []), ...bakedFacts];
+  // Un hecho "internal" es criterio para decidir, no algo que se le dice al cliente. Va en un
+  // bloque aparte y además alimenta la guarda de filtración: el 07-10-2026 una regla interna
+  // redactada como instrucción ("el agente no debe confirmar…") le llegó textual a un paciente.
+  const internalFacts = allFacts.filter(fact => fact.visibility === 'internal');
+  const facts = allFacts.filter(fact => fact.visibility !== 'internal');
   // Enfoque generalista: la relevancia NO se decide contando coincidencias de palabras (una batería de
   // keywords descarta preguntas bien hechas con otro fraseo). Le entregamos al modelo el conocimiento
   // confirmado y su razonamiento curado decide qué aplica. Se acota por costo, nunca por coincidencia léxica.
@@ -208,6 +242,27 @@ export async function answerWithGroq(packageData, message, context = {}) {
     // 'system' está permitido dentro del historial a propósito: conversations.js inserta ahí una
     // nota cuando parte de la conversación la atendió el dueño por fuera del canal.
     const history = Array.isArray(context.history) ? context.history.slice(-20).filter(item => ['user', 'assistant', 'system'].includes(item?.role) && typeof item.content === 'string') : [];
+    // Compuerta antes del modelo: un "gracias", "ok" o "jaja" que no responde a una pregunta del
+    // agente no pide nada, y contestarlo era lo que armaba los loops de cortesía (07-10-2026). Si el
+    // último mensaje del agente sí preguntaba algo, el "ok" puede ser la respuesta y pasa al modelo.
+    const lastAgentMessage = [...history].reverse().find(item => item.role === 'assistant')?.content || '';
+    // Sin un mensaje previo del agente no hay nada que cerrar: el primer contacto siempre se contesta.
+    // Un "?" del agente no basta para dejar pasar la cortesía: "Ok, gracias" no contesta un "¿en qué te
+    // puedo ayudar?" (Consuelo, 07-10-2026). Sólo cuenta como respuesta si el agente ofreció algo
+    // concreto — "Ok gracias" a "¿te dejo el viernes a las 18:00?" es un sí y tiene que llegar al modelo.
+    const mayAnswerAgent = /\?/.test(lastAgentMessage) && (/te (la |lo )?(dejo|agendo|reservo|anoto)|cu[aá]l (te|prefieres)|te (acomoda|sirve)|confirm|\d{1,2}(:\d{2})?\s*(hrs?|h)\b|\d{1,2}:\d{2}/i.test(lastAgentMessage)
+      || !/\b(gracias|grax|agradezco|agradecid[oa]|igualmente|chao|chau|adi[oó]s|nos vemos|saludos|cu[ií]date)\b/i.test(message));
+    // Un mensaje sin letras (un emoji suelto, "👍", "😍") es una reacción: se calla aunque el bot no
+    // haya hablado antes en el hilo. Sin esto, un "😍" que respondía a algo de Francisco recibió
+    // "¡Qué lindo! ¿Te gustaría agendar una sesión?" (08-10-2026, primer mensaje del hilo).
+    const reactionOnly = !/\p{L}/u.test(String(message || ''));
+    if ((lastAgentMessage || reactionOnly) && isCourtesyOnly(message) && !mayAnswerAgent) {
+      return {
+        text: '', silent: true, silentReason: 'cortesía sin pregunta pendiente',
+        confidence: 'deliberate_silence', source: [], handoff: false, ownerAlert: null,
+        provider: 'gate', model: 'gate', usage: { inputTokens: 0, outputTokens: 0 }, toolTrace: [{ name: 'guard', result: { ok: true, guard: 'courtesy_gate' } }]
+      };
+    }
     // El modelo no tiene noción propia de "hoy": sin esto, adivina la fecha (se vio devolver
     // 2023 sobre un mensaje de 2026) y razona mal "hoy/mañana/este finde". Se ancla SIEMPRE a la
     // zona horaria del negocio (Chile por defecto) para no repetir el problema de servidores/LLM
@@ -232,7 +287,12 @@ export async function answerWithGroq(packageData, message, context = {}) {
       ? context.upcomingAppointments
       : (agendaEnabled && context.callerPhone ? await listUpcomingAppointmentsForPhone(packageData, context.callerPhone).catch(() => []) : []);
     const hasBooking = upcomingAppointments.length > 0;
-    const allowSilence = context.allowSilence === true || hasBooking;
+    // ownerHandled: el hilo lo viene llevando el dueño por fuera. Ahí la decisión del modelo de no
+    // intervenir se respeta siempre — antes un "?" en el mensaje la anulaba, y así el bot le
+    // contestó "¿en qué te puedo ayudar?" a una paciente que respondía "bien y tú?" a Francisco
+    // (07-10-2026; el registro muestra que el modelo sí había pedido callarse).
+    const ownerHandled = context.allowSilence === true;
+    const allowSilence = ownerHandled || hasBooking;
     const tools = getAgendaToolDefinitions(packageData, catalogSource, { allowSilence });
     const businessTimeZone = staticAgendaConfig.timezone || 'America/Santiago';
     const nowLabel = new Intl.DateTimeFormat('es-CL', { timeZone: businessTimeZone, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
@@ -271,13 +331,18 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     const messages = [
       {
         role: 'system',
-        content: `${systemPrefix}\n\nFECHA Y HORA ACTUAL (${businessTimeZone}): ${nowLabel}. Usa esto como referencia real para "hoy", "mañana", días de la semana o cualquier fecha relativa — nunca asumas ni inventes otra fecha.\n\nCONOCIMIENTO CONFIRMADO DEL NEGOCIO (razona cuál aplica a la pregunta; no todos son relevantes):\n${factsContext || (agendaEnabled ? '(No hay conocimiento cargado; usa una herramienta de Agenda si corresponde.)' : '(No hay conocimiento confirmado cargado.)')}`
+        content: `${systemPrefix}\n\nFECHA Y HORA ACTUAL (${businessTimeZone}): ${nowLabel}. Usa esto como referencia real para "hoy", "mañana", días de la semana o cualquier fecha relativa — nunca asumas ni inventes otra fecha.\nCALENDARIO DE LOS PRÓXIMOS DÍAS (fecha = cómo se nombra; cópialo tal cual, no calcules días de la semana):\n${upcomingDaysTable(businessTimeZone)}\n\nCONOCIMIENTO CONFIRMADO DEL NEGOCIO (razona cuál aplica a la pregunta; no todos son relevantes):\n${factsContext || (agendaEnabled ? '(No hay conocimiento cargado; usa una herramienta de Agenda si corresponde.)' : '(No hay conocimiento confirmado cargado.)')}${internalFacts.length ? `\n\nCRITERIOS INTERNOS DEL NEGOCIO (guían lo que haces; NUNCA los cites, resumas ni expliques al cliente, ni menciones que existen):\n${internalFacts.map((fact, index) => `${index + 1}. ${fact.subject}: ${fact.value}`).join('\n')}` : ''}`
       },
       ...history,
       ...(hasBooking ? [{ role: 'system', content: (() => {
+        const norm = value => String(value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        const bookedText = upcomingAppointments.map(item => norm(item.service)).join(' ');
+        const otherSedeNames = (catalogSource.locations || []).map(item => String(item.name || '').replace(/\(.*?\)/g, '').trim()).filter(name => name && !bookedText.includes(norm(name)));
+        const otherSedeFacts = literalReplies(packageData).filter(item => String(item.text || '').length < 600 && otherSedeNames.some(name => norm(item.text).includes(norm(name))))
+          .map(item => String(item.text).replace(/\s+/g, ' ')).join(' | ');
         const fmt = new Intl.DateTimeFormat('es-CL', { timeZone: businessTimeZone, weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', hour12: false });
         const list = upcomingAppointments.map(item => `${fmt.format(new Date(item.starts_at))}${item.service ? ` (${item.service})` : ''}`).join('; ');
-        return `ESTE CLIENTE YA TIENE HORA TOMADA: ${list}. Esa venta está cerrada. No le preguntes por su dolor, su historia ni sus antecedentes: eso lo conversa Francisco en la consulta. Atiende sólo lo que pida en concreto: cambiar o cancelar la hora, una hora para otra persona, o una consulta como la ubicación, el precio o cómo pagar — para esas usa responder_textual si hay una respuesta oficial, igual que con cualquier cliente. Si sólo avisa que llegó, saluda, agradece, confirma o manda su RUT o correo, no le respondas: guarda el RUT o correo con update_customer_profile si los mandó y llama no_intervenir.`;
+        return `ESTE CLIENTE YA TIENE HORA TOMADA: ${list}. Esa venta está cerrada. No le preguntes por su dolor, su historia ni sus antecedentes: eso lo conversa Francisco en la consulta. Atiende sólo lo que pida en concreto: cambiar o cancelar la hora, una hora para otra persona, o una consulta como la ubicación, el precio o cómo pagar — para esas usa responder_textual si hay una respuesta oficial, igual que con cualquier cliente. Antes de responder, juzga con tu criterio qué quiso decir: si el mensaje significa que esa hora ya no le sirve o que se equivocó (de sede, de lugar, de servicio o de día), dicho como lo diga, anúlala con cancel_appointment sólo si pidió anularla (si solo duda, pregúntale "¿te la anulo?"; si pide tiempo para confirmar, como "te confirmo mañana", NO la anules: dile que se la dejas guardada), nómbrale la hora y dale en el mismo mensaje lo que sí buscaba; en ese caso no mandes un bloque oficial solo, y no des teléfonos ni correos de otra sede que no estén en los datos oficiales (el número de este WhatsApp es del negocio, no de otra sede). Datos oficiales de las otras sedes: ${otherSedeFacts || '(usa el conocimiento confirmado)'}. Si sólo avisa que llegó, saluda, agradece, confirma o manda su RUT o correo, no le respondas: guarda el RUT o correo con update_customer_profile si los mandó y llama no_intervenir.`;
       })() }] : []),
       { role: 'user', content: String(message) }
     ];
@@ -306,8 +371,35 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     let hoursRetried = false;
     let closingRetried = false;
     let askFirstRetried = false;
+    let dryAskRetried = false;
+    const mentionRetried = new Set();
     let echoRetried = false;
+    let leakRetried = false;
+    let repeatRetried = false;
     let literalSuggested = null;
+    const internalSources = internalFacts.map(fact => ({ id: fact.id, text: `${fact.subject}: ${fact.value}` }));
+    // Cada borrador que una guarda rechaza queda en la traza con su motivo: sin esto la auditoría
+    // del 08-10-2026 no pudo saber qué había intentado decir el modelo antes del reintento.
+    const rejectDraft = (guard, draft, detail = '') => toolTrace.push({ name: 'guard', result: { ok: false, guard, draft: String(draft || '').slice(0, 600), detail: String(detail || '').slice(0, 200) } });
+    const finalizeText = text => {
+      let output = String(text || '');
+      const leak = detectInternalLeak(output, internalSources);
+      if (leak) {
+        // Ya se pidió reescribirlo y volvió a filtrar: se sacan las frases que filtran en vez de
+        // mandar el texto interno. Si no queda nada, se pide lo que falte con una frase neutra.
+        const kept = output.split(/(?<=[.!?])\s+|\n+/).filter(sentence => !detectInternalLeak(sentence, internalSources)).join(' ').trim();
+        rejectDraft('internal_leak_stripped', output, leak.match);
+        output = kept || 'Cuéntame, ¿en qué te puedo ayudar?';
+      }
+      const repeated = dropRepeatedSentences(output, history);
+      if (repeated.dropped.length) {
+        rejectDraft('repeated_sentence_dropped', output, repeated.dropped.join(' | '));
+        output = repeated.text;
+      }
+      const days = fixRelativeDays(output, businessTimeZone);
+      if (days.corrections.length) toolTrace.push({ name: 'guard', result: { ok: true, guard: 'relative_day_fixed', detail: days.corrections.join(', ') } });
+      return days.text;
+    };
     const asksPermissionToBook = /(te gustar[ií]a|quieres|deseas|prefieres|te parece)\s+que\s+(te\s+)?(busque|busquemos|veamos|revise|revisemos|agende|agendemos|deje)|¿\s*(te\s+)?(dejo|busco|agendo|reservo|vemos|buscamos)\s+(una\s+)?hora|¿\s*vemos\s+una\s+hora|\b(puedo|te puedo|podemos)\s+(buscarte|agendarte|ofrecerte|reservarte|buscar|agendar)\b|¿\s*qu[eé]\s+d[ií]a\s+te\s+(acomoda|sirve|queda)|¿\s*te\s+acomoda\s+(atenderte|el\s+box|en\s+el\s+box|alguna\s+de\s+esas)|¿\s*te\s+(gustar[ií]a|interesa|animas\s+a)\s+(tomar|agendar|reservar|coordinar|pedir)\s+(una\s+)?(hora|evaluaci)/i;
     const postponesSale = /cuando (tengas|puedas|quieras|est[eé]s list[ao]|lo tengas|decidas)|me escribes cuando|escr[ií]beme cuando/i;
     let activeTools = tools;
@@ -320,9 +412,12 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
       if (draft && /\$\s?\d/.test([literalSent, ...extraLiterals].map(item => item.text).join(' '))) {
         draft = draft.split(/(?<=[.!?])\s+|\n+/).filter(sentence => !/\$\s?\d/.test(sentence)).join(' ').trim();
       }
-      const checked = draft && !/SIN_SEGUIMIENTO/i.test(draft) ? validateMutationClaims(draft, toolTrace) : null;
+      const checked = draft && !/SIN_SEGUIMIENTO/i.test(draft) ? validateMutationClaims(finalizeText(draft), toolTrace, { appointmentOnFile: hasBooking }) : null;
+      // Si el seguimiento no salió (falla del modelo o texto rechazado), una anulación de este turno
+      // igual se le dice: nunca puede quedar sólo el bloque oficial.
+      const fallbackFollowUp = !checked?.ok ? bookingChangeNotice(toolTrace) : '';
       return {
-        text: [literalSent, ...extraLiterals].map(item => item.text).join('\n\n'), imageUrl: literalSent.image || '', followUpText: checked?.ok ? checked.text : '',
+        text: [literalSent, ...extraLiterals].map(item => item.text).join('\n\n'), imageUrl: literalSent.image || '', followUpText: checked?.ok ? checked.text : fallbackFollowUp,
         confidence: 'literal_business_reply', source: [literalSent, ...extraLiterals].map(item => item.id), handoff: false, ownerAlert,
         provider: llm.provider, model: llm.model, usage: usage(), toolTrace
       };
@@ -335,7 +430,13 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     // en silencio 2 de 2 veces (medido 14-09-2026; con gpt-4o-mini no pasaba). Lo que sí justifica
     // callarse son respuestas a algo que dijo otro ("sí, a las 15", "ya llegué", "gracias, nos
     // vemos"): no traen preguntas ni piden hora, precio o disponibilidad.
-    const bringsNewRequest = /\?|\b(tienes|tiene|tienen|hay|cu[aá]nto|precio|valor|agendar|agenda|reservar|otra hora|disponib|horario)\b/i.test(String(message || ''));
+    // En WhatsApp muchas preguntas llegan sin "?": "Es quiropráctico verdad" (Claudia, 09-10-2026)
+    // se tomó como cierre y el bot se calló.
+    const bringsNewRequest = /\?|\b(tienes|tiene|tienen|hay|cu[aá]nto|precio|valor|agendar|agenda|reservar|otra hora|disponib|horario)\b/i.test(String(message || ''))
+      || /(?:^|[\s,.])(verdad|cierto|o no|no es as[ií])\s*[.!]*\s*$/i.test(String(message || ''))
+      || /^\s*(qu[eé]|c[oó]mo|cu[aá]ndo|d[oó]nde|cu[aá]l|qui[eé]n|por qu[eé]|se puede|puedo|atiende[ns]?)(?![a-záéíóúñ])/i.test(String(message || ''));
+    const postponesConfirmation = /\b(te|le|les)\s+(puedo\s+|podr[ií]a\s+)?(confirm|avis)\w*|\b(confirmo|aviso)\s+(ma[ñn]ana|despu[eé]s|luego|m[aá]s\s+tarde|en\s+la\s+(mañana|tarde|noche))|\bno\s+s[eé]\s+si\s+(voy|puedo|alcanzo)/i.test(String(message || ''))
+      && !/confirm\w*\s+(que\s+)?(s[ií]|voy|asisto|ah[ií]\s+estar|nos\s+vemos)(?![a-záéíóúñ])/i.test(String(message || ''));
     const HOUR_PATTERN = /\b\d{1,2}:\d{2}\b|\ba las \d{1,2}\b/i;
     const lastAssistantText = [...history].reverse().find(item => item.role === 'assistant')?.content || '';
     const hourChosenByClient = time => {
@@ -346,18 +447,55 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
       const mentions = text => hours.some(h => new RegExp(`(^|[^\\d])0?${h}[:.]${minutes}\\b`).test(text)
         || (minutes === '00' && new RegExp(`\\b(a las|las|tipo|como a las)\\s+0?${h}\\b|\\b0?${h}\\s*(hrs?|horas)\\b`, 'i').test(text))
         || (minutes === '30' && new RegExp(`\\b0?${h}\\s*y\\s*media\\b`, 'i').test(text)));
-      return mentions(String(message || '')) || mentions(lastAssistantText);
+      if (mentions(String(message || '')) || mentions(lastAssistantText)) return true;
+      // Si el último mensaje del agente fue una aclaración sin horas ("¿box o domicilio?"), la hora la
+      // eligió el cliente en el mensaje anterior a esa pregunta.
+      if (HOUR_PATTERN.test(lastAssistantText)) return false;
+      const lastAssistantIndex = history.map(item => item.role).lastIndexOf('assistant');
+      const previousClient = history.slice(0, Math.max(0, lastAssistantIndex)).reverse().find(item => item.role === 'user')?.content || '';
+      return mentions(String(previousClient));
+    };
+    // Box o domicilio se pregunta siempre antes de agendar, si el negocio tiene las dos modalidades.
+    // Pilar (franciskom, 09-10-2026) es paciente de domicilio y nunca lo dijo: el bot la agendó en el
+    // box por defecto, le mandó el mapa del box, y la cita quedó mal en la base y en el Calendar.
+    const bookableCatalog = (catalogSource.services || []).filter(item => item.bookable !== false);
+    const offersBothModes = bookableCatalog.some(item => item.delivery_mode === 'mobile') && bookableCatalog.some(item => item.delivery_mode !== 'mobile');
+    const onsiteNames = (catalogSource.locations || []).map(item => String(item.name || '').replace(/\(.*?\)/g, '').trim()).filter(Boolean);
+    const HOME_VISIT = /domicilio|\b(a|en) (mi |la |su |tu )?casa\b|\bvengan\b|\bvenir a\b|\bmi direcci[oó]n\b/i;
+    const normalizeText = value => String(value || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    const mentionsOnsite = text => /\bbox\b|\bconsulta\b|\bsede\b|\bvoy yo\b|\bvoy para all[aá]\b/i.test(text) || onsiteNames.some(name => normalizeText(text).includes(normalizeText(name)));
+    const modalityEstablished = () => {
+      if (!offersBothModes) return true;
+      const clientTexts = [...history.filter(item => item.role === 'user').map(item => item.content), String(message || '')];
+      if (clientTexts.some(text => HOME_VISIT.test(text) || mentionsOnsite(text))) return true;
+      return history.some(item => item.role === 'assistant' && /domicilio/i.test(item.content) && mentionsOnsite(item.content) && /\?/.test(item.content));
+    };
+    // Una hora se anula sólo si el cliente lo pidió con esas palabras, o si contesta que sí a un
+    // "¿te la anulo?" del agente. Claudia (franciskom, 09-10-2026) escribió "tengo doble turno, le
+    // puedo confirmar en la mañana" y el modelo le anuló la hora: el prompt solo no basta para una
+    // acción que no se puede deshacer. Regla de Daniel: ante la duda, la hora se guarda.
+    const cancelRequestedByClient = () => {
+      const text = String(message || '');
+      if (/\bno\s+(me\s+)?(la|lo|las|los)?\s*(anul|cancel|elimin|borr)/i.test(text)) return false;
+      if (/\b(cancel|anul|elimin|borr|desagend)\w*|\bya no (voy|vamos|ir[eé]|quiero|necesito)(?![a-záéíóúñ])/i.test(text)) return true;
+      return /anul|cancel/i.test(lastAssistantText) && /\?/.test(lastAssistantText)
+        // Sin \b: en JavaScript la "í" no es letra para \b, y "Sí, por favor" nunca calzaba.
+        && /^\s*(s[ií]+|dale|ya|ok|okey|bueno|por favor|porfa|confirmo|de acuerdo|claro|ya po)(?![a-záéíóúñ])/i.test(text);
     };
     // Ritmo de venta acordado con Daniel (14-09-2026, a partir de cómo conversa Francisco): a quien
     // pregunta algo seco (valor, ubicación, horario) primero se le pregunta con cercanía qué le
     // molesta; cuando cuenta su dolor, como mucho una pregunta más; y en el mensaje siguiente, horas.
     // Quien pide hora directo recibe horas de inmediato, y quien no contesta la pregunta, también.
-    const PAIN = /duel|dolor|molest|lesi[oó]n|contractur|lumbag|hernia|ci[aá]tic|flema|\btos\b|respir|espalda|cuello|rodilla|hombro|cadera|pierna|brazo|mu[ñn]eca|tobillo|cabeza|migra|mareo|postura|cirug|operad|esguince|tendin|tratar|tratamiento/i;
+    const PAIN = /duel|dolor|molest|lesi[oó]n|contractur|lumba|dorsal|cervical|escapul|hernia|ci[aá]tic|flema|\btos\b|respir|espalda|cuello|rodilla|hombro|cadera|pierna|brazo|mu[ñn]eca|tobillo|cabeza|migra|mareo|postura|cirug|operad|esguince|tendin|tratar|tratamiento/i;
     const ASKS_FOR_HOURS = /\bhoras?\b|agend|reserv|disponib|cupo|\b(hoy|ma[ñn]ana|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|semana)\b/i;
     const isOpenQuestion = text => /\?/.test(String(text || '')) && !HOUR_PATTERN.test(String(text || ''));
     const userTurns = [...history.filter(item => item.role === 'user').map(item => item.content), String(message || '')];
     const toldPain = userTurns.some(text => PAIN.test(text));
-    const askedForHours = ASKS_FOR_HOURS.test(String(message || ''));
+    // "¿Hasta qué hora atienden?" pregunta por el horario del negocio, no pide una hora: sin quitarlo,
+    // la palabra "hora" disparaba el modo "ofrecer horas" y el bot saltaba la pregunta cercana
+    // (replay 14-10-2026, 0 de 2).
+    const OPERATING_HOURS_QUESTION = /(hasta|desde|a)\s+qu[eé]\s+horas?\s+(atien\w*|abr\w*|cierr\w*|empiez\w*|trabaj\w*|est[aá]n|llegan)|qu[eé]\s+horas?\s+(atien\w*|abr\w*|cierr\w*)|horarios?\s+de\s+(atenci[oó]n|trabajo)/gi;
+    const askedForHours = ASKS_FOR_HOURS.test(String(message || '').replace(OPERATING_HOURS_QUESTION, ' '));
     const lastAssistantAsked = isOpenQuestion(lastAssistantText);
     const firstPainIndex = history.findIndex(item => item.role === 'user' && PAIN.test(item.content));
     const questionsSincePain = firstPainIndex === -1 ? 0 : history.slice(firstPainIndex + 1).filter(item => item.role === 'assistant' && isOpenQuestion(item.content)).length;
@@ -440,7 +578,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
         // paciente sin respuesta. En un hilo donde callar está permitido, el vacío es silencio; en
         // cualquier otro, se le pide una vez más que conteste antes de rendirse.
         if (!rawText) {
-          if (allowSilence && !bringsNewRequest) {
+          if (allowSilence && (ownerHandled || !bringsNewRequest) && !changedBookingThisTurn(toolTrace) && !(hasBooking && postponesConfirmation && !ownerHandled)) {
             return {
               text: '', silent: true, silentReason: 'respuesta vacía del modelo en un hilo atendido por el dueño',
               confidence: 'deliberate_silence', source: [], handoff: false, ownerAlert: null,
@@ -491,25 +629,72 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           messages.push({ role: 'system', content: 'Ese mensaje NO se envió: es la primera vez que cuenta su dolor y todavía no sabes nada de su caso. Antes de ofrecer horas, escríbele un mensaje corto y cercano con UNA sola pregunta por lo que más falta (por ejemplo, hace cuánto le molesta). Sin horas en este mensaje; las ofreces cuando conteste.' });
           continue;
         }
+        // Una pregunta seca (horario, valor, ubicación) de alguien que aún no cuenta qué le pasa ni pidió
+        // hora no recibe horas: se le responde y se le pregunta con cercanía qué le molesta. Antes sólo se
+        // vigilaba quien contaba su dolor; el resto dependía de que el modelo lo recordara.
+        const dryQuestionNow = !toldPain && !offerDue && !hasBooking && !handoffReason && !answeringDataRequest
+          && !history.some(item => item.role === 'assistant' && HOUR_PATTERN.test(item.content));
+        const consultedAvailabilityNow = toolTrace.some(item => item.name === 'get_availability' && item.result?.ok && (item.result.available_slots || []).length);
+        if (rawText && agendaEnabled && round < 3 && !dryAskRetried && dryQuestionNow && consultedAvailabilityNow) {
+          dryAskRetried = true;
+          rejectDraft('premature_hours_offer', rawText);
+          messages.push({ role: 'assistant', content: rawText });
+          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: le ofrece horas a alguien que sólo hizo una pregunta y todavía no cuenta qué le pasa. Respóndele lo que preguntó con los datos confirmados y cierra con UNA sola pregunta cercana sobre qué le está molestando o qué le gustaría tratar. Sin ofrecer horas todavía.' });
+          continue;
+        }
+        // Reglas de "situación" del negocio que se verifican en código (package.agent.required_mentions):
+        // si el mensaje del cliente cae en el patrón y el borrador no dice lo exigido, se devuelve una vez.
+        // En la urgencia de franciskom el modelo omitía la mención 2 de 2 con la regla enterrada en el prompt.
+        const mentionRule = (packageData.agent?.required_mentions || []).find(rule => {
+          try {
+            return rule?.id && !mentionRetried.has(rule.id)
+              && new RegExp(rule.when, 'i').test(String(message || ''))
+              && !new RegExp(rule.require, 'i').test(rawText)
+              && !history.some(item => item.role === 'assistant' && new RegExp(rule.require, 'i').test(item.content));
+          } catch { return false; }
+        });
+        if (rawText && mentionRule && round < 4) {
+          mentionRetried.add(mentionRule.id);
+          rejectDraft('required_mention_' + mentionRule.id, rawText);
+          messages.push({ role: 'assistant', content: rawText });
+          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: ' + (mentionRule.instruction || 'falta una mención obligatoria de esta situación.') });
+          continue;
+        }
         const oneQuestionTooMany = offerDue && salesContext && /\?/.test(rawText) && !toolTrace.some(item => ['create_appointment', 'reschedule_appointment', 'cancel_appointment'].includes(item.name));
         if (rawText && agendaEnabled && !hasBooking && !handoffReason && round < 3 && !closingRetried && !HOUR_PATTERN.test(rawText) && (asksPermissionToBook.test(rawText) || postponesSale.test(rawText) || oneQuestionTooMany)) {
           closingRetried = true;
           messages.push({ role: 'assistant', content: rawText });
           messages.push({ role: 'system', content: oneQuestionTooMany && !asksPermissionToBook.test(rawText) && !postponesSale.test(rawText)
-            ? 'Ese mensaje NO se envió: ya es momento de ofrecer la hora, no de seguir preguntando. Consulta la agenda y remata con dos o tres horas reales ("Francisco prefiere no aventurarse a darte un diagnóstico y prefiere evaluarte: tengo ... ¿cuál te dejo?"). Puedes reconocer en media frase lo que te contó.'
+            ? 'Ese mensaje NO se envió: ya es momento de ofrecer la hora, no de seguir preguntando. Consulta la agenda y remata con dos o tres horas reales y "¿cuál te dejo?". Puedes reconocer en media frase lo que te contó. No hables de diagnóstico salvo que el cliente lo haya pedido.'
             : 'Ese mensaje NO se envió: pide permiso para buscar hora o deja la hora para después sin ofrecer nada concreto. Consulta la agenda y ofrécele dos o tres horas reales (si puso un freno de plata o de tiempo, en una fecha más adelante). Mantén el resto de lo que ibas a decir.' });
           continue;
         }
-        let validation = validateMutationClaims(rawText, toolTrace);
+        const leak = rawText ? detectInternalLeak(rawText, internalSources) : null;
+        if (leak && !leakRetried && round < 4) {
+          leakRetried = true;
+          rejectDraft('internal_leak', rawText, leak.match);
+          messages.push({ role: 'assistant', content: rawText });
+          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: repite texto interno del negocio o habla del agente, del sistema o de reglas. Al cliente sólo le dices lo que le sirve a él, con tus palabras: nunca menciones reglas, criterios internos, el sistema ni cómo funcionas. Reescríbelo.' });
+          continue;
+        }
+        if (rawText && !repeatRetried && round < 4 && repeatsLastAgentMessage(rawText, history)) {
+          repeatRetried = true;
+          rejectDraft('repeats_last_message', rawText);
+          messages.push({ role: 'assistant', content: rawText });
+          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: es casi igual a tu mensaje anterior en esta conversación. No repitas: responde sólo a lo nuevo que dijo el cliente, en una o dos frases. Si no hay nada nuevo que responder, llama no_intervenir si la tienes; si no, haz una sola pregunta corta distinta.' });
+          continue;
+        }
+        const finalText = finalizeText(rawText);
+        let validation = validateMutationClaims(finalText, toolTrace, { appointmentOnFile: hasBooking });
         // "Le aviso a Francisco" sin haber llamado la herramienta: antes se reemplazaba por
         // "Todavía no dejé ese aviso. ¿Quieres que le pida al equipo que te escriba?" y el paciente
         // quedaba colgado (Camilo, 14-09-2026, pidiendo cambiar una hora que no se pudo). Si el
         // modelo decidió avisar, el runtime cumple el aviso y deja el texto.
         if (!validation.ok && validation.blockedTool === 'request_human_handoff') {
           ownerAlert = ownerAlert || `El agente le dijo al cliente que te avisaba. Último mensaje del cliente: "${String(message || '').slice(0, 200)}"`;
-          validation = { ok: true, text: rawText };
+          validation = { ok: true, text: finalText };
         }
-        const text = validation.text;
+        const text = validation.text || bookingChangeNotice(toolTrace);
         if (!text) throw new Error('Groq devolvió una respuesta vacía');
         const handoff = toolTrace.some(item => item.name === 'request_human_handoff' && item.result?.ok);
         // Antes, un "no tengo ese dato confirmado" contaba como traspaso: dejaba el hilo mudo y le
@@ -531,7 +716,31 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
         // Silencio deliberado: se corta acá, sin volver a pasar por el modelo y sin texto. El
         // llamador es el que no envía nada (ver server.js), así el silencio es del runtime y no
         // depende de que el modelo produzca una respuesta vacía.
-        if (name === 'no_intervenir' && allowSilence && !literalSent && bringsNewRequest) {
+        // La anulación por "consulta nueva" queda sólo para el cliente con hora tomada en un hilo
+        // que lleva el propio agente (luna se callaba ante "¿tienes el lunes?", 14-09-2026). En un
+        // hilo del dueño, callarse es la decisión correcta aunque el mensaje traiga una pregunta.
+        // Mensaje de un sistema o de un tercero (campaña, menú de botones, otra organización): no
+        // se contesta. Silencio del runtime, igual que no_intervenir, pero disponible en cualquier hilo.
+        if (name === 'ignorar_mensaje_ajeno' && !literalSent && !hasBooking) {
+          return {
+            text: '', silent: true, silentReason: String(args?.reason || 'mensaje ajeno').slice(0, 300),
+            confidence: 'deliberate_silence', source: [], handoff: false, ownerAlert: null,
+            provider: llm.provider, model: llm.model, usage: usage(), toolTrace
+          };
+        }
+        if (name === 'no_intervenir' && !literalSent && changedBookingThisTurn(toolTrace)) {
+          answerTool({ ok: false, action: 'confirm_change', message: 'Acabas de cambiar su reserva en este turno: confírmaselo al cliente en una o dos frases (qué quedó y cuándo). No puedes quedarte callado.' });
+          continue;
+        }
+        // "Le puedo confirmar en la mañana" con hora tomada no es un cierre: la regla (Daniel,
+        // 11-10-2026) es dejarle la hora guardada, decírselo y avisar a Francisco. Callarse dejaba a
+        // la paciente sin respuesta y al dueño sin enterarse (replay D-a2).
+        if (name === 'no_intervenir' && !literalSent && !ownerHandled && hasBooking && postponesConfirmation) {
+          ownerAlert = ownerAlert || `Tiene hora tomada y quedó de confirmar después: "${String(message || '').slice(0, 200)}". La hora sigue guardada.`;
+          answerTool({ ok: false, action: 'acknowledge_hold', message: 'No te quedes callado: el cliente pide tiempo para confirmar su hora. Dile en una frase que se la dejas guardada y que te avise. No la anules ni le ofrezcas otras horas.' });
+          continue;
+        }
+        if (name === 'no_intervenir' && allowSilence && !ownerHandled && !literalSent && bringsNewRequest) {
           answerTool({ ok: false, action: 'new_request', message: 'El cliente hace una consulta nueva para ti (pregunta o pide hora, precio o disponibilidad): respóndela y avanza hacia la hora, aunque parte del hilo lo haya atendido otra persona.' });
           continue;
         }
@@ -547,7 +756,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           // Un bloque oficial se manda una vez por conversación: después del de precios, "las piernas,
           // cuello y cintura" volvía a recibir el mismo bloque (medido 14-09-2026).
           const literalKey = text => String(text || '').replace(/\s+/g, ' ').trim().slice(0, 60);
-          if (chosen && !literalSent && history.some(item => item.role === 'assistant' && literalKey(item.content) === literalKey(chosen.text))) {
+          if (chosen && history.some(item => item.role === 'assistant' && literalKey(item.content) === literalKey(chosen.text))) {
             answerTool({ ok: false, action: 'already_sent', message: 'Ese bloque oficial ya se lo mandaste antes en esta conversación. No lo repitas: responde con tus palabras a lo que dijo ahora.' });
             continue;
           }
@@ -558,30 +767,80 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
             answerTool({ ok: false, action: 'not_asked', message: `El cliente no preguntó eso ("${chosen.id}"). No se envió: responde tú a lo que dijo, con tus palabras y usando el conocimiento confirmado del negocio (ahí suele estar la respuesta).` });
             continue;
           }
+          // "ademas": el segundo bloque viene en la misma llamada. Esperar que el modelo haga una
+          // segunda llamada fallaba 1 de cada 3 veces ante "dónde queda y cuánto vale" (replay 08-10).
+          const second = chosen && !literalSent ? literalReplies(packageData).find(item => item.id === args?.ademas) : null;
+          if (second && second.id !== chosen.id && !second.image && !chosen.image
+            && !history.some(item => item.role === 'assistant' && literalKey(item.content) === literalKey(second.text))) extraLiterals.push(second);
+          // Con hora ya tomada, una pregunta corta sobre plata ("¿son 30 mil?") no pide el bloque de precios
+          // completo: la sede de su hora tiene un valor y se le dice en una frase. Reenviarlo mezclaba los
+          // $30.000 de otra sede con los $36.000 de la suya (franciskom, 09-10-2026).
+          if (chosen && !literalSent && hasBooking && /\$\s?\d/.test(chosen.text) && String(message || '').trim().split(/\s+/).length <= 8) {
+            answerTool({ ok: false, action: 'answer_in_words', message: 'El cliente ya tiene una hora tomada y hace una pregunta corta. No mandes el bloque de precios entero: respóndele en una frase con el valor de la sede de SU hora. Si el monto que menciona es el de otra sede o servicio, dile expresamente que ese valor corresponde a esa otra sede y cuál es el de su hora ("los $30.000 son de Eleva Salud; tu hora es en Box Buin y vale $36.000"), usando el conocimiento confirmado.' });
+            continue;
+          }
+          // Si en este turno se anuló o se cambió la hora, el bloque no puede ir solo: el cliente se
+          // quedaba con el mapa y sin saber que su hora ya no existía (replay 11-10-2026, 2 de 2).
+          const changedBookingNow = successfulAction(toolTrace, 'cancel_appointment', ['cancelled'])
+            || successfulAction(toolTrace, 'reschedule_appointment', ['rescheduled', 'rescheduled_needs_manual_confirmation']);
+          // Con la hora tomada en la consulta, "la sesión es en mi casa" corrige la modalidad: el mapa
+          // de la sede es justo lo contrario (Pilar, 09-10-2026). Cambiar la modalidad lo hace el
+          // dueño, así que se le avisa y al cliente se le pide la dirección.
+          const bookedOnsite = upcomingAppointments.some(item => (catalogSource.services || []).find(service => normalizeText(service.name) === normalizeText(item.service))?.delivery_mode !== 'mobile');
+          if (chosen && !literalSent && hasBooking && offersBothModes && bookedOnsite && HOME_VISIT.test(String(message || '')) && /maps\.|waze/i.test(chosen.text || '')) {
+            ownerAlert = ownerAlert || `Tiene hora en la consulta, pero dice que la sesión es a domicilio: "${String(message || '').slice(0, 200)}". Revisa la modalidad de su cita.`;
+            answerTool({ ok: false, action: 'mode_mismatch', message: 'No se envió la ubicación: el cliente dice que la sesión es en su casa y su hora quedó en la consulta. Dile en una frase que le avisas a Francisco para dejarla a domicilio y pídele la dirección (calle, número y comuna). No anules ni cambies la hora.' });
+            continue;
+          }
+          if (chosen && !literalSent && hasBooking && changedBookingNow) {
+            literalSent = chosen;
+            answerTool({ ok: true, action: 'literal_sent', id: chosen.id, instruccion: 'Ese bloque oficial ya le llegó al cliente en un mensaje aparte. Ahora escribe UN mensaje corto que le diga claro lo que pasó con su hora en este turno (anulada o cambiada, nombrando día y hora) y, si corresponde, lo que sí buscaba. No repitas nada del bloque.' });
+            continue;
+          }
+          // Con hora tomada, un bloque de "agendar en otro lugar" significa que quizás se equivocó de
+          // sede: el bloque solo la dejaba sin saber qué pasaba con la hora que ya tenía (Claudia,
+          // franciskom, 09-10-2026). Se nombra su hora y se le pregunta; anular lo decide ella.
+          // Lo mismo si en este turno el modelo quiso anular y se le impidió: "esa no es la dirección
+          // que me dieron" terminaba en el mapa del box solo (replay 11-10-2026, 2 de 2).
+          const doubtedBookingNow = toolTrace.some(item => item?.result?.action === 'kept_booking')
+            || /equivoqu|equivocad|\b(esa no|ese no)\b|\bno (es|era) (la|el|ese|esa|ah[ií]|all[aá])\s*(direcci|lugar|sede|box|consulta|centro|ah[ií]|all[aá]|$)|pens[eé] que (era|er[ao]|ser[ií]a)|no (es|era) (ah[ií]|all[aá])/i.test(String(message || ''));
+          if (chosen && !literalSent && hasBooking && (doubtedBookingNow || /agend|tomar hora|reserv/i.test(chosen.when || ''))) {
+            literalSent = chosen;
+            const whenFmt = new Intl.DateTimeFormat('es-CL', { timeZone: businessTimeZone, weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', hour12: false });
+            const booked = upcomingAppointments.map(item => `${item.service || 'sesión'} el ${(() => { try { return whenFmt.format(new Date(item.starts_at)); } catch { return item.starts_at; } })()}`).join('; ');
+            ownerAlert = ownerAlert || `Tiene hora tomada (${booked}) y ahora duda del lugar o pide agendar en otro: "${String(message || '').slice(0, 200)}". Revisa si mantiene su hora.`;
+            answerTool({ ok: true, action: 'literal_sent', id: chosen.id, instruccion: `Ese bloque oficial ya le llegó al cliente en un mensaje aparte. El cliente YA tiene hora tomada: ${booked}. Escribe UN mensaje corto que nombre esa hora y le pregunte si se la mantienes o se la anulas ("¿te la mantengo o te la anulo?"). No la anules tú y no repitas nada del bloque.` });
+            continue;
+          }
           if (chosen && !literalSent && hasBooking) {
             literalSent = chosen;
             return literalResult('');
           }
           if (chosen && !literalSent) {
             literalSent = chosen;
+            // Se le listan los otros bloques en la propia respuesta: con la instrucción sola, ante
+            // "horas, ubicación y valores" mandaba un bloque y se olvidaba del otro 1 de 2 veces.
+            const others = literalReplies(packageData).filter(item => item.id !== chosen.id && !item.image)
+              .map(item => `"${item.id}" (${String(item.when || '').split(/[.;]/)[0].slice(0, 120)})`).join('; ');
+            const otherAsked = others && !extraLiterals.length ? `ANTES de escribir tu mensaje, revisa el mensaje del cliente: si además preguntó algo que cubre otro bloque oficial, llama ahora responder_textual con ese id. Otros bloques: ${others}.` : '';
             // Quien pide atención a domicilio no recibe horas del box: esas horas no consideran el
             // traslado, y ofrecérselas le prometía un horario que a domicilio puede no existir (medido
             // 14-09-2026). Para domicilio lo que falta es la dirección.
-            const wantsHomeVisit = /domicilio|a (mi |la )?casa|vengan|venir a/i.test(String(message || ''));
+            const wantsHomeVisit = HOME_VISIT.test(String(message || ''));
             const warmUp = !wantsHomeVisit && !offerDue && !toldPain;
             const suggested = wantsHomeVisit || warmUp ? null : await suggestedSlotsForFollowUp().catch(() => null);
             literalSuggested = suggested;
             if (warmUp) {
               answerTool({
                 ok: true, action: 'literal_sent', id: chosen.id,
-                instruccion: 'Ese bloque oficial ya le llegó al cliente tal cual, en un mensaje aparte. Todavía no sabemos qué le pasa: escribe UN segundo mensaje corto con una sola pregunta cercana y abierta sobre qué le está molestando o qué le gustaría tratar (por ejemplo "Cuéntame, ¿qué te está molestando?"). No ofrezcas horas todavía, no repitas nada del bloque y no hagas más de una pregunta.'
+                instruccion: 'Ese bloque oficial ya le llegó al cliente tal cual, en un mensaje aparte. Todavía no sabemos qué le pasa: escribe UN segundo mensaje corto con una sola pregunta cercana y abierta sobre qué le está molestando o qué le gustaría tratar (por ejemplo "Cuéntame, ¿qué te está molestando?"). No ofrezcas horas todavía, no repitas nada del bloque y no hagas más de una pregunta. ' + otherAsked
               });
               continue;
             }
             answerTool({
               ok: true, action: 'literal_sent', id: chosen.id,
               horas_sugeridas: suggested || 'no se encontraron horas en los próximos días',
-              instruccion: `Ese bloque oficial ya le llegó al cliente tal cual, en un mensaje aparte. Ahora escribe UN segundo mensaje corto (una o dos frases) que deje la hora a un paso: ofrécele horas concretas y termina con "¿cuál te dejo?" (o "¿te la dejo?" si hay una sola). No repitas nada de lo que ya dice el bloque (precios, direcciones, horarios de atención, que una sede se coordina con el centro) y no le hagas preguntas previas como qué servicio quiere o en qué sede: eso se resuelve después, al tomar la hora. ${wantsHomeVisit ? 'Pidió atención a domicilio: pídele la dirección (calle, número y comuna) para buscarle hora a domicilio, en una sola pregunta, y no le ofrezcas horas en la sede.' : `Horas ya consultadas en la agenda real: ${suggested || 'ninguna'}. Úsalas, salvo que el cliente haya pedido un día u horario específico: en ese caso consulta ese día con la herramienta y ofrece esas. Si pidió un día sin atención, dilo en media frase y ofrece las horas consultadas.`} Responde exactamente SIN_SEGUIMIENTO sólo si el cliente ya tiene su hora tomada.`
+              instruccion: `Ese bloque oficial ya le llegó al cliente tal cual, en un mensaje aparte. Ahora escribe UN segundo mensaje corto (una o dos frases) que deje la hora a un paso: ofrécele horas concretas y termina con "¿cuál te dejo?" (o "¿te la dejo?" si hay una sola). No repitas nada de lo que ya dice el bloque (precios, direcciones, horarios de atención, que una sede se coordina con el centro) y no le hagas preguntas previas como qué servicio quiere o en qué sede: eso se resuelve después, al tomar la hora. ${wantsHomeVisit ? 'Pidió atención a domicilio: pídele la dirección (calle, número y comuna) para buscarle hora a domicilio, en una sola pregunta, y no le ofrezcas horas en la sede.' : `Horas ya consultadas en la agenda real: ${suggested || 'ninguna'}. Úsalas, salvo que el cliente haya pedido un día u horario específico: en ese caso consulta ese día con la herramienta y ofrece esas. Si pidió un día sin atención, dilo en media frase y ofrece las horas consultadas.`} Responde exactamente SIN_SEGUIMIENTO sólo si el cliente ya tiene su hora tomada. ${otherAsked}`
             });
             continue;
           }
@@ -606,11 +865,49 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           answerTool({ ok: false, action: 'confirm_first', message: `Todavía no hay una hora elegida por el cliente para ${args?.time || 'esa hora'}: no está en su mensaje ni en tu último mensaje. No se agendó nada. Ofrécele las horas reales y espera que elija.` });
           continue;
         }
+        if (name === 'create_appointment' && !modalityEstablished()) {
+          answerTool({ ok: false, action: 'ask_modality_first', message: `No se agendó nada todavía: falta saber si la sesión es en ${onsiteNames.join(' o ') || 'la consulta'} o a domicilio. Pregúntaselo en una frase corta, manteniendo la hora que eligió ("¿la sesión sería en ${onsiteNames[0] || 'la consulta'} o a domicilio?"), y agenda cuando conteste. Si es a domicilio, pide también la dirección.` });
+          continue;
+        }
+        // "La sesión es en mi casa" no basta para agendar: sin dirección la hora queda sin traslado
+        // calculado y Francisco no sabe adónde ir (replay D-b2, 11-10-2026: agendó a domicilio sin
+        // dirección). Y quien pidió domicilio no queda agendado en el box.
+        if (name === 'create_appointment' && offersBothModes) {
+          const chosenService = bookableCatalog.find(item => normalizeText(item.name) === normalizeText(args?.service))
+            || bookableCatalog.find(item => args?.service && normalizeText(item.name).includes(normalizeText(args.service)));
+          const lastModeText = [...history.filter(item => item.role === 'user').map(item => item.content), String(message || '')]
+            .reverse().find(text => HOME_VISIT.test(text) || mentionsOnsite(text));
+          const wantsHome = Boolean(lastModeText && HOME_VISIT.test(lastModeText));
+          if (wantsHome && chosenService && chosenService.delivery_mode !== 'mobile') {
+            answerTool({ ok: false, action: 'wrong_mode', message: `No se agendó nada: el cliente pidió la sesión a domicilio y "${chosenService.name}" es en la consulta. Usa el servicio a domicilio del catálogo y su dirección.` });
+            continue;
+          }
+          if (chosenService?.delivery_mode === 'mobile' && !/\d|s\/n|sin n[uú]mero/i.test(String(args?.address || ''))) {
+            answerTool({ ok: false, action: 'ask_address', message: 'No se agendó nada todavía: para una sesión a domicilio falta la dirección (calle, número y comuna). Si ya te la dio en esta conversación, pásala en address; si no, pídesela en una frase corta, manteniendo la hora que eligió.' });
+            continue;
+          }
+        }
+        if (name === 'cancel_appointment' && !cancelRequestedByClient()) {
+          ownerAlert = ownerAlert || `Tiene hora tomada y escribió: "${String(message || '').slice(0, 200)}". El bot no la anuló porque no lo pidió con esas palabras; revisa si la mantiene.`;
+          answerTool({ ok: false, action: 'kept_booking', message: (HOME_VISIT.test(String(message || '')) ? 'Si lo que dice es que la sesión es en su casa: no le ofrezcas anular; dile que le avisas a Francisco para dejarla a domicilio y pídele la dirección (calle, número y comuna). ' : '') + 'No se anuló nada: el cliente no pidió anular su hora. Si pide tiempo para confirmar o tiene un inconveniente ("te confirmo mañana", "tengo turno"), dile en una frase que se la dejas guardada y que te avise; Francisco ya quedó avisado. Si de verdad parece que ya no le sirve o que se equivocó de sede o de lugar, nómbrale su hora, dale en el mismo mensaje lo que sí buscaba (por ejemplo, cómo se agenda en la otra sede) y pregúntale "¿te la anulo?"; espera su respuesta. No le preguntes por su dolor.' });
+          continue;
+        }
         if (name === 'avisar_al_dueno' && !hasBooking && !concreteOfferMade()) {
           answerTool({ ok: false, action: 'offer_first', message: 'Todavía no le ofreciste horas concretas a este cliente. No se avisó al dueño: primero consulta la disponibilidad y ofrécele dos o tres horas reales. Si con eso sigue dudando, ahí sí avisa.' });
           continue;
         }
-        const result = await executeAgendaTool(packageData, name, args, context);
+        // clientTexts: lo que dijo el cliente, para que las herramientas verifiquen que un dato extraído (la comuna) salió de él y no lo supuso el modelo.
+        const result = await executeAgendaTool(packageData, name, args, { ...context, clientTexts: userTurns });
+        // Claudia (franciskom, 09-10-2026) había pedido en septiembre los datos del centro médico y hoy
+        // pidió "una hora": el bot le dejó el Box sin que nadie le preguntara la sede. Si en la
+        // conversación (de cualquier día) apareció otra sede, las horas no se ofrecen sin decirlo.
+        if (name === 'get_availability' && result?.ok && Array.isArray(result.available_slots) && result.available_slots.length) {
+          const asked = String(args?.location || args?.service || '').toLowerCase();
+          const otherSedes = (catalogSource.locations || []).map(item => String(item.name || '').replace(/\(.*?\)/g, '').trim().toLowerCase())
+            .filter(term => term && !asked.includes(term));
+          const mentioned = [...history.filter(item => item.role === 'user').map(item => item.content), message].some(text => [...otherSedes, 'centro médico', 'centro medico'].some(term => String(text || '').toLowerCase().includes(term)));
+          if (mentioned) result.aviso_sede = 'En esta conversación apareció otra sede (el centro médico). Estas horas son de la sede que consultaste, no de esa. Al ofrecerlas nombra la sede con su valor y, en una frase, aclara que si el cliente buscaba la otra sede esa hora se coordina directo con ellos; pregúntale cuál prefiere antes de dejarle una hora tomada.';
+        }
         if (name === 'avisar_al_dueno' && result?.ok) ownerAlert = String(args?.reason || 'El cliente necesita que el dueño entre a la conversación.').slice(0, 400);
         if (name === 'request_human_handoff' && result?.ok) handoffReason = String(args?.reason || '').slice(0, 400);
         // Una herramienta puede pedir el aviso ella misma (un cambio de hora que falló por un
@@ -620,9 +917,15 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
       }
       // Mientras se escribe el seguimiento de un bloque oficial no tiene sentido elegir otro bloque,
       // callarse ni traspasar: sólo queda avanzar hacia la hora.
-      if (literalSent) activeTools = tools.filter(item => !['responder_textual', 'no_intervenir', 'request_human_handoff'].includes(item.function?.name));
+      // Hasta un segundo bloque sí: Ariel (08-10-2026) preguntó horas, ubicación y valores en un solo
+      // mensaje, le llegó el bloque de precios y la ubicación nunca, porque la herramienta ya no estaba.
+      if (literalSent) activeTools = tools.filter(item => ![...(extraLiterals.length ? ['responder_textual'] : []), 'no_intervenir', 'request_human_handoff'].includes(item.function?.name));
     }
     if (literalSent) return literalResult('');
+    const changeNotice = bookingChangeNotice(toolTrace);
+    if (changeNotice) {
+      return { text: changeNotice, confidence: 'deterministic_booking_notice', source: [], handoff: false, ownerAlert, provider: llm.provider, model: llm.model, usage: usage(), toolTrace };
+    }
     throw new Error('El agente excedió el límite de pasos de herramientas.');
   } catch (error) {
     if (!allowDeterministicFallback) throw error;

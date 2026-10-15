@@ -8,8 +8,8 @@ import { recordUsage } from './metrics.js';
 import { agendaConfig, agendaSupabaseRequest, agendaSupabaseUpload, agendaUsesSupabase, appendAgendaFeedbackLocal, createAgendaAppointment, createAgendaAvailabilityBlock, createAgendaAvailabilityRule, bulkUpdateCustomers, createManualCustomer, deleteAgendaAvailabilityBlock, deleteAgendaAvailabilityRule, getAgendaDashboard, getAvailableSlots, getCustomerDetail, importAgendaCustomers, listCustomers, normalizeChilePhone, rescheduleAgendaAppointment, updateAgendaAppointment, updateAgendaFeedback, updateAppointmentNotes, updateCustomerSettings } from './agenda.js';
 import { parseContactsFile } from './contacts-import.js';
 import { dispatchAgendaOutbox } from './outbox.js';
-import { verifyZavuSignature, sendZavuWhatsApp, zavuDeliveryUpdate, zavuEventId, zavuProviderMessage, zavuOwnerEcho } from './zavu.js';
-import { appendConversationMessage, createOperator, findConversationMessageByClientId, getAgentControl, getConversationInbox, getOrCreateConversation, historyAllowsSilence, inboundDebounceMs, loadConversationHistory, reclaimStaleHandoff, supersededByNewerInbound, syncWhatsappProfileNames, updateAgentControl, updateConversationMessageDelivery, updateConversationOperation } from './conversations.js';
+import { verifyZavuSignature, sendZavuWhatsApp, zavuDeliveryUpdate, zavuEventId, zavuProviderMessage, zavuOwnerEcho, zavuInboundMedia } from './zavu.js';
+import { agentRepliedSince, appendConversationMessage, automatedReplyAfter, isAutomatedOwnerReply, createOperator, mediaFallbackReply, findConversationMessageByClientId, getAgentControl, getConversationInbox, getOrCreateConversation, historyAllowsSilence, inboundDebounceMs, loadConversationHistory, reclaimStaleHandoff, supersededByNewerInbound, syncWhatsappProfileNames, updateAgentControl, updateConversationMessageDelivery, updateConversationOperation } from './conversations.js';
 import { addKnowledgeSuggestion, currentConfirmedFacts, listKnowledgeSuggestions } from './knowledge.js';
 import { createHandoffTicket, listHandoffTickets, updateHandoffTicket } from './handoffs.js';
 import { addBusinessData, addBusinessInfo, listBusinessData, listBusinessInfo } from './business-data.js';
@@ -20,6 +20,7 @@ import { applyOwnerAction, loadOwnerAction, ownerActionPage } from './owner-acti
 import { appendCustomerRecordEntry, listCustomerRecord } from './customer-records.js';
 import { buildGoogleAuthUrl, completeGoogleCalendarConnection, disconnectGoogleCalendar, getGoogleCalendarStatus, refreshGoogleCalendarList, setGoogleCalendarBuffer, setGoogleCalendarRoute, setGoogleCalendarTarget, signGoogleOAuthState, verifyGoogleOAuthState } from './google-calendar.js';
 import { syncGoogleContacts } from './google-contacts.js';
+import { isBareGreeting } from './turn-guards.js';
 
 // Capturar errores de inicialización en vez de dejar que el módulo falle al
 // importarse: en Vercel eso da un FUNCTION_INVOCATION_FAILED opaco en cada
@@ -832,6 +833,11 @@ export async function handleRequest(req, res) {
       // misma recuperación) ya lo está procesando o ya lo terminó. No hay nada que hacer acá.
       if (!claim?.acquired) continue;
       const raw = claim.reply?.inbound_raw;
+      if (raw?.phone && raw?.media_kind && !raw?.text) {
+        // Un audio o sticker sin texto no se reconstruye tarde: su aviso sólo sirve en el momento.
+        await completeZavuEvent(eventId, claim.lease_token, 'ignored', { media_without_text: raw.media_kind, recovered_late: true });
+        continue;
+      }
       if (!raw?.phone || !raw?.text) {
         // Murió ANTES de guardar el mensaje crudo (ventana angosta: entre adquirir el lease y la
         // validación de teléfono/texto). No hay cómo reconstruirlo - se marca 'failed' para que
@@ -851,6 +857,10 @@ export async function handleRequest(req, res) {
           inbound = await appendConversationMessage(conversation?.id, 'inbound', message, {}, {
             senderType: 'human', deliveryStatus: 'delivered', clientMessageId: inboundKey, providerMessageId: raw.message_id || null
           });
+        }
+        if (isBareGreeting(message) && await automatedReplyAfter(conversation?.id, inbound?.created_at)) {
+          await completeZavuEvent(eventId, claim.lease_token, 'completed', { silent: true, silent_reason: 'saludo ya contestado por el saludo automático', recovered_late: true });
+          continue;
         }
         const agentControl = await getAgentControl();
         if (agentControl.control.mode === 'paused') {
@@ -914,7 +924,7 @@ export async function handleRequest(req, res) {
             kind: reply.handoff ? 'handoff' : 'owner_alert',
             reason: reply.handoff
               ? `Traspaso pedido por el agente: ${reply.handoffReason || 'el cliente pidio una persona o el tema no es del negocio'}`
-              : `Duda del cliente (el agente sigue atendiendo): ${reply.ownerAlert}`,
+              : `Aviso para ti (el agente sigue atendiendo): ${reply.ownerAlert}`,
             operationKey: `${operationKey}:handoff-ticket`
           }).catch(error => console.error('recuperación: no se pudo crear ticket de handoff:', error.message));
         }
@@ -1039,7 +1049,7 @@ export async function handleRequest(req, res) {
   }
   if (req.method === 'GET' && pathname === '/api/client/knowledge') {
     if (!(await dashboardAuthorized(req))) return json(res, 401, { error: 'Acceso al dashboard no autorizado.' });
-    try { return json(res, 200, { facts: currentConfirmedFacts(packageData), suggestions: await listKnowledgeSuggestions(packageData) }); }
+    try { return json(res, 200, { facts: await currentConfirmedFacts(packageData), suggestions: await listKnowledgeSuggestions(packageData) }); }
     catch (error) { return json(res, 502, { error: error.message }); }
   }
   if (req.method === 'POST' && pathname === '/api/client/knowledge/suggestions') {
@@ -1099,6 +1109,9 @@ export async function handleRequest(req, res) {
       // y ajustar su comportamiento en privado sin que responda a nadie más mientras tanto.
       const history = Array.isArray(body.history) ? body.history.filter(item => item && ['user', 'assistant'].includes(item.role) && typeof item.content === 'string') : [];
       const reply = await answerWithConfiguredAi(body.message, { callerPhone: PREVIEW_TEST_PHONE, conversationId: body.conversationId || 'web-preview', history });
+      // En "Probar" un silencio deliberado se muestra explicado: en WhatsApp no se manda nada,
+      // pero acá una burbuja vacía parecería un error.
+      if (reply.silent && !reply.text) reply.text = `(En WhatsApp el agente no respondería a esto: ${reply.silentReason || 'no corresponde intervenir'}.)`;
       await recordUsage({ provider: reply.provider, model: reply.model || 'deterministic', inputTokens: reply.usage?.inputTokens || 0, outputTokens: reply.usage?.outputTokens || 0, source: 'web_preview' });
       if (reply.handoff || reply.ownerAlert) {
         await createHandoffTicket(packageData, {
@@ -1106,7 +1119,7 @@ export async function handleRequest(req, res) {
           kind: reply.handoff ? 'handoff' : 'owner_alert',
           reason: reply.handoff
             ? `Traspaso pedido por el agente: ${reply.handoffReason || 'el cliente pidió una persona o el tema no es del negocio'}`
-            : `Duda del cliente (el agente sigue atendiendo): ${reply.ownerAlert}`
+            : `Aviso para ti (el agente sigue atendiendo): ${reply.ownerAlert}`
         });
       }
       return json(res, 200, { reply, mode: 'preview' });
@@ -1146,7 +1159,7 @@ export async function handleRequest(req, res) {
           kind: reply.handoff ? 'handoff' : 'owner_alert',
           reason: reply.handoff
             ? `Traspaso pedido por el agente: ${reply.handoffReason || 'el cliente pidió una persona o el tema no es del negocio'}`
-            : `Duda del cliente (el agente sigue atendiendo): ${reply.ownerAlert}`
+            : `Aviso para ti (el agente sigue atendiendo): ${reply.ownerAlert}`
         });
       }
       if (reply.handoff) {
@@ -1192,8 +1205,11 @@ export async function handleRequest(req, res) {
         const echoPhone = normalizeChilePhone(ownerEcho.customerPhone) || ownerEcho.customerPhone;
         const echoConversation = await getOrCreateConversation('whatsapp', echoPhone, '');
         const echoKey = `zavu:echo:${ownerEcho.messageId || eventId}`.slice(0, 240);
-        const echoRow = await appendConversationMessage(echoConversation?.id, 'outbound', ownerEcho.text, {}, {
-          senderType: 'human',
+        // El saludo automático de WhatsApp Business no es el dueño atendiendo: se guarda como
+        // 'system' y el hilo sigue en manos del bot (ver isAutomatedOwnerReply).
+        const automated = await isAutomatedOwnerReply(echoConversation?.id, ownerEcho.text).catch(() => false);
+        const echoRow = await appendConversationMessage(echoConversation?.id, 'outbound', ownerEcho.text, automated ? { automated_owner_reply: true } : {}, {
+          senderType: automated ? 'system' : 'human',
           deliveryStatus: ['queued', 'sending', 'sent', 'delivered', 'read', 'failed'].includes(ownerEcho.status) ? ownerEcho.status : 'delivered',
           clientMessageId: echoKey, providerMessageId: ownerEcho.messageId || null
         });
@@ -1204,12 +1220,12 @@ export async function handleRequest(req, res) {
         // que mirar, así que nunca se activaba con esta causa. Ahora sí: el bot se calla apenas
         // Francisco contesta a mano, y se retoma solo a las HANDOFF_AUTO_RETURN_HOURS (12h por
         // defecto) desde su último mensaje real en ese hilo.
-        if (echoConversation?.id && echoConversation.status !== 'handoff') {
+        if (!automated && echoConversation?.id && echoConversation.status !== 'handoff') {
           await updateConversationOperation(echoConversation.id, { status: 'handoff', needs_human: true, handoff_reason: 'Francisco está respondiendo directamente desde su WhatsApp' }).catch(error => {
             console.error('[zavu] no se pudo pasar la conversación a handoff tras el eco:', error.message);
           });
         }
-        await completeZavuEvent(eventId, claim.lease_token, 'completed', { echo: true, conversation_id: echoConversation?.id || null, conversation_message_id: echoRow?.id || null });
+        await completeZavuEvent(eventId, claim.lease_token, 'completed', { echo: true, automated, conversation_id: echoConversation?.id || null, conversation_message_id: echoRow?.id || null });
         return json(res, 200, { ok: true, echo: true, matched: Boolean(echoRow) });
       }
       // Los callbacks de delivery actualizan el mensaje que ya existe; también son
@@ -1240,8 +1256,12 @@ export async function handleRequest(req, res) {
         event.data?.profileName || event.data?.profile_name || event.data?.senderName
         || event.data?.fromName || event.data?.pushName || event.data?.contact?.name || ''
       ).trim();
-      const message = event.data?.text || '';
-      if (!callerPhone || !message) {
+      // Audio, imagen, sticker o documento: se guardan como "[audio]" etc. en vez de descartarse.
+      // Si traen texto (pie de foto), ese texto es el mensaje.
+      const media = zavuInboundMedia(event);
+      const message = media ? media.caption : (event.data?.text || '');
+      const storedContent = media ? [media.placeholder, media.caption].filter(Boolean).join(' ') : message;
+      if (!callerPhone || !storedContent) {
         await completeZavuEvent(eventId, claim.lease_token, 'ignored', { ignored: 'no_text_or_sender' });
         return json(res, 200, { ok: true, ignored: 'no_text_or_sender' });
       }
@@ -1255,14 +1275,27 @@ export async function handleRequest(req, res) {
       // recoverMissedZavuReplies pueda terminar el trabajo después, sin depender de Zavu
       // reentregando el mismo webhook.
       await checkpointZavuEvent(eventId, claim.lease_token, {
-        inbound_raw: { phone: callerPhone, profile_name: callerProfileName, text: message, message_id: event.data?.messageId || '' }
+        inbound_raw: { phone: callerPhone, profile_name: callerProfileName, text: message, media_kind: media?.kind || '', message_id: event.data?.messageId || '' }
       });
       let conversation = await getOrCreateConversation('whatsapp', callerPhone, callerProfileName);
       const inboundKey = `zavu:in:${String(event.data?.messageId || eventId)}`.slice(0, 240);
-      const inbound = await appendConversationMessage(conversation?.id, 'inbound', message, {}, {
+      const inbound = await appendConversationMessage(conversation?.id, 'inbound', storedContent, {}, {
         senderType: 'human', deliveryStatus: 'delivered', clientMessageId: inboundKey,
         providerMessageId: event.data?.messageId || null
       });
+      // Reentrega tardía de Zavu: el mensaje se mandó antes de la última respuesta del agente y esa
+      // respuesta ya lo tuvo en su historial. Sólo aplica si llegó con atraso real respecto de la
+      // hora en que el cliente lo mandó; un mensaje en vivo nunca se descarta por esto.
+      // providerTimestamp es cuándo lo recibió WhatsApp (Unix ms). El `timestamp` del sobre NO sirve:
+      // es cuándo Zavu despachó el webhook, así que en una reentrega es siempre "ahora".
+      const rawSentAt = Number(event.data?.providerTimestamp || 0);
+      const sentAtMs = rawSentAt > 0 && rawSentAt < 1e12 ? rawSentAt * 1000 : rawSentAt;
+      const storedAtMs = Date.parse(inbound?.created_at || '');
+      if (sentAtMs > 0 && Number.isFinite(storedAtMs) && storedAtMs - sentAtMs > 20_000
+        && await agentRepliedSince(conversation?.id, new Date(sentAtMs).toISOString())) {
+        await completeZavuEvent(eventId, claim.lease_token, 'ignored', { superseded: true, late_redelivery: true });
+        return json(res, 200, { ok: true, superseded: true });
+      }
       // Espera corta antes de contestar: si el cliente sigue escribiendo (lo normal en WhatsApp,
       // varias líneas seguidas), este turno se calla y contesta el último mensaje, que ya llega con
       // todo lo anterior en su historial. Sin esto el agente responde una vez por línea.
@@ -1273,6 +1306,13 @@ export async function handleRequest(req, res) {
           await completeZavuEvent(eventId, claim.lease_token, 'ignored', { superseded: true });
           return json(res, 200, { ok: true, superseded: true });
         }
+      }
+      // El estado del hilo se lee de nuevo después de la espera: se había leído antes, y si el dueño
+      // contestaba en esos 12 s el bot igual hablaba encima (franciskom, 10-10-2026).
+      conversation = await getOrCreateConversation('whatsapp', callerPhone, callerProfileName) || conversation;
+      if (isBareGreeting(message) && await automatedReplyAfter(conversation?.id, inbound?.created_at)) {
+        await completeZavuEvent(eventId, claim.lease_token, 'completed', { inbound_message_id: inbound?.id || null, silent: true, silent_reason: 'saludo ya contestado por el saludo automático' });
+        return json(res, 200, { ok: true, silent: true });
       }
       const agentControl = await getAgentControl();
       if (agentControl.control.mode === 'paused') {
@@ -1290,6 +1330,32 @@ export async function handleRequest(req, res) {
       if (conversation?.za_customers?.bot_muted) {
         await completeZavuEvent(eventId, claim.lease_token, 'ignored', { muted: true });
         return json(res, 200, { ok: true, muted: true });
+      }
+      // Sin texto que leer (audio, foto sin pie, sticker): el modelo no tiene nada que interpretar.
+      // Se responde con un aviso fijo sólo donde el bot lleva la conversación; en cualquier otro
+      // hilo (lo lleva el dueño, o es un contacto suyo) se queda guardado y nada más.
+      if (media && !message) {
+        const mediaReply = await mediaFallbackReply(conversation, media, inboundKey, packageData?.agent?.media_replies || {});
+        if (!mediaReply) {
+          await completeZavuEvent(eventId, claim.lease_token, 'completed', { inbound_message_id: inbound?.id || null, silent: true, silent_reason: `sin texto (${media.kind})` });
+          return json(res, 200, { ok: true, silent: true });
+        }
+        const outboundKey = `zavu:out:${eventId}`.slice(0, 240);
+        let outbound = await findConversationMessageByClientId(outboundKey);
+        if (!outbound) {
+          outbound = await appendConversationMessage(conversation?.id, 'outbound', mediaReply, { tools: [{ name: 'guard', result: { ok: true, guard: 'media_fallback', detail: media.kind } }] }, {
+            senderType: 'agent', deliveryStatus: 'sending', clientMessageId: outboundKey
+          });
+        }
+        if (!['queued', 'sent', 'delivered', 'read'].includes(outbound?.delivery_status)) {
+          const provider = zavuProviderMessage(await sendZavuWhatsApp(callerPhone, mediaReply, { idempotencyKey: outboundKey }));
+          await updateConversationMessageDelivery({
+            id: outbound?.id, providerMessageId: provider.id,
+            status: ['queued', 'sent', 'delivered', 'read'].includes(provider.status) ? provider.status : 'sent', failureReason: ''
+          });
+        }
+        await completeZavuEvent(eventId, claim.lease_token, 'completed', { inbound_message_id: inbound?.id || null, outbound_message_id: outbound?.id || null, media_fallback: media.kind });
+        return json(res, 200, { ok: true, media: media.kind });
       }
       const operationKey = `zavu:${eventId}`.slice(0, 240);
       let reply = claim.reply?.agent_reply;
@@ -1333,6 +1399,17 @@ export async function handleRequest(req, res) {
         await completeZavuEvent(eventId, claim.lease_token, 'ignored', { superseded: true, after_generation: true });
         return json(res, 200, { ok: true, superseded: true });
       }
+      // Y si mientras se generaba el dueño entró a contestar (su eco ya pasó el hilo a handoff), no
+      // se manda encima de él — salvo que el turno haya tomado o cambiado una hora: eso el cliente
+      // tiene que saberlo igual.
+      if (generatedNow) {
+        const fresh = await getOrCreateConversation('whatsapp', callerPhone, callerProfileName).catch(() => null);
+        const mutated = (reply.toolTrace || []).some(item => ['create_appointment', 'cancel_appointment', 'reschedule_appointment'].includes(item?.name) && item?.result?.ok);
+        if (fresh?.status === 'handoff' && !mutated && !reply.handoff) {
+          await completeZavuEvent(eventId, claim.lease_token, 'ignored', { handoff: true, after_generation: true });
+          return json(res, 200, { ok: true, handoff: true, after_generation: true });
+        }
+      }
 
       const outboundKey = `zavu:out:${eventId}`.slice(0, 240);
       let outbound = await findConversationMessageByClientId(outboundKey);
@@ -1366,7 +1443,7 @@ export async function handleRequest(req, res) {
           kind: reply.handoff ? 'handoff' : 'owner_alert',
           reason: reply.handoff
             ? `Traspaso pedido por el agente: ${reply.handoffReason || 'el cliente pidió una persona o el tema no es del negocio'}`
-            : `Duda del cliente (el agente sigue atendiendo): ${reply.ownerAlert}`,
+            : `Aviso para ti (el agente sigue atendiendo): ${reply.ownerAlert}`,
           operationKey: `${operationKey}:handoff-ticket`
         });
       }

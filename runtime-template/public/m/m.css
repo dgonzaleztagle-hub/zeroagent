@@ -89,7 +89,9 @@ textarea{padding:12px 13px;min-height:var(--tap)}
 .segment-badge.cliente{background:var(--soft);color:var(--green-2)}
 .segment-badge.revisar{background:var(--warning-soft);color:var(--warning)}
 .row-with-check{display:flex;align-items:center;gap:8px}
-.row-with-check .row-card{flex:1}
+/* min-width:0: sin esto la tarjeta no se achica bajo el ancho de su texto y empuja la etiqueta
+   de segmento fuera de la pantalla en teléfonos (12-10-2026). */
+.row-with-check .row-card{flex:1;min-width:0}
 .row-check{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:var(--tap);height:var(--tap)}
 .row-check input{width:20px;height:20px;accent-color:var(--green)}
 .bulk-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;padding:10px 12px;border-radius:11px;background:var(--soft);font-size:12px;font-weight:700;color:var(--ink)}
@@ -208,6 +210,8 @@ a.primary.full[hidden]{display:none}
 .status-pill.pending{background:var(--warning-soft);color:var(--warning)}
 .status-pill.resolved,.status-pill.open{background:var(--soft);color:var(--green-2)}
 .status-pill.open{background:var(--warning-soft);color:var(--warning)}
+.status-pill.owner{background:var(--green);color:#fff}
+.ticket-card.owner{border-color:var(--green-2)}
 /* .confirmed ya se usaba en el pill de IA (mobile-ai-status) sin tener regla propia — quedaba
    con el gris default incluso "Configurado". .ok es la misma variante para Google Calendar. */
 .status-pill.confirmed,.status-pill.ok{background:var(--soft);color:var(--green-2)}
@@ -246,3 +250,5 @@ a.primary.full[hidden]{display:none}
 .calendar-busy-copy{font-size:11px}
 #mobile-ai-action-status:empty{display:none}
 .operation-toast{position:fixed;left:16px;right:16px;bottom:calc(70px + var(--safe-bottom));z-index:90;padding:13px 15px;border-radius:12px;background:var(--ink);color:#fff;box-shadow:0 12px 34px rgba(23,34,28,.22);font-size:13px;transform:translateY(8px);opacity:0;transition:.2s ease}.operation-toast.visible{transform:none;opacity:1}
+.mute-toggle{transition:transform .12s,background .2s,border-color .2s}.mute-toggle:active{transform:scale(.97)}.mute-toggle.saving{opacity:.65;cursor:progress;animation:mutepulse .9s ease-in-out infinite}.mute-toggle.just-changed{animation:mutedone 1.1s ease-out}@keyframes mutepulse{50%{opacity:.4}}@keyframes mutedone{0%{box-shadow:0 0 0 0 var(--danger)}40%{box-shadow:0 0 0 6px transparent;transform:scale(1.02)}100%{box-shadow:0 0 0 0 transparent}}
+.bulk-bar.idle{background:transparent;border:1px dashed var(--line);color:var(--muted,#6f6f68);font-weight:600}.bulk-bar button:disabled{opacity:.45;cursor:not-allowed}

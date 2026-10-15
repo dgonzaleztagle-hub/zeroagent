@@ -380,6 +380,8 @@ function normalizeAgendaConfig(input = {}) {
     services,
     resources,
     risk_windows: asList(input.risk_windows),
+    // Comunas donde el negocio atiende a domicilio; el runtime bloquea horas a domicilio fuera de la lista.
+    home_visit_zone: Array.isArray(input.home_visit_zone) ? input.home_visit_zone.map(item => String(item || '').trim().slice(0, 80)).filter(Boolean).slice(0, 60) : [],
     rules: {
       slot_interval_minutes: number(rules.slot_interval_minutes, 15, 5, 60),
       minimum_notice_hours: number(rules.minimum_notice_hours, 2, 0, 168),

@@ -5,7 +5,6 @@ import { fileURLToPath } from 'node:url';
 import { agendaSupabaseRequest, agendaUsesSupabase } from './agenda.js';
 import { sendZavuAlert } from './zavu.js';
 import { getNotificationSettings } from './notification-settings.js';
-import { createOwnerActionLink } from './owner-actions.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -61,37 +60,14 @@ async function alertHandoff(ticket) {
   const { settings } = await getNotificationSettings();
   if (!settings.handoff_alert_enabled || !settings.alert_phone) return;
   if (await alertedRecently(ticket)) return;
-  // El aviso dice lo justo, y lo primero es CON QUIÉN hablar: nombre y número del cliente, porque
-  // el dueño contesta desde su propio WhatsApp y no desde la consola (Francisco, 11-09-2026:
-  // entrar a la app manejando o con su bebé en brazos no le sirve, responde por voz desde el chat).
-  // El link abre una pantalla con ESE paciente y tres botones — abrir su WhatsApp, seguir él la
-  // conversación, o no contestarle más. Si no se pudo crear cae al link de la consola, y si
-  // tampoco hay, el aviso sale sin link: una alerta sin link es mejor que una que no llega. Zavu
-  // exige verificar antes cualquier URL que salga por SMS (urls.submitForVerification).
-  const actionLink = await createOwnerActionLink({
-    conversationId: ticket.conversation_uuid, customerId: ticket.customer_id,
-    customerPhone: ticket.conversation_id, customerName: ticket.customer_name,
-    contextMessage: ticket.customer_message
-  }).catch(() => '');
-  const link = actionLink || String(process.env.CONSOLE_URL || '').trim();
+  // El aviso es solo "quien necesita atencion": nombre y telefono, sin motivo ni link. Un SMS con
+  // acentos pasa a Unicode (70 caracteres por segmento) y un aviso largo se parte en 3 segmentos:
+  // el 08-10-2026 las alertas de franciskom salian asi, costaban el triple y no hay confirmacion de
+  // que llegaran. Corto y sin acentos cabe en 1 segmento. El detalle esta en la consola y en el
+  // propio chat de WhatsApp del dueno.
   const nombre = String(ticket.customer_name || '').trim().slice(0, 24);
   const who = [nombre, ticket.conversation_id].filter(Boolean).join(' ') || 'Un cliente';
-  const head = ticket.kind === 'owner_alert'
-    ? `ZeroAgent: ${who} duda, cierra tú.`
-    : `ZeroAgent: ${who} pide hablar contigo.`;
-  // Un SMS se cobra por segmento de 160 caracteres: primero con quién hablar y el link, y el
-  // motivo sólo con lo que quepa en ese mismo segmento (mejor un motivo corto que dos segmentos).
-  const base = [head, link].filter(Boolean).join(' ');
-  // El motivo del SMS es el que dio el modelo (alert_reason), sin el prefijo que sí se guarda en
-  // la Bandeja: en 160 caracteres no cabe "Duda del cliente (el agente sigue atendiendo): …".
-  const motivoCompleto = String(ticket.alert_reason || ticket.reason || ticket.customer_message || '').trim();
-  const espacio = 160 - base.length - 1;
-  const motivo = espacio >= 24 && motivoCompleto
-    ? (motivoCompleto.length <= espacio
-        ? motivoCompleto
-        : motivoCompleto.slice(0, espacio - 1).replace(/[\s,;.:]+\S*$/, '') + '…')
-    : '';
-  const text = (motivo ? [head, motivo, link].join(' ') : base).slice(0, 300);
+  const text = `Atencion: ${who} necesita que lo atiendas.`;
   await sendZavuAlert(settings.alert_phone, text, {
     idempotencyKey: `handoff-alert:${ticket.id}`,
     subject: ticket.kind === 'owner_alert' ? 'Un cliente necesita que lo convenzas' : 'Un cliente pide hablar contigo'

@@ -29,7 +29,15 @@
     "policy": {
       "use_only_approved_facts": true,
       "unknown_fact_behavior": "admit_unknown_and_offer_handoff"
-    }
+    },
+    "required_mentions": [
+      {
+        "id": "urgencia",
+        "when": "(me ca[ií]|ca[ií]da|golpe|accidente|choque|torc[ií])[^.?!]{0,70}\\b(ayer|hoy|anoche|reci[eé]n|hace (un[oa]s? )?(horas?|d[ií]as?))\\b|\\bno (puedo|logro|consigo|alcanzo) (mover|caminar|levantar|apoyar|pararme|respirar)|\\b(perd[ií]|pierdo|sin) (la )?fuerza|\\bfiebre\\b|dolor (de|en el) pecho|falta de aire|me (ahogo|cuesta respirar)|adormec\\w*[^.?!]{0,40}(aument|empeor|m[aá]s)|desmay|no siento (la|el|las|los)",
+        "require": "urgencia",
+        "instruction": "el cliente cuenta algo que suena a urgencia (golpe o caída reciente, no poder mover una parte del cuerpo, pérdida de fuerza, fiebre con dolor, dolor de pecho o falta de aire, adormecimiento que aumenta). Antes de seguir, dile en una frase que si el dolor es insoportable o no puede moverse acuda a un servicio de urgencia, y continúa con lo que ibas a decir (la hora o la pregunta por su caso). Nunca lo derives ni lo descartes: sigue siendo paciente de Francisco."
+      }
+    ]
   },
   "project": {
     "stage": "intake",
@@ -206,11 +214,18 @@
         ],
         "rules": {
           "slot_interval_minutes": 30,
-          "minimum_notice_hours": 3,
+          "minimum_notice_hours": 1,
           "maximum_advance_days": 60,
           "require_customer_phone": true,
           "human_handoff_on_conflict": true
-        }
+        },
+        "home_visit_zone": [
+          "Buin",
+          "Linderos",
+          "Paine centro",
+          "Alto Jahuel",
+          "Maipo"
+        ]
       },
       "required_runtime_capabilities": [
         "supabase-postgres",

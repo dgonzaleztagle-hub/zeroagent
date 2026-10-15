@@ -20,5 +20,12 @@ completo** — es la bitácora viva del proyecto, se actualiza en cada hito y no
 - Nunca poner secretos (tokens, service role keys) en memoria de IA en texto plano ni en archivos
   del repo que no estén cubiertos por `.gitignore`. Van en `.env.*` locales, con un puntero (sin
   el valor) en la memoria de sesión si hace falta recordarlos entre conversaciones.
+- **Desde el 01-10-2026 Meta cobra las respuestas del bot por WhatsApp** (antes eran gratis dentro
+  de la ventana de 24 h): US$0,02 por mensaje enviado en Chile, con 1.000 mensajes de servicio
+  gratis por número al mes, y las plantillas de utilidad (recordatorios, confirmaciones) también
+  se cobran desde la primera. Cada cuenta WhatsApp necesita método de pago en Meta o el bot deja
+  de entregar tras los 1.000. Esto entra en **toda cotización** (costo de WhatsApp variable, no
+  fijo) y en el diseño de prompts (menos mensajes = menos costo). Detalle y fuentes en la sección
+  **"Cobro de Meta por WhatsApp · 01-10-2026"** de `PROJECT_CONTEXT.md`.
 - Antes de asumir que algo "ya se puede dar por listo", verificar en el navegador real (Vercel
   real, no sólo `curl`) — es política del proyecto, no una sugerencia.

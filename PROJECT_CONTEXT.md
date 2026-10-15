@@ -2043,3 +2043,286 @@ había vuelto a comprobar.
 **Verificado:** 10/10 pruebas internas, parser probado contra el payload oficial de Zavu. El primer
 eco real posterior al deploy todavía no se ha dado (queda por confirmar en vivo con el próximo
 mensaje que Francisco mande a mano).
+
+## Cobro de Meta por WhatsApp · 01-10-2026
+
+Cambio externo que afecta el costo de operar todos los agentes. Fuente: ebook de Vambe
+(septiembre 2026, basado en documentación de Meta), contrastado con otras guías del mercado
+(ContactShip, Wasapi, Courier, Twinny, Respond.io). La versión de la documentación oficial de Meta
+que se pudo recuperar es anterior a septiembre y no menciona el cobro de servicio, así que no está
+confirmado directamente contra Meta; Meta puede cambiar tarifas hasta cuatro veces al año.
+
+**Qué cambió:**
+- Los mensajes libres que el agente envía dentro de la ventana de 24 h ("mensajes de servicio")
+  pasaron de gratis a cobrarse. Meta da **1.000 gratis por número de teléfono por mes** (no se
+  acumulan); desde el mensaje 1.001 se cobra.
+- Las **plantillas de utilidad** (recordatorios, confirmaciones) enviadas dentro de la ventana
+  también se cobran, desde la primera. El cupo de 1.000 es solo para mensajes de servicio.
+- Marketing y autenticación se cobraban siempre. Lo que escribe el cliente nunca se cobra.
+- **Chile: US$0,02 por mensaje entregado** (servicio = utilidad = autenticación); marketing
+  US$0,0889. Sin descuentos por volumen en servicio. Da igual quién responde (humano o IA) y cambiar
+  de proveedor (Zavu u otro) no evita el cobro.
+- La ventana de 24 h la abre solo el cliente. Anuncios Click-to-WhatsApp: ventana gratuita de 72 h
+  de cualquier categoría, que arranca cuando el negocio responde dentro de las 24 h y solo si el
+  cliente escribió desde la app móvil.
+- **Método de pago:** Meta exige uno registrado en la cuenta de WhatsApp Business. Sin él, entrega
+  los primeros 1.000 mensajes de servicio del mes y deja de entregar los siguientes.
+
+**Consecuencias para este proyecto:**
+1. En toda cotización el costo de WhatsApp se expresa como **variable**: US$0,02 por mensaje
+   enviado sobre los 1.000 gratis al mes por número. Ejemplo: 3.000 mensajes al mes ≈ US$40.
+2. Diseñar prompts y flujos para **minimizar mensajes enviados**: pedir todos los datos en una frase,
+   no repetir confirmaciones, juntar respuestas. Cada mensaje ahorrado es ahorro directo.
+3. Los recordatorios y confirmaciones (nivel B de la cotización de Brimed) son plantillas de
+   utilidad y tienen costo propio. Un canal sin cobro de Meta (correo) puede ser alternativa.
+4. **Pendiente de verificar:** estado del método de pago en la cuenta WhatsApp de franciskom (estaba
+   `setupStatus: NOT_STARTED` el 14-09) y de Rishtedar. Y si Zavu traspasa el cobro de Meta tal cual
+   o agrega recargo (no verificado).
+
+Archivos de apoyo, fuera del repo: `C:\proyectos\cotizaciones\referencias\` (PDF original, su
+texto y una guía para explicárselo a clientes).
+
+## Revisión a fondo de franciskom + blindaje estilo Rishi · 08-10-2026
+
+**Por qué:** revisión de todas las conversaciones atendidas por el bot (71): 17 % correctas,
+32 graves, 4 dañinas. Francisco no paga (Meta, Zavu ni a Daniel) mientras el bot no funcione bien.
+El informe completo, con datos de pacientes, quedó fuera del repo, en el scratchpad de la sesión
+(`revision/INFORME_CONSOLIDADO.md`).
+
+**Causas raíz encontradas:**
+1. Los ecos de Francisco (lo que contesta desde su WhatsApp) **no llegan desde Zavu desde el
+   24-08**: el panel de Zavu muestra "WhatsApp Business App Sync: Not synced". Sin ecos, el bot no
+   sabe qué hilos lleva Francisco y le contesta a sus amigos y pacientes en curso. **Es el
+   bloqueante principal y sigue abierto** (pendiente preguntarle a Zavu; no apretar "Sync" sin
+   decisión de Daniel: puede importar historial, gastar cuota y requiere aprobación en el
+   teléfono de Francisco).
+2. Hechos guardados como prosa en el paquete: una regla interna ("el agente no debe confirmar…")
+   le llegó textual a un paciente.
+3. El runtime anulaba el `no_intervenir` del modelo cuando el mensaje traía "?".
+4. El modelo calculaba los días de la semana ("mañana viernes" dicho un miércoles).
+5. Bugs de cableado: el reclaim de handoff no leía `updated_at` (28 hilos pegados en handoff),
+   414 audios, imágenes y stickers descartados sin guardarse, y el segundo bloque oficial nunca
+   salía.
+
+**Qué se hizo (commits 334be74 y f72bcd4 en github.com/dgonzaleztagle-hub/franciskom, desplegados,
+y el mismo código en `runtime-template/`):**
+- `za_knowledge_facts` (migración `20261008_knowledge_facts.sql`, aplicada en franciskom) con
+  `visibility` public/internal. Si tiene filas, es la ÚNICA fuente de hechos. Los internos van en un
+  bloque aparte y una guarda de salida bloquea cualquier borrador que los cite. Sembrados 11 hechos
+  (3 internos). También se corrigió `za_business_data` ("evaluación" → "sesión", se desactivó el
+  horario parcial) y se sacó la mención de planes con descuento de `za_business_info`; los planes
+  quedan como hecho público: "los conversa Francisco".
+- `src/turn-guards.js`: compuerta de cortesía (ok/gracias/igualmente/despedidas sin oferta
+  pendiente → silencio; un saludo o primer contacto siempre se contesta), guarda de filtración,
+  frases repetidas eliminadas, "mañana <día>" corregido, tabla de próximos días en el prompt y
+  `dia` resuelto en código en `get_availability`.
+- `get_availability.fuera_de`: los horarios que el cliente no puede se filtran en código (con la
+  regla solo en el prompt, luna los ignoraba 2 de cada 3 veces).
+- `responder_textual.ademas`: precio y ubicación en el mismo turno.
+- Cualquier eco del dueño (texto, audio, sticker, imagen) silencia el hilo 12 h. El reclaim cuenta
+  desde lo más reciente entre el último mensaje del dueño y el paso a handoff.
+- Audios e imágenes entrantes se guardan como "[audio]"/"[imagen]". La respuesta fija ("no puedo
+  escuchar audios…") se envía solo donde el bot lleva el hilo.
+- Reentregas tardías de Zavu detectadas con `data.providerTimestamp`. OJO: el `timestamp` del sobre
+  es la hora de despacho, no sirve para esto.
+- Cambio o cancelación de una hora que no está en el sistema (agendada por fuera) → aviso
+  automático al dueño. Antes el bot decía "no aparece tu reserva" y no avisaba a nadie.
+
+**Cómo se verificó:** un banco de replay con 13 casos reales, corrido 2 veces cada uno contra la BD
+real en `dryRun` (las herramientas que escriben se simulan), con el mismo modelo de producción
+(gpt-5.6-luna): todo pasa. El script está en el scratchpad de la sesión
+(`tools/replay.mjs`, tiene textos de pacientes y no va al repo). npm test y test:zavu-delivery
+también pasan.
+
+**No verificado todavía:**
+- Las consolas PC y móvil en el navegador real: piden PIN y no corresponde que Claude lo ingrese.
+- Tráfico real posterior al deploy.
+
+**Pendientes, en orden:**
+1. Ecos de Zavu (bloqueante).
+2. SMS de alertas al dueño: 15 de 35 no llegaron; investigar al final, por decisión de Daniel.
+3. Cuota gratis de Zavu: 2.000 mensajes al mes incluyendo los entrantes, se agota cerca del
+   16-20 de octubre.
+4. Pasar `literal_replies` a la BD.
+5. Drift de `agent.name` en `runtime-template/agent-package.json`.
+
+### Actualización 08-10-2026 (tarde): despliegues posteriores, ecos, SMS y cuota
+
+- **Desplegado en franciskom:** `9326cb5` (emoji suelto ya no se contesta; `reactionOnly` en la compuerta de cortesía) y `7f56de7` (alertas SMS al dueño: solo `Atencion: <nombre> <telefono> necesita que lo atiendas.`, sin acentos, sin link ni motivo, 1 segmento; `toGsmSafe` en `sendZavuAlert` limpia cualquier SMS a GSM-7 y corta a 160). Antes las alertas eran Unicode de 3 segmentos (US$0,084) y no había entrega confirmada desde el 14-09 (37 SMS: 21 delivered, 13 failed, 3 sending).
+- **Cuota Zavu (corregido con el panel):** el plan Free cuenta TODO lo que entra y sale, no solo lo enviado. Foto del 08-10: 834/2.000 (769 recibidos, 65 enviados), casi todo tráfico personal de Francisco en coexistencia. Ritmo ~104/día: tope hacia el 19-20 de octubre. Qué hace Zavu al llegar al tope no está confirmado (se asume que el bot queda ciego). Entra en la cotización de todo cliente en coexistencia.
+- **Ecos: nunca llegaron.** La IA de Zavu dice que no dependen del Sync y que la conexión no los emite; el soporte humano no existe en Free. El silencio de 12 h por eco está construido pero inactivo. Decisión de Daniel: por ahora Francisco pausa el bot a mano desde el dashboard; no se toca el Sync sin su OK.
+- **Daniel avisó a Francisco** de la cotización grupal de 10 personas (handoff de las 15:33 sin respuesta a las 16:45).
+- **Pendiente (al 08-10):** revisar el tráfico real cada día para medir la tasa de conversaciones correctas (línea base 17 %); confirmar que el SMS corto llega; consolas PC/móvil (piden PIN); `literal_replies` a la BD; drift de `agent.name`; actualizar el template en el repo zeroagent (cambios sin commitear).
+
+### Auditoría post-arreglos · 11-10-2026
+
+Cuatro auditores en paralelo (conversaciones, ecos/handoff/alertas, reservas/Calendar, código/drift/replay)
+sobre el tráfico del 08-10 al 11-10 con producción en 7d0e7ae. Informe con datos de pacientes fuera del repo:
+scratchpad de la sesión 98827f48, `audit/INFORME_CONSOLIDADO.md` (+ informe_A..D, replay en `tools/replay.mjs`,
+ahora apuntado al código de producción y con red de escritura bloqueada).
+
+- **Ecos: llegan desde el 09-10 22:52Z, 1:1 con Zavu.** No cambió nada de nuestro lado; preguntar a Zavu qué cambió.
+  El silencio por eco funciona y es la mejora más visible.
+- **Calidad cuando el bot habla: sin cambio neto.** 18 conversaciones con bot: 3 correctas (17 %), 6 graves, 1 dañina
+  (graves 45 % → 33 %). Los errores ahora son acciones sobre reservas/fechas. 7d0e7ae sin validar (4 conversaciones).
+- **P0:** 0 SMS al dueño desde 7f56de7 (revisar logs Vercel); el saludo automático de WhatsApp Business entra como
+  eco y deja mudo al bot con prospectos nuevos; cuota Zavu 1.195/2.000 → tope 15-18-10.
+- **P1:** `cancel_appointment` sin guarda en código y sin aviso al dueño (anuló una hora ante "le confirmo mañana");
+  cancelación silenciosa cuando sale un bloque oficial en el mismo turno; RUT dado tras agendar no se guarda
+  (`za_update_customer_intake` pisada por 09f0aa9 al reaplicar `agenda-v1-customer-records.sql`); carrera eco/bot
+  (estado no se relee tras la espera de 12 s); ecos entran al historial como "assistant"; vuelta a las 12 h en hilos
+  personales; modalidad box/domicilio nunca preguntada; sin feriados.
+- **Drift:** `runtime-template/` tiene el mismo `src/` que producción pero SIN commitear (turn-guards.js y la
+  migración 20261008 fuera de git); `agent-package.json` de la plantilla desactualizado.
+- **Preguntas para Francisco:** regla ante "le confirmo mañana"; feriados; datos de transferencia; quiropráctico sí/no;
+  preguntar siempre box/domicilio; si mantiene el saludo automático.
+
+### Arreglos 1-6 post-auditoría · 11-10-2026
+
+Decisiones de Daniel (11-10): el SMS no es grave (basta con el aviso en el panel; las notificaciones push
+quedan pendientes, Francisco usa iPhone → hay que instalar la consola en la pantalla de inicio); la cuota de
+Zavu no preocupa (primero mostrar que el bot sirve); en el primer contacto el bot habla siempre, aunque sea un
+amigo (para eso está el botón de silenciar); ante "le confirmo mañana" la hora SE GUARDA; feriados y datos
+de transferencia, por ahora no se tocan; "quiropráctico" lo confirma Daniel con Francisco; box o domicilio
+se pregunta SIEMPRE antes de agendar; el saludo automático de WhatsApp Business se mantiene y el bot lo
+reconoce y sigue.
+
+1. **RUT:** `za_update_customer_intake` restaurada con RUT (migración `20261011_customer_intake_rut_restore`,
+   aplicada en franciskom) y devuelve `stored_fields`; `update_customer_profile` ya no dice "guardado" si la base
+   no lo guardó. El archivo base `agenda-v1-customer-records.sql` quedó idéntico a la migración (reaplicarlo con
+   la versión vieja fue lo que lo borró el 08-09). RUT recuperados a mano: Eladio y Claudia; el de Belén no (es
+   el de su pareja, el paciente). Se agregó al repo franciskom la migración `20260902_service_travel_buffer`, que
+   estaba aplicada en la BD pero faltaba en el repo. Herramienta para detectar funciones SQL desfasadas:
+   `scratchpad/tools/fncheck.mjs` (sesión 98827f48).
+2. **Cancelaciones:** candado en código (`cancelRequestedByClient` en engine.js): solo se anula si el cliente usa
+   palabras de anular/cancelar o contesta que sí a un "¿te la anulo?". Si no, la herramienta responde
+   `kept_booking`, el bot dice que la guarda y Francisco recibe aviso. Toda cancelación y todo cambio de hora
+   hecho por el bot genera aviso (`owner_alert`) en la Bandeja. Con hora tomada, un bloque oficial ya no sale
+   solo si en ese turno se anuló o cambió la hora (antes el paciente recibía solo el mapa).
+3. **Saludo automático:** un eco que llega ≤2,5 s después del mensaje del cliente (medido: saludo 0,2-0,4 s,
+   Francisco en persona ≥4,6 s), o con el texto de un saludo ya reconocido, se guarda como `sender_type='system'`
+   y NO pasa el hilo a handoff. Si el cliente solo saludó, el bot calla ese turno (el saludo ya preguntó qué le
+   pasa); si traía una consulta, el bot responde sin volver a saludar. Los 2 saludos ya guardados se
+   reclasificaron. Las consolas lo muestran como "Saludo automático".
+4. **Carrera e historial:** el estado del hilo se vuelve a leer después de la espera de 12 s y después de generar
+   la respuesta (si Francisco entró en ese rato, no se envía, salvo que el turno haya tomado o cambiado una hora).
+   En el historial del modelo, cada mensaje de Francisco lleva antes una nota "lo escribió Francisco en persona".
+5. **Consola PC:** la grilla cubre el horario real (reglas de disponibilidad + reservas fuera de él, antes fija
+   9-18) y no muestra canceladas.
+6. **Modalidad:** si el catálogo tiene servicios en sede y a domicilio, `create_appointment` se bloquea hasta que
+   el cliente haya dicho la modalidad o el bot la haya preguntado. Con hora en la sede, "la sesión es en mi casa"
+   ya no recibe el mapa: el bot pide la dirección y avisa a Francisco (cambiar la modalidad de una cita lo hace él).
+7. **Más reglas, agregadas por lo que encontró el replay (mismo día):**
+   - un turno que tomó, cambió o anuló una hora nunca termina en silencio (`changedBookingThisTurn`: se le niega
+     `no_intervenir` y, si el modelo no logra redactar, se manda un aviso fijo tipo "Tu hora del X quedó anulada").
+   - Una sesión a domicilio no se agenda sin dirección (`ask_address`), y quien pidió domicilio no queda agendado
+     en el box (`wrong_mode`).
+   - Ante "le puedo confirmar mañana" con hora tomada, el bot no calla: dice que la guarda y avisa a Francisco.
+   - Con hora tomada, cuando la paciente duda del lugar ("me equivoqué", "esa no es la dirección") o pide agendar
+     en otra sede, el bot nombra su hora y le pregunta "¿te la mantengo o te la anulo?". Francisco recibe aviso.
+   - Las preguntas sin "?" ("Es quiropráctico verdad") ya no se toman como cierre.
+   - "Tu hora sigue agendada" con la hora en el contexto ya no se reemplaza por "No pude confirmar esa operación".
+8. **Verificación:** banco de replay (`scratchpad/tools/replay.mjs`, escrituras bloqueadas). Run 2: 10 fallos,
+   run 5: 85/85 pasan. Solo falla el feriado del lunes 12, que es documental y por decisión no se toca.
+   `npm test` en verde. **Desplegado** en franciskom, commit `0165f8e` (READY en Vercel 11-10-2026 03:24 CL);
+   franciskom.cl y /m/ cargan sin errores de consola. Lo que todavía NO se vio en real: un eco o saludo nuevo
+   guardado como system y una cancelación real con aviso. Revisar en la próxima pasada por la BD.
+   runtime-template quedó sincronizado con los mismos archivos, sin commit (hay otro trabajo sin commitear ahí).
+9. **Ojo, "quiropráctico":** el propio sitio franciskom.cl dice "Kinesiología, Quiropraxia y Osteopatía". El
+   hecho actual "no se presenta como quiropráctico" lo contradice. Está pendiente la confirmación de Daniel con
+   Francisco.
+
+### Respuestas de Francisco y revisión de la Bandeja · 12-10-2026
+
+**Francisco (vía Daniel, 12-10):**
+1. Se presenta como "Francisco Martínez, Kinesiólogo, Quiropráctico y Osteópata" (más largo, pero le da más
+   valor). Hay que cambiar el hecho "no se presenta como quiropráctico".
+2. Si el paciente no confirma una hora guardada, lo ideal es que el bot le escriba para recordarle. Queda para
+   cuando Francisco pague Meta, porque necesita plantilla de utilidad y tiene costo.
+3. Atiende feriados según su disponibilidad. En general sí trabaja, así que no se hace nada.
+
+**Lo que se vio en la Bandeja (medido en la BD el 12-10):**
+- El hilo pasa a handoff con el eco de Francisco y solo se devuelve al bot cuando el cliente vuelve a escribir
+  (`reclaimStaleHandoff` corre únicamente en el webhook). Por eso la Bandeja muestra como "Necesita persona"
+  hilos de hace días: 17 por "Francisco está respondiendo", más ~25 traspasos de septiembre que nunca se
+  cerraron.
+- Los contactos silenciados también salen como "Necesita persona". Hay 4 así, entre ellos Daniel y Mamita.
+- Amorchito (esposa de Francisco) no está silenciada, y el bot alcanzó a escribirle una vez.
+- "Sugerir dato" / "Correcciones pendientes" muestran 3 sugerencias y 2 correcciones `[DEMO]` sembradas el
+  01-08, más 1 corrección real del 02-09 ("debe pedir nombre completo, rut y correo") que nunca se marcó.
+- "El bot sigue cuando atiendo": en la BD, desde que llegan los ecos (09-10), el bot no habló ni una vez después
+  de un mensaje de Francisco. Lo que sí pasa es que el bot contesta primero (en ~12 s) y Francisco entra después:
+  hubo 3 hilos así, con el bot hablando en los 30 min anteriores.
+
+**Hecho el 12-10 (franciskom `75330f5`, desplegado, READY):**
+- `conversationAttention` en `conversations.js` es la regla única para las dos consolas: `needs_person` /
+  `owner_handling` / `muted` / `bot`. Silenciados, hilos donde Francisco escribió último y handoffs vencidos
+  (12 h) dejan de contar como pendientes. Es solo lectura: la devolución real al bot sigue siendo
+  `reclaimStaleHandoff` cuando el cliente escribe. Con datos reales, el badge pasa de 21 a 0 (3 "Lo estás
+  atendiendo", 6 silenciados).
+- Clientes: ordenados por última conversación (`last_contact_at`), con "escribió <fecha>" en ambas consolas.
+- Dato `kf-formacion` (BD y `agent-package.json`): "Kinesiólogo, Quiropráctico y Osteópata"; si preguntan si
+  es quiropráctico, la respuesta es sí. El replay pasa.
+- BD: Amorchito (esposa) silenciada. Se borraron las 3 sugerencias y las 3 correcciones `[DEMO]` del 01-08. La
+  corrección real del 02-09 quedó marcada como resuelta (hoy se exige nombre y apellido y se piden RUT y correo).
+- runtime-template sincronizado (sin commit). No verificado por dentro de la consola: requiere el PIN, lo revisa
+  Daniel en su teléfono.
+- **Más tarde el 12-10 (`3a89a22`, desplegado):**
+  - `za_conversations.updated_at` solo cambia con el estado del hilo, no con los mensajes. Por eso la Bandeja
+    (top 40) podía dejar fuera hilos activos, y Clientes salía desordenado. Ahora `conversationActivity()` usa
+    el último mensaje de cada conversación, y lo comparten Bandeja y Clientes.
+  - Las consolas muestran la hora del último mensaje, y la de PC marca "Silenciado" igual que la móvil.
+  - **Verificación de UI sin PIN:** `scratchpad/tools/ui-mock.mjs` (sesión 98827f48), que en launch.json es
+    "franciskom-consola-solo-lectura". Sirve las consolas del clon en localhost:8091 con datos reales, solo
+    lectura, y responde 403 a todo lo que no sea GET. Nunca usar el PIN de producción. Las dos consolas se
+    revisaron así.
+
+## Aviso mínimo de franciskom 3 h → 1 h · 14-10-2026
+
+- Caso: Susana pidió hora "hoy" a las 16:04 y el bot dijo "no quedan horas"; Francisco sí tenía 17:00/18:00. Causa: `minimum_notice_hours: 3` en `agent-package.json` escondía todo lo anterior a las 19:04 (y la política de cancelación "3 horas antes" es otra cosa, no se tocó).
+- Cambio: 3 → 1 en el repo de franciskom (commit 622531d, desplegado READY en Vercel) y en `runtime-template/agent-package.json`. El valor viaja como parámetro a la RPC `za_available_slots`, no hay nada que cambiar en Supabase.
+- Verificado con consulta real a las 16:24: Box Buin devuelve 17:30–20:00 y domicilio 17:30–19:30. Sin filtrar por Google Calendar (no hay credenciales OAuth en local), así que si Francisco tiene eventos esa tarde en Calendar, esas horas igual se descartan en producción.
+
+## Idea en brainstorm: flujo de nodos + comparación con el bot actual · 14-10-2026
+
+- Origen: reel de arin_darcan (agente de voz con flujo de nodos: Saludo → Servicio → Alcance → Estilo → Datos → Presentar dueño → Cierre, más un nodo GLOBAL "Pricing Question" que interrumpe desde cualquier etapa y vuelve). Daniel quiere un flujo genérico de decisión, no sólo para franciskom: franciskom es el cliente 0 y lo que se cure ahí es la base para clientes nuevos.
+- Idea acordada (aún sin construir): copia aparte dentro de Zero con el flujo de franciskom como etapas + nodos globales, sin tocar producción; correr los mismos casos del banco de replay (aciertos y fallos reales) contra el motor actual y el de flujo, y comparar. Riesgos anotados: separar casos de diseño y de prueba (para no sobreajustar), correr cada caso 2 veces, reproducir las reglas acumuladas de `engine.js`/`turn-guards.js` es el trabajo grande.
+- Banco de replay: `tools/replay.mjs` (31 casos, última versión del 12-10) estaba sólo en el scratchpad de la sesión 98827f48; copia guardada en `storage/vault/replay-franciskom/replay.mjs` (gitignorado, tiene textos de pacientes). Lee `.env.franciskom` de runtime-template y corre en `dryRun`.
+- Mismo día: aviso mínimo de franciskom 3 h → 1 h (ver sección anterior).
+
+## Resultado del experimento "flujo de nodos" · 14-10-2026
+
+Informe completo: `experimentos/flujo-nodos/INFORME.md` (código en `flow.js`; banco y logs en `storage/vault/replay-franciskom/`, gitignorado).
+
+- **Veredicto:** el flujo NO reemplaza al bot actual hoy. Banco original (84 turnos): actual 82, flujo v1 79, flujo ajustado 82, flujo sin guardas de etapa 78. Casos nuevos (22 turnos): actual 14, flujo v1 18, flujo ajustado 17. Gana en reglas de situación (urgencia, freno de plata), pero agrega un punto de falla nuevo: el detector de etapa (3 bugs propios hallados y corregidos). Las guardas de código siguen valiendo.
+- **Uso recomendado:** nodos + situaciones globales como formato de construcción para clientes nuevos, con banco de pruebas propio desde el día uno.
+- **Defectos del bot ACTUAL de franciskom que salieron del experimento (pendientes, no arreglados):**
+  1. "¿Hasta qué hora atienden?" se trata como pedido de hora: responde el horario y ofrece horas de inmediato (la palabra "hora" dispara `ASKS_FOR_HOURS` en `engine.js`); la regla de Francisco es pregunta cercana primero, sin horas.
+  2. Domicilio fuera de zona (ej. Isla de Maipo): ofrece horas a domicilio en vez de ofrecer el Box Buin y avisar a Francisco.
+  3. Ante un relato de urgencia (caída, no puede mover la pierna) no menciona acudir a urgencias (0 de 2).
+- Pendiente además: medir tokens/costo por turno y armar un banco independiente más grande antes de decidir algo más.
+
+## Arreglo de los 3 defectos del bot de franciskom · 14-10-2026
+
+Desplegado en franciskom (commit `b993058`, Vercel READY, franciskom.cl 200) y backport hecho en `runtime-template/` (sin commitear: ese árbol ya traía cambios sin commitear de otras sesiones).
+
+1. **"¿Hasta qué hora atienden?" ya no cuenta como pedido de hora** (`engine.js`: `OPERATING_HOURS_QUESTION` se quita antes de evaluar `ASKS_FOR_HOURS`) + guarda nueva: a quien sólo hizo una pregunta seca y aún no cuenta su dolor no se le ofrecen horas (`premature_hours_offer`, un reintento).
+2. **Domicilio fuera de zona**: `solutions.agenda.config.home_visit_zone` (franciskom: Buin, Linderos, Paine centro, Alto Jahuel, Maipo). `get_availability` y `create_appointment` reciben `comuna`; el código exige que esté en la zona Y que la haya dicho el cliente (el modelo se había inventado "Buin" para pasar la compuerta). Fuera de zona → `outside_zone`: ofrece Box Buin y avisa a Francisco. "Paine" a secas → pide el sector. Studio: `server.js` ahora deja pasar `home_visit_zone`, pero NO tiene campo en la UI.
+3. **Urgencia**: mecanismo genérico `agent.required_mentions` (`when`/`require`/`instruction`) verificado en código con un reintento; franciskom define `urgencia`. Ojo: el paquete entregado vive en el repo de franciskom; si Studio regenera `agent-package.json`, estos campos (agent.required_mentions y config.home_visit_zone en UI) hay que reponerlos.
+
+**Verificación** (banco de replay con el código real, 2 corridas por caso, dryRun, 0 escrituras): los 3 casos de defecto pasan 2/2 (antes 0/2), más 3 casos nuevos (domicilio en zona, domicilio sin comuna, pregunta seca de ubicación) 2/2. Banco original: 82 → 81 de 86; las diferencias son ruido o redacción (pilar-modalidad-respondida es inestable en el código ANTERIOR también: 2/5 base vs 3/5 con el arreglo; D-a2 falló por la palabra "considerada" en la respuesta, con la hora guardada correctamente). `npm test` pasa en ambos árboles.
+
+### Medición del acierto con tráfico real · 14-10-2026
+
+Tráfico del 11-10 09:00 al 14-10 (26 hilos, 12 con respuesta del bot; clasificación leída a mano, misma vara
+del 08-10). Datos de pacientes fuera del repo (scratchpad de la sesión 0615a0c2: `brief.txt`, `pull.mjs`).
+
+- **Resultado: 5 correctas (42 %), 4 menores, 3 graves (25 %), 0 dañinas.** Línea base 11-10: 17 % correctas, 33 % graves.
+  Muestra chica (12) y mezcla de antes/después de los arreglos del 14-10; no es comparable al 71 de la base.
+- **Graves:** (1) "Francisco no realiza sesiones para mascotas" repetido dos veces: dato inventado (no hay hecho
+  sobre mascotas) y Francisco sí evaluó a la perrita; (2) "hoy no quedan horas" con horas libres (aviso mínimo 3 h,
+  arreglado 14-10); (3) paciente pidió "hoy" y "jueves pm", el bot ofreció jueves 12:00 dos veces (mismo origen del aviso).
+- **Menores:** horas ofrecidas justo tras "valores" sin pregunta de dolor (rompe el ritmo de venta); horas de inmediato
+  ante un caso neurológico; respondió a RedSalud (tercero) y a una campaña automática; saludo doble con "Mucho gusto, Susana".
+- **Pendiente derivado:** regla general "si el dato no está en los hechos, no lo niegues ni lo inventes: avisa al dueño";
+  corregir ritmo tras pregunta de precio; no hablar a mensajes de campaña/tercero.

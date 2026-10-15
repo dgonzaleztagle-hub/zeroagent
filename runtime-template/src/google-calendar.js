@@ -421,7 +421,19 @@ export async function createGoogleCalendarEvent({ summary, description, startIso
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(result.error?.message || `Google respondió ${response.status} al crear el evento.`);
-  return { eventId: result.id, calendarId };
+  // Google devuelve el evento creado: si pedimos un color y no quedó, se reintenta una vez con PATCH
+  // y se deja constancia en el log. Francisco usa los colores para distinguir el tipo de atención.
+  if (colorId && String(result.colorId || '') !== String(colorId)) {
+    console.error(`[calendar] el evento ${result.id} quedó con color "${result.colorId || 'ninguno'}" y se pidió "${colorId}"; se corrige.`);
+    await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(result.id)}`, {
+      method: 'PATCH',
+      headers: { authorization: `Bearer ${ctx.accessToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ colorId })
+    }).catch(error => console.error('[calendar] no se pudo corregir el color:', error.message));
+  } else if (colorId) {
+    console.log(`[calendar] evento ${result.id} creado con color ${result.colorId}.`);
+  }
+  return { eventId: result.id, calendarId, colorId: result.colorId || null };
 }
 
 // Sólo actualiza el evento que NOSOTROS creamos (por eventId propio) — nunca busca ni toca

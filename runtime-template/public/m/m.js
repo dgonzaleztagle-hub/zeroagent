@@ -59,9 +59,13 @@ function appointmentQueues(now = Date.now()) {
     overdue: items.filter(item => appointmentIsExpired(item, now)).sort((a, b) => a.starts_at.localeCompare(b.starts_at)),
   };
 }
+// El servidor decide qué le toca al dueño (conversationAttention): silenciados, hilos que ya está
+// contestando y traspasos vencidos no cuentan como pendientes.
+const needsPerson = item => item.attention ? item.attention === 'needs_person' : (item.needs_human || item.status === 'handoff');
+const ATTENTION_LABEL = { needs_person: ['open', 'Necesita persona'], owner_handling: ['owner', 'Lo estás atendiendo'], muted: ['resolved', 'Silenciado'], bot: ['resolved', 'IA atendiendo'] };
 function openHumanCases() {
   const conversations = state.inbox?.conversations || [];
-  if (conversations.length) return conversations.filter(item => item.needs_human || item.status === 'handoff').map(item => ({ kind: 'conversation', item }));
+  if (conversations.length) return conversations.filter(needsPerson).map(item => ({ kind: 'conversation', item }));
   return (state.handoffs || []).filter(item => item.status === 'open').map(item => ({ kind: 'ticket', item }));
 }
 function terminology() {
@@ -417,11 +421,15 @@ document.addEventListener('click', async event => {
   if (event.target.closest('#clientes-bulk-mute')) {
     const ids = [...state.customerSelected];
     if (!ids.length) return;
+    const bulkBtn = $('#clientes-bulk-mute');
+    bulkBtn.disabled = true; bulkBtn.textContent = 'Silenciando…';
     try {
       await api('/api/client/customers', { method: 'PATCH', body: JSON.stringify({ ids, bot_muted: true }) });
       state.customerSelected.clear();
       await loadClientes();
+      showToast(`Listo: el bot ya no responde a ${ids.length} contacto${ids.length === 1 ? '' : 's'}.`);
     } catch (error) { alert(error.message); }
+    bulkBtn.textContent = '🔇 Silenciar'; bulkBtn.disabled = state.customerSelected.size === 0;
     return;
   }
   const segmentButton = event.target.closest('.segment-picker [data-segment]');
@@ -437,11 +445,17 @@ document.addEventListener('click', async event => {
   const muteButton = event.target.closest('[data-mute-customer]');
   if (muteButton) {
     const customerId = muteButton.dataset.muteCustomer, nextMuted = muteButton.dataset.muted === '1';
+    if (muteButton.disabled) return;
+    muteButton.disabled = true; muteButton.classList.add('saving');
+    muteButton.textContent = nextMuted ? 'Silenciando al bot…' : 'Reactivando al bot…';
     try {
       await api(`/api/client/customers/${encodeURIComponent(customerId)}`, { method: 'PATCH', body: JSON.stringify({ bot_muted: nextMuted }) });
       await loadClientes();
       await openCustomer(customerId);
-    } catch (error) { alert(error.message); }
+      showToast(nextMuted ? 'Listo: el bot ya no le responde a esta persona.' : 'Listo: el bot vuelve a responderle.');
+      const fresh = document.querySelector('[data-mute-customer]');
+      if (fresh) { fresh.classList.add('just-changed'); setTimeout(() => fresh.classList.remove('just-changed'), 1200); }
+    } catch (error) { muteButton.disabled = false; muteButton.classList.remove('saving'); alert(error.message); }
     return;
   }
   const saveCustomer = event.target.closest('[data-save-customer]');
@@ -692,19 +706,19 @@ function ticketHtml(ticket) {
 // el fallback de tickets locales — mismo patrón que ya existía en la consola de escritorio,
 // llevado a móvil (antes acá solo se veían los tickets, nunca el hilo completo).
 function conversationRowHtml(conv) {
-  const when = new Intl.DateTimeFormat('es-CL', { timeZone: tz(), day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(conv.updated_at));
+  const when = new Intl.DateTimeFormat('es-CL', { timeZone: tz(), day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(conv.last_message_at || conv.updated_at));
   const last = [...(conv.messages || [])].slice(-1)[0]?.content || '';
-  const requiresPerson = conv.needs_human || conv.status === 'handoff';
-  return `<div class="ticket-card ${requiresPerson ? 'open' : 'resolved'}" data-conversation="${esc(conv.id)}">
-    <div class="ticket-head"><span class="status-pill ${requiresPerson ? 'open' : 'resolved'}">${requiresPerson ? 'Necesita persona' : 'IA atendiendo'}</span><time>${when}</time></div>
+  const [pillClass, pillText] = ATTENTION_LABEL[conv.attention] || (needsPerson(conv) ? ATTENTION_LABEL.needs_person : ATTENTION_LABEL.bot);
+  return `<div class="ticket-card ${pillClass}" data-conversation="${esc(conv.id)}">
+    <div class="ticket-head"><span class="status-pill ${pillClass}">${pillText}</span><time>${when}</time></div>
     <div class="ticket-msg"><strong>${esc(conv.customer_name || conv.customer_phone || 'Contacto')}${conv.customer_bot_muted ? ' 🔇' : ''}</strong>${esc(last)}</div>
-    ${conv.handoff_reason ? `<div class="ticket-reason">${esc(conv.handoff_reason)}</div>` : ''}
+    ${conv.handoff_reason && needsPerson(conv) ? `<div class="ticket-reason">${esc(conv.handoff_reason)}</div>` : ''}
   </div>`;
 }
 function conversationMessageHtml(conv, message) {
   const when = new Intl.DateTimeFormat('es-CL', { timeZone: tz(), hour: '2-digit', minute: '2-digit' }).format(new Date(message.created_at));
-  const who = message.direction === 'inbound' ? 'Cliente' : message.sender_type === 'human' ? 'Equipo' : 'Agente';
-  const canRate = message.direction === 'outbound' && message.sender_type !== 'human';
+  const who = message.direction === 'inbound' ? 'Cliente' : message.sender_type === 'human' ? 'Equipo' : message.sender_type === 'system' ? 'Saludo automático' : 'Agente';
+  const canRate = message.direction === 'outbound' && message.sender_type === 'agent';
   return `<div class="conv-message ${esc(message.direction)}">
     <small>${who} · ${when}</small>
     <p>${esc(message.content)}</p>
@@ -743,12 +757,11 @@ async function loadBandeja() {
   state.inbox = inboxRes;
   const conversations = inboxRes.conversations || [];
   if (conversations.length) {
-    const requiresPerson = item => item.needs_human || item.status === 'handoff';
-    const needsHuman = conversations.filter(requiresPerson);
+    const needsHuman = conversations.filter(needsPerson);
     const badge = $('#bandeja-badge');
     badge.hidden = !needsHuman.length;
     badge.textContent = needsHuman.length;
-    const ordered = [...needsHuman, ...conversations.filter(item => !requiresPerson(item))];
+    const ordered = [...needsHuman, ...conversations.filter(item => item.attention === 'owner_handling'), ...conversations.filter(item => !needsPerson(item) && item.attention !== 'owner_handling')];
     $('#bandeja-list').innerHTML = ordered.map(conversationRowHtml).join('');
     renderHoy();
     return;
@@ -866,7 +879,7 @@ function clienteRowHtml(customer) {
   return `<div class="row-with-check">
     <label class="row-check"><input type="checkbox" ${state.customerSelected.has(customer.id) ? 'checked' : ''} onclick="toggleCustomerSelect('${esc(customer.id)}',this.checked)"></label>
     <button class="row-card" data-customer="${esc(customer.id)}">
-      <span class="row-main"><strong>${esc(customer.full_name || 'Sin nombre')}${customer.bot_muted ? ' 🔇' : ''}</strong><small>${esc(customer.phone)} · última visita: ${esc(last)}</small></span>
+      <span class="row-main"><strong>${esc(customer.full_name || 'Sin nombre')}${customer.bot_muted ? ' 🔇' : ''}</strong><small>${esc(customer.phone)}${customer.last_contact_at ? ` · escribió ${esc(dayFmt(customer.last_contact_at))}` : ''}${customer.last_visit ? ` · visita ${esc(last)}` : ''}</small></span>
       <span class="segment-badge ${esc(customer.segment)}">${esc(segmentLabel(customer.segment))}</span>
     </button>
   </div>`;
@@ -883,9 +896,13 @@ function renderClientesList() {
   $('#clientes-list').innerHTML = filtered.length ? filtered.map(clienteRowHtml).join('') : '<div class="empty">Sin contactos que coincidan.</div>';
   const bar = $('#clientes-bulk-bar');
   if (bar) {
-    bar.hidden = state.customerSelected.size === 0;
+    const n = state.customerSelected.size;
+    bar.classList.toggle('idle', n === 0);
+    const mute = $('#clientes-bulk-mute'), clear = $('#clientes-bulk-clear');
+    if (mute) mute.disabled = n === 0;
+    if (clear) clear.hidden = n === 0;
     const count = $('#clientes-bulk-count');
-    if (count) count.textContent = `${state.customerSelected.size} seleccionado${state.customerSelected.size === 1 ? '' : 's'}`;
+    if (count) count.textContent = n ? `${n} seleccionado${n === 1 ? '' : 's'}` : 'Marca contactos con el cuadrito para silenciar al bot en varios a la vez';
   }
 }
 function toggleCustomerSelect(id, checked) {

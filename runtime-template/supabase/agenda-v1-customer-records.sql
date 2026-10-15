@@ -49,6 +49,8 @@ drop trigger if exists za_customer_record_correction_guard on public.za_customer
 create trigger za_customer_record_correction_guard before insert on public.za_customer_record_entries
 for each row execute function public.za_validate_customer_record_correction();
 
+-- Mantener idéntica a la última migración que la redefine (hoy 20261011_customer_intake_rut_restore):
+-- reaplicar este archivo con una versión vieja ya borró el RUT una vez (08-09-2026).
 create or replace function public.za_update_customer_intake(
   p_phone text,
   p_fields jsonb,
@@ -68,6 +70,7 @@ declare
   v_label text;
   v_entry_id uuid;
   v_entries jsonb := '[]'::jsonb;
+  v_stored jsonb := '[]'::jsonb;
 begin
   if p_source not in ('whatsapp', 'client_console', 'import', 'manual') then
     raise exception 'Fuente de admisión no autorizada';
@@ -83,6 +86,7 @@ begin
     email = coalesce(nullif(trim(p_fields->>'email'), ''), email),
     age = coalesce(case when (p_fields->>'age') ~ '^\d{1,3}$' then (p_fields->>'age')::integer end, age),
     occupation = coalesce(nullif(trim(p_fields->>'occupation'), ''), occupation),
+    rut = coalesce(nullif(trim(p_fields->>'rut'), ''), rut),
     medical_history = case
       when nullif(trim(p_fields->>'medical_history'), '') is null then medical_history
       when medical_history is null or trim(medical_history) = '' then trim(p_fields->>'medical_history')
@@ -98,13 +102,15 @@ begin
     updated_at = now()
   where id = v_customer.id;
 
-  foreach v_key in array array['email','age','occupation','medical_history','extra_symptoms'] loop
+  foreach v_key in array array['email','age','occupation','rut','medical_history','extra_symptoms'] loop
     v_value := nullif(trim(p_fields->>v_key), '');
     if v_value is null then continue; end if;
+    v_stored := v_stored || jsonb_build_array(v_key);
     v_label := case v_key
       when 'email' then 'Correo'
       when 'age' then 'Edad'
       when 'occupation' then 'Ocupación'
+      when 'rut' then 'RUT'
       when 'medical_history' then 'Antecedente declarado'
       when 'extra_symptoms' then 'Información adicional declarada'
     end;
@@ -118,7 +124,7 @@ begin
     ) on conflict (operation_key) do nothing returning id into v_entry_id;
     if v_entry_id is not null then v_entries := v_entries || jsonb_build_array(v_entry_id); end if;
   end loop;
-  return jsonb_build_object('customer_id', v_customer.id, 'entry_ids', v_entries);
+  return jsonb_build_object('customer_id', v_customer.id, 'entry_ids', v_entries, 'stored_fields', v_stored);
 end;
 $$;
 

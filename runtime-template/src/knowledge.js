@@ -24,10 +24,14 @@ async function saveState(packageData, state) {
   await fs.rename(temporary, statePath);
 }
 
-// Lo que el agente ya sabe hoy: viene horneado en el build, de solo lectura desde el runtime.
-// Para cambiarlo de verdad hay que aprobarlo en el Studio y reconstruir — acá el cliente sólo
-// ve el estado actual y puede dejar una sugerencia para que alguien la revise.
-export function currentConfirmedFacts(packageData) {
+// Lo que el agente ya sabe hoy. Si el negocio tiene su conocimiento en za_knowledge_facts, esa es
+// la fuente (la misma que lee engine.js); si no, el que viene horneado en el build. Los criterios
+// internos no se muestran: son reglas de operación, no información para el cliente.
+export async function currentConfirmedFacts(packageData) {
+  if (agendaUsesSupabase()) {
+    const rows = await agendaSupabaseRequest('/rest/v1/za_knowledge_facts?active=eq.true&visibility=eq.public&select=id,category,subject,value&order=category.asc,subject.asc&limit=200').catch(() => null);
+    if (rows?.length) return rows;
+  }
   return (packageData.knowledge?.confirmed_facts || []).map(fact => ({
     id: fact.id, category: fact.category, subject: fact.subject, value: fact.value
   }));
