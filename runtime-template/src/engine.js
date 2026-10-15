@@ -721,6 +721,10 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
         // hilo del dueño, callarse es la decisión correcta aunque el mensaje traiga una pregunta.
         // Mensaje de un sistema o de un tercero (campaña, menú de botones, otra organización): no
         // se contesta. Silencio del runtime, igual que no_intervenir, pero disponible en cualquier hilo.
+        if (name === 'ignorar_mensaje_ajeno' && args?.origen !== 'respuesta_automatica' && args?.origen !== 'otra_organizacion') {
+          answerTool({ ok: false, action: 'answer_instead', message: 'Es una persona que consulta o pide algo: respóndele (si es algo que el negocio no hace, díselo con amabilidad). No te quedes callado.' });
+          continue;
+        }
         if (name === 'ignorar_mensaje_ajeno' && !literalSent && !hasBooking) {
           return {
             text: '', silent: true, silentReason: String(args?.reason || 'mensaje ajeno').slice(0, 300),
