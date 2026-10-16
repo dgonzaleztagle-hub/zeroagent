@@ -373,7 +373,9 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     let closingRetried = false;
     let askFirstRetried = false;
     let dryAskRetried = false;
+    let discoveryRetried = false;
     const mentionRetried = new Set();
+    const forbiddenRetried = new Set();
     let echoRetried = false;
     let leakRetried = false;
     let repeatRetried = false;
@@ -476,8 +478,20 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     const salesContext = toldPain || askedForHours || history.some(item => item.role === 'assistant' && /\$\s?\d/.test(item.content));
     // Ya toca ofrecer horas: pidió hora, ya se le preguntó una vez después de contar su dolor, o
     // no contestó la última pregunta con algo sobre su dolor.
-    const offerDue = askedForHours
-      || (PAIN.test(String(message || '')) ? questionsSincePain >= 1 : lastAssistantAsked && salesContext);
+    // Francisco (16-10-2026): "ya no me está preguntando hace cuánto tiene el dolor ni si tiene un
+    // diagnóstico; le lanza la hora y eso me ha cortado las conversaciones". Aunque la persona haya
+    // pedido hora, si cuenta su dolor primero se conversa una vez (hace cuánto, diagnóstico médico) y
+    // recién después van las horas. No aplica si ya dio ambos datos, si nombra un día (quiere la hora
+    // ya) o si ya se le preguntó algo después de su dolor.
+    const HAS_DURATION = /\b(hace|desde)\b[^.?!]{0,30}\b(d[ií]as?|semanas?|mes(es)?|a[ñn]os?|ayer|anoche)|\b(un|dos|tres|varios|unos|unas)\s+(d[ií]as?|semanas?|mes(es)?|a[ñn]os?)\b|\bmeses\b|\bsemanas\b/i;
+    const HAS_DIAGNOSIS = /diagn[oó]stic|resonancia|radiograf|ecograf|examen|esc[aá]ner|traumat[oó]log|m[eé]dic[oa]|doctor|kinesi[oó]log/i;
+    const WANTS_HOUR_NOW = /\b(hoy|ma[ñn]ana|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado)\b|\bahora\b|altiro|ya mismo|lo antes posible|urgente|s[oó]lo (quiero|necesito) (la |una )?hora|no importa/i;
+    const discoveryDue = toldPain && questionsSincePain === 0 && !hasBooking
+      && !(userTurns.some(text => HAS_DURATION.test(text)) && userTurns.some(text => HAS_DIAGNOSIS.test(text)))
+      && !WANTS_HOUR_NOW.test(String(message || ''))
+      && !(/@/.test(String(message || '')) && /\d{1,2}\.?\d{3}\.?\d{3}-?[0-9kK]/.test(String(message || '')));
+    const offerDue = !discoveryDue && (askedForHours
+      || (PAIN.test(String(message || '')) ? questionsSincePain >= 1 : lastAssistantAsked && salesContext));
     const concreteOfferMade = () => history.some(item => item.role === 'assistant' && HOUR_PATTERN.test(item.content))
       || toolTrace.some(item => item.name === 'get_availability' && item.result?.ok && (item.result.available_slots || []).length);
     // Horas reales para el seguimiento de un bloque oficial, consultadas por el runtime y no por el
@@ -606,6 +620,13 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
         // Una pregunta seca (horario, valor, ubicación) de alguien que aún no cuenta qué le pasa ni pidió
         // hora no recibe horas: se le responde y se le pregunta con cercanía qué le molesta. Antes sólo se
         // vigilaba quien contaba su dolor; el resto dependía de que el modelo lo recordara.
+        if (rawText && agendaEnabled && round < 4 && !discoveryRetried && discoveryDue && !handoffReason && !answeringDataRequest && (HOUR_PATTERN.test(rawText) || toolTrace.some(item => item.name === 'get_availability' && item.result?.ok && /\b\d{1,2}:\d{2}\b/.test(rawText)))) {
+          discoveryRetried = true;
+          rejectDraft('discovery_before_hours', rawText);
+          messages.push({ role: 'assistant', content: rawText });
+          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: todavía no conversaste con la persona sobre su dolor. Antes de ofrecer horas, en UNA sola frase cercana pregúntale lo que falte entre hace cuánto tiene ese dolor y si tiene algún diagnóstico médico o examen; no ofrezcas horas todavía ni hables de diagnóstico ni de urgencias. Las horas van en el mensaje siguiente.' });
+          continue;
+        }
         const dryQuestionNow = !toldPain && !offerDue && !hasBooking && !handoffReason && !answeringDataRequest
           && !history.some(item => item.role === 'assistant' && HOUR_PATTERN.test(item.content));
         const consultedAvailabilityNow = toolTrace.some(item => item.name === 'get_availability' && item.result?.ok && (item.result.available_slots || []).length);
@@ -632,6 +653,25 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           rejectDraft('required_mention_' + mentionRule.id, rawText);
           messages.push({ role: 'assistant', content: rawText });
           messages.push({ role: 'system', content: 'Ese mensaje NO se envió: ' + (mentionRule.instruction || 'falta una mención obligatoria de esta situación.') });
+          continue;
+        }
+        // Lo contrario de required_mentions (package.agent.forbidden_mentions): el borrador dice algo que
+        // sólo corresponde en cierta situación y el cliente no ha dicho nada que la configure. Caso
+        // real (franciskom, 16-10-2026): ante "dolor atroz de cuello" sin ninguna señal de urgencia, el
+        // bot mandó a urgencias a una paciente que sólo quería una hora, contra la regla de agendar todo dolor.
+        const forbiddenRule = (packageData.agent?.forbidden_mentions || []).find(rule => {
+          try {
+            return rule?.id && !forbiddenRetried.has(rule.id)
+              && new RegExp(rule.forbid, 'i').test(rawText)
+              && !userTurns.some(text => new RegExp(rule.unless, 'i').test(String(text || '')))
+              && !history.some(item => item.role === 'assistant' && new RegExp(rule.forbid, 'i').test(item.content));
+          } catch { return false; }
+        });
+        if (rawText && forbiddenRule && round < 4) {
+          forbiddenRetried.add(forbiddenRule.id);
+          rejectDraft('forbidden_mention_' + forbiddenRule.id, rawText);
+          messages.push({ role: 'assistant', content: rawText });
+          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: ' + (forbiddenRule.instruction || 'dice algo que no corresponde a lo que contó el cliente.') });
           continue;
         }
         const oneQuestionTooMany = offerDue && salesContext && /\?/.test(rawText) && !toolTrace.some(item => ['create_appointment', 'reschedule_appointment', 'cancel_appointment'].includes(item.name));

@@ -54,3 +54,38 @@ test('modalidad: preguntar no es elegir', () => {
   assert.equal(modalityEstablished({ ...modalityArgs, history: asked, message: 'a domicilio' }), true);
   assert.equal(modalityEstablished({ ...modalityArgs, offersBothModes: false, history: [], message: 'hola' }), true);
 });
+
+// ---------- Preselección de horas (Francisco, 16-10-2026: no repartir 08:00 / 14:00 / 20:00) ----------
+import { pickSlotShortlist } from '../src/agenda-tools.js';
+
+const daySlots = [];
+for (let minutes = 8 * 60; minutes <= 20 * 60; minutes += 30) {
+  const hh = String(Math.floor(minutes / 60)).padStart(2, '0'); const mm = String(minutes % 60).padStart(2, '0');
+  daySlots.push({ at: `2026-10-17T${hh}:${mm}:00-03:00`, hora_local: `${hh}:${mm}` });
+}
+const at = value => new Date(`2026-10-17T${value}:00-03:00`).getTime();
+const hoursOf = picked => picked.map(slot => slot.hora_local);
+
+test('horas: pegadas a un paciente que ya tiene, no repartidas', () => {
+  const busy = [{ start: at('10:00'), end: at('11:00') }];
+  // Las horas realmente libres no pisan al paciente de 10:00-11:00 (sesión de 60 min).
+  const free = daySlots.filter(s => { const start = new Date(s.at).getTime(); return !(start < busy[0].end && start + 3_600_000 > busy[0].start); });
+  const picked = hoursOf(pickSlotShortlist(free, { busy }));
+  assert.deepEqual(picked, ['09:00', '11:00', '12:00']);
+});
+
+test('horas: sin compromisos, seguidas y en franja cómoda (nunca 08:00 ni 20:00)', () => {
+  const picked = hoursOf(pickSlotShortlist(daySlots, { busy: [] }));
+  assert.deepEqual(picked, ['09:00', '10:00', '11:00']);
+});
+
+test('horas: si el día ya está cargado en los extremos, no ofrece el extremo vacío', () => {
+  const busy = [{ start: at('09:00'), end: at('18:00') }];
+  const picked = hoursOf(pickSlotShortlist(daySlots.filter(s => !(s.hora_local >= '09:00' && s.hora_local < '18:00')), { busy }));
+  assert.ok(picked.includes('18:00'), picked.join());
+  assert.ok(picked.length <= 3);
+});
+
+test('horas: con tres o menos, se ofrecen todas', () => {
+  assert.equal(pickSlotShortlist(daySlots.slice(0, 3), { busy: [] }).length, 3);
+});

@@ -2326,3 +2326,24 @@ del 08-10). Datos de pacientes fuera del repo (scratchpad de la sesión 0615a0c2
   ante un caso neurológico; respondió a RedSalud (tercero) y a una campaña automática; saludo doble con "Mucho gusto, Susana".
 - **Pendiente derivado:** regla general "si el dato no está en los hechos, no lo niegues ni lo inventes: avisa al dueño";
   corregir ritmo tras pregunta de precio; no hablar a mensajes de campaña/tercero.
+
+## Auditoría independiente del bot · 15-10-2026
+
+- Informe: `AUDITORIA_FRANCISKOM_2026-10-15.md`. Auditoría de solo lectura de producción, sin mensajes ni mutaciones reales. GitHub y Vercel coinciden en `69475a3`, posterior a la última bitácora: ya incluye ausencia de dato ≠ negación y descarte de campañas/terceros. La BD también tiene `kf-mascotas`, confirmado por Francisco el 15-10: no reutilizar el antiguo caso como alucinación actual.
+- Evidencia: 47 mensajes del bot en 19 hilos desde el 11-10 09:00 CL; lectura manual de los 10 hilos con bot desde el 13-10 21:00 CL. 24 turnos sintéticos (12 casos × 2), pruebas adversariales de guardas y prueba sintética de error parcial de Calendar. Material privado/reproducción en `storage/vault/audit-franciskom-20261015/`, ignorado por Git.
+- P1 identificados: cancelación admite negaciones e hipótesis; modalidad preguntada cuenta como elegida; hora ofrecida cuenta como seleccionada; Calendar permite confirmar si falla la consulta y no chequea errores por calendario; el descarte por nuevo inbound puede ocultar confirmación de una mutación ya hecha. Los casos forzados prueban la barrera, no incidentes reales.
+- Conversación: cierre comercial demasiado insistente, repetición al agregar antecedentes; fuentes contradictorias (landing 20:00, agenda/conocimiento 21:00; descuentos); aviso al dueño bloqueado hasta ofrecer horas incluso para cotización fuera de zona; datos de pago activos con nota de aprobación pendiente.
+- Pruebas: `npm test` y Zavu offline pasan; 17 migraciones aplicadas 2x pasan en PGlite aislado. `npm test` no usa el motor LLM y dryRun crea éxitos antes de gran parte de la validación real: no usar sus verdes para certificar reservas.
+- Operación: 0 respuestas del bot dentro de 12 h tras mensaje humano en la ventana; 0 reservas nuevas en Supabase desde el 11-10 (no demuestra ausencia de ventas en Calendar externo). Evento fallido reciente corresponde al eco de un mensaje del bot ya entregado, no a un paciente perdido. Mediana de eventos completados 21,88 s; p95 31,88 s. Promedio real de entrada del modelo: 13.911 tokens/turno.
+- Recomendación: conservar infraestructura y rediseñar progresivamente autorización y decisión conversacional; primero reparar integridad y pruebas. No se implementó ni desplegó ninguna corrección. Los ensayos locales no tenían las claves de Calendar: slots sin su filtro; no validan horarios productivos. `runtime-template/src` coincide con producción tras normalizar CRLF; el paquete de la plantilla sigue desfasado.
+
+## Feedback de Francisco · 16-10-2026 (conversar primero, sin urgencias, horas compactas)
+
+Francisco, molesto tras ver respuestas reales del bot, pidió: (1) conversar antes de ofrecer horas aunque el cliente ya haya pedido una (hace cuánto / diagnóstico médico); (2) sacar el envío a urgencias ante expresiones como "dolor atroz"; (3) no ofrecer horas dispersas (08:00/14:00/20:00) sino pegadas a las citas que ya tiene. Su 3ª nota de voz quedó cortada ("no que me las tire con tanta dis…").
+
+Implementado (src idéntico en runtime-template y franciskom):
+- `discovery_before_hours` en `engine.js`: si el cliente contó dolor y aún no hay pregunta de descubrimiento, se reintenta una vez sin horas. No aplica si nombra un día, ya dio duración y diagnóstico, o manda RUT+correo (cierre).
+- `forbidden_mentions` (regla `urgencia_sin_senal` en agent-package.json): "urgencia" sólo si el cliente describe una señal de emergencia real.
+- `pickSlotShortlist` en `agenda-tools.js`: horas agrupadas junto a citas existentes (agenda + Google Calendar), con espaciado mínimo = duración de sesión; penaliza fuera de 09:00–19:00. No verificado con datos reales (Calendar no disponible en local).
+- Otros 15-10: consent guards (cancelar/modalidad/hora), Calendar fail-closed, `kf-mascotas`, horario hasta 21:00.
+- Regresión: banco 83/4 y nuevos 53/2 antes de ajustes; fallas restantes conocidas: D-c-feriado-lunes-12 (tool-step-limit), h-mascotas (~1/6 flake). Los casos antiguos que exigían "hora directa → horas altiro" cambiaron a propósito.

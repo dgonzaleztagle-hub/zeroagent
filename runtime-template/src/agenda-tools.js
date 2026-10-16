@@ -1,6 +1,7 @@
 import { agendaConfig, agendaSupabaseRequest, agendaUsesSupabase, getAgendaDashboard, getAvailableSlots, createAgendaAppointment, updateAgendaAppointment, rescheduleAgendaAppointment, findRiskWindow, isActiveAgendaAppointment, asIso, listUpcomingAppointmentsForPhone } from './agenda.js';
 import { updateCustomerIntakeRecord } from './customer-records.js';
 import { dayLabel } from './turn-guards.js';
+import { getGoogleCalendarBusyIntervals } from './google-calendar.js';
 
 // Match de catálogo tolerante: el LLM puede pasar el nombre con otra capitalización o sin tildes.
 // La relevancia no debe depender de coincidencia textual exacta.
@@ -102,15 +103,37 @@ El texto se manda literal y completo; tú no lo reescribes, no lo resumes y no l
 // sigue disponible en available_slots para validar la hora que pida el cliente.
 const MAX_SLOTS_TO_OFFER = 3; // un vendedor ofrece dos o tres opciones, no la lista entera
 
-function pickSlotShortlist(slots) {
+// Francisco (16-10-2026): repartir las tres horas a lo largo del día (08:00, 14:00, 20:00) le deja la
+// agenda con huecos: lo ideal es ofrecer horas pegadas a las que ya tiene (justo después o justo antes
+// de otro paciente) y evitar los extremos del día. `busy` son los compromisos del día: citas del bot y
+// bloques de Google Calendar, como { start, end } en ms. Sin compromisos ese día se ofrecen horas
+// seguidas dentro de la franja cómoda, no repartidas.
+const EARLY_LIMIT_MINUTES = 9 * 60;
+const LATE_LIMIT_MINUTES = 19 * 60;
+const OUT_OF_COMFORT_PENALTY = 240;
+
+export function pickSlotShortlist(slots, { busy = [], sessionMinutes = 60, minutesOfDay = slot => Number(String(slot.hora_local || '').split(':')[0]) * 60 + Number(String(slot.hora_local || '').split(':')[1] || 0) } = {}) {
   if (slots.length <= MAX_SLOTS_TO_OFFER) return slots;
-  const step = (slots.length - 1) / (MAX_SLOTS_TO_OFFER - 1);
+  const durationMs = sessionMinutes * 60_000;
+  const score = slot => {
+    const start = new Date(slot.at).getTime();
+    const end = start + durationMs;
+    const gap = busy.length
+      ? Math.min(...busy.map(item => Math.min(Math.abs(start - item.end), Math.abs(item.start - end)))) / 60_000
+      : 0;
+    const minutes = minutesOfDay(slot);
+    const comfort = minutes < EARLY_LIMIT_MINUTES || minutes >= LATE_LIMIT_MINUTES ? OUT_OF_COMFORT_PENALTY : 0;
+    return gap + comfort;
+  };
+  const ranked = slots.map((slot, index) => ({ slot, index, value: score(slot) })).sort((a, b) => a.value - b.value || a.index - b.index);
   const picked = [];
-  for (let i = 0; i < MAX_SLOTS_TO_OFFER; i += 1) {
-    const slot = slots[Math.round(i * step)];
-    if (slot && !picked.includes(slot)) picked.push(slot);
+  for (const { slot } of ranked) {
+    const start = new Date(slot.at).getTime();
+    // Distintas entre sí por al menos una sesión: tres horas pegadas ("11:00, 11:30, 12:00") no son tres opciones.
+    if (picked.every(other => Math.abs(new Date(other.at).getTime() - start) >= durationMs)) picked.push(slot);
+    if (picked.length === MAX_SLOTS_TO_OFFER) break;
   }
-  return picked;
+  return picked.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
 }
 
 // Respuestas que el dueño quiere que salgan PALABRA POR PALABRA: precios oficiales, qué incluye
@@ -320,7 +343,24 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
         if (findRiskWindow(packageData, resource.name, slot.at)) slot.requiere_confirmacion = true;
       }
       const closableSlots = availableSlots.filter(slot => !slot.requiere_confirmacion);
-      const shortlist = pickSlotShortlist(closableSlots.length ? closableSlots : availableSlots);
+      const shortlistSource = closableSlots.length ? closableSlots : availableSlots;
+      const busy = [];
+      if (shortlistSource.length > MAX_SLOTS_TO_OFFER) {
+        for (const item of dashboard.appointments || []) {
+          if (!isActiveAgendaAppointment(item) || item.resource !== resource.name || !item.starts_at) continue;
+          const start = new Date(item.starts_at).getTime();
+          const end = item.ends_at ? new Date(item.ends_at).getTime() : start + sessionMinutes * 60_000;
+          if (Number.isFinite(start) && Number.isFinite(end)) busy.push({ start, end });
+        }
+        try {
+          const first = new Date(shortlistSource[0].at).getTime() - 6 * 3_600_000;
+          const last = new Date(shortlistSource[shortlistSource.length - 1].at).getTime() + 6 * 3_600_000;
+          for (const item of await getGoogleCalendarBusyIntervals(new Date(first).toISOString(), new Date(last).toISOString())) {
+            busy.push({ start: new Date(item.start).getTime(), end: new Date(item.end).getTime() });
+          }
+        } catch { /* sin Calendar legible: se arma con las citas del bot */ }
+      }
+      const shortlist = pickSlotShortlist(shortlistSource, { busy, sessionMinutes, minutesOfDay: slot => toMinutes(slot.hora_local) });
       return {
         ok: true, service: service.name, resource: resource.name, date: args.date, timezone: tz,
         // El día ya resuelto en código: el modelo lo copia tal cual en vez de calcular si es "hoy",
