@@ -175,11 +175,22 @@ async function excludeGoogleCalendarBusySlots(slots, durationMinutes, date, time
 // postea un horario escrito a mano directo a createAgendaAppointment sin pasar por ahí antes.
 // Este chequeo corre DENTRO de createAgendaAppointment mismo para cubrir cualquier origen por
 // igual, presente o futuro, en vez de parchar cada diálogo del frontend uno por uno.
-async function assertNotBusyOnGoogleCalendar(startIso, endIso) {
+async function assertNotBusyOnGoogleCalendar(startIso, endIso, source = 'client_console') {
   let busy;
   try {
-    busy = await getGoogleCalendarBusyIntervals(startIso, endIso);
+    try {
+      busy = await getGoogleCalendarBusyIntervals(startIso, endIso);
+    } catch {
+      busy = await getGoogleCalendarBusyIntervals(startIso, endIso);
+    }
   } catch (error) {
+    // Ocupación desconocida no es "libre". Por WhatsApp (nadie mira la reserva en el momento) no se
+    // confirma sola: queda para que Francisco la verifique. Por consola o web pública se permite,
+    // como antes, para no dejar a nadie sin poder reservar si Google tiene un problema pasajero.
+    if (source === 'whatsapp') {
+      console.error('[google-calendar] freebusy check en creación falló, la reserva por WhatsApp NO se confirma:', error.message);
+      throw new Error('No se pudo verificar el Google Calendar de Francisco en este momento, así que la hora NO se agendó. No le confirmes nada al cliente: dile que Francisco le confirma la hora personalmente y avisa al dueño con avisar_al_dueno.');
+    }
     console.error('[google-calendar] freebusy check en creación falló, se permite la reserva sin verificar:', error.message);
     return;
   }
@@ -471,7 +482,7 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
   const riskNote = riskWindow ? `[Franja de riesgo] ${riskWindow.reason || 'Posible compromiso del profesional en otro lugar a esta hora.'} Confirmar disponibilidad real antes de aceptar.` : '';
   const notesWithRisk = [bookedForOther ? `Paciente: ${patientName} (agendó ${customerName})` : '', cleanText(input.notes, 800), riskNote].filter(Boolean).join(' — ').slice(0, 800);
   const checkDurationMinutes = Number(service.duration_minutes) || 30;
-  await assertNotBusyOnGoogleCalendar(startsAt, new Date(new Date(startsAt).getTime() + checkDurationMinutes * 60_000).toISOString());
+  await assertNotBusyOnGoogleCalendar(startsAt, new Date(new Date(startsAt).getTime() + checkDurationMinutes * 60_000).toISOString(), source);
   if (supabaseSettings()) {
     const explicitLocation = dashboard.catalog.locations.find(item => item.name === cleanText(input.location));
     // La sede real de la cita puede venir del recurso (resource.location_id) cuando la reserva

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { executeAgendaTool, getAgendaToolDefinitions, literalReplies } from './agenda-tools.js';
 import { getAgendaDashboard, listUpcomingAppointmentsForPhone } from './agenda.js';
 import { BASE_BEHAVIOR } from './base-behavior.js';
+import { cancelRequestedByClient as cancelRequestedByClientGuard, hourChosenByClient as hourChosenByClientGuard, modalityEstablished as modalityEstablishedGuard } from './consent-guards.js';
 import { AGENDA_BEHAVIOR } from './agenda-behavior.js';
 import { liveInjectedFacts } from './business-data.js';
 import { detectInternalLeak, dropRepeatedSentences, fixRelativeDays, isCourtesyOnly, repeatsLastAgentMessage, upcomingDaysTable } from './turn-guards.js';
@@ -128,7 +129,7 @@ function patternMatchesCompletedClaim(pattern, text) {
 // Un turno que cambió la reserva nunca termina callado: tras anular una hora de verdad, el guard
 // de repetición llevó al modelo a no_intervenir y el paciente no supo que se la anularon
 // (replay 11-10-2026).
-function changedBookingThisTurn(toolTrace) {
+export function changedBookingThisTurn(toolTrace) {
   return successfulAction(toolTrace, 'cancel_appointment', ['cancelled'])
     || successfulAction(toolTrace, 'reschedule_appointment', ['rescheduled', 'rescheduled_needs_manual_confirmation'])
     || successfulAction(toolTrace, 'create_appointment', ['created']);
@@ -439,22 +440,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
       && !/confirm\w*\s+(que\s+)?(s[ií]|voy|asisto|ah[ií]\s+estar|nos\s+vemos)(?![a-záéíóúñ])/i.test(String(message || ''));
     const HOUR_PATTERN = /\b\d{1,2}:\d{2}\b|\ba las \d{1,2}\b/i;
     const lastAssistantText = [...history].reverse().find(item => item.role === 'assistant')?.content || '';
-    const hourChosenByClient = time => {
-      const match = /^(\d{1,2}):(\d{2})/.exec(String(time || '').trim());
-      if (!match) return true;
-      const hour = Number(match[1]); const minutes = match[2];
-      const hours = [hour, hour > 12 ? hour - 12 : null].filter(value => value != null);
-      const mentions = text => hours.some(h => new RegExp(`(^|[^\\d])0?${h}[:.]${minutes}\\b`).test(text)
-        || (minutes === '00' && new RegExp(`\\b(a las|las|tipo|como a las)\\s+0?${h}\\b|\\b0?${h}\\s*(hrs?|horas)\\b`, 'i').test(text))
-        || (minutes === '30' && new RegExp(`\\b0?${h}\\s*y\\s*media\\b`, 'i').test(text)));
-      if (mentions(String(message || '')) || mentions(lastAssistantText)) return true;
-      // Si el último mensaje del agente fue una aclaración sin horas ("¿box o domicilio?"), la hora la
-      // eligió el cliente en el mensaje anterior a esa pregunta.
-      if (HOUR_PATTERN.test(lastAssistantText)) return false;
-      const lastAssistantIndex = history.map(item => item.role).lastIndexOf('assistant');
-      const previousClient = history.slice(0, Math.max(0, lastAssistantIndex)).reverse().find(item => item.role === 'user')?.content || '';
-      return mentions(String(previousClient));
-    };
+    const hourChosenByClient = time => hourChosenByClientGuard({ time, message, history });
     // Box o domicilio se pregunta siempre antes de agendar, si el negocio tiene las dos modalidades.
     // Pilar (franciskom, 09-10-2026) es paciente de domicilio y nunca lo dijo: el bot la agendó en el
     // box por defecto, le mandó el mapa del box, y la cita quedó mal en la base y en el Calendar.
@@ -464,24 +450,12 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     const HOME_VISIT = /domicilio|\b(a|en) (mi |la |su |tu )?casa\b|\bvengan\b|\bvenir a\b|\bmi direcci[oó]n\b/i;
     const normalizeText = value => String(value || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
     const mentionsOnsite = text => /\bbox\b|\bconsulta\b|\bsede\b|\bvoy yo\b|\bvoy para all[aá]\b/i.test(text) || onsiteNames.some(name => normalizeText(text).includes(normalizeText(name)));
-    const modalityEstablished = () => {
-      if (!offersBothModes) return true;
-      const clientTexts = [...history.filter(item => item.role === 'user').map(item => item.content), String(message || '')];
-      if (clientTexts.some(text => HOME_VISIT.test(text) || mentionsOnsite(text))) return true;
-      return history.some(item => item.role === 'assistant' && /domicilio/i.test(item.content) && mentionsOnsite(item.content) && /\?/.test(item.content));
-    };
+    const modalityEstablished = () => modalityEstablishedGuard({ offersBothModes, history, message, homeVisit: HOME_VISIT, mentionsOnsite });
     // Una hora se anula sólo si el cliente lo pidió con esas palabras, o si contesta que sí a un
     // "¿te la anulo?" del agente. Claudia (franciskom, 09-10-2026) escribió "tengo doble turno, le
     // puedo confirmar en la mañana" y el modelo le anuló la hora: el prompt solo no basta para una
     // acción que no se puede deshacer. Regla de Daniel: ante la duda, la hora se guarda.
-    const cancelRequestedByClient = () => {
-      const text = String(message || '');
-      if (/\bno\s+(me\s+)?(la|lo|las|los)?\s*(anul|cancel|elimin|borr)/i.test(text)) return false;
-      if (/\b(cancel|anul|elimin|borr|desagend)\w*|\bya no (voy|vamos|ir[eé]|quiero|necesito)(?![a-záéíóúñ])/i.test(text)) return true;
-      return /anul|cancel/i.test(lastAssistantText) && /\?/.test(lastAssistantText)
-        // Sin \b: en JavaScript la "í" no es letra para \b, y "Sí, por favor" nunca calzaba.
-        && /^\s*(s[ií]+|dale|ya|ok|okey|bueno|por favor|porfa|confirmo|de acuerdo|claro|ya po)(?![a-záéíóúñ])/i.test(text);
-    };
+    const cancelRequestedByClient = () => cancelRequestedByClientGuard({ message, lastAssistantText });
     // Ritmo de venta acordado con Daniel (14-09-2026, a partir de cómo conversa Francisco): a quien
     // pregunta algo seco (valor, ubicación, horario) primero se le pregunta con cercanía qué le
     // molesta; cuando cuenta su dolor, como mucho una pregunta más; y en el mensaje siguiente, horas.
@@ -721,6 +695,12 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
         // hilo del dueño, callarse es la decisión correcta aunque el mensaje traiga una pregunta.
         // Mensaje de un sistema o de un tercero (campaña, menú de botones, otra organización): no
         // se contesta. Silencio del runtime, igual que no_intervenir, pero disponible en cualquier hilo.
+        // Si el seguro de cancelación acaba de frenar una anulación, el cliente dijo algo que el modelo
+        // tomó por anular: callarse lo deja sin respuesta y con la duda. Hay que contestarle.
+        if (name === 'no_intervenir' && toolTrace.some(item => item.name === 'cancel_appointment' && item.result?.action === 'kept_booking')) {
+          answerTool({ ok: false, action: 'answer_instead', message: 'No te quedes callado: el cliente dijo algo sobre su hora y no se anuló nada. Respóndele en una frase y, si dudas qué quiso decir, pregúntale si quiere mantenerla o anularla.' });
+          continue;
+        }
         if (name === 'ignorar_mensaje_ajeno' && args?.origen !== 'respuesta_automatica' && args?.origen !== 'otra_organizacion') {
           answerTool({ ok: false, action: 'answer_instead', message: 'Es una persona que consulta o pide algo: respóndele (si es algo que el negocio no hace, díselo con amabilidad). No te quedes callado.' });
           continue;
@@ -866,7 +846,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
         // dirección ("Eduardo Ríos Mackenna 1544, Buin") y el modelo agendó a "Eduardo" a las 19:00,
         // una hora que nadie había elegido en ese intercambio.
         if ((name === 'create_appointment' || name === 'reschedule_appointment') && !hourChosenByClient(args?.time)) {
-          answerTool({ ok: false, action: 'confirm_first', message: `Todavía no hay una hora elegida por el cliente para ${args?.time || 'esa hora'}: no está en su mensaje ni en tu último mensaje. No se agendó nada. Ofrécele las horas reales y espera que elija.` });
+          answerTool({ ok: false, action: 'confirm_first', message: `Todavía no hay una hora elegida por el cliente para ${args?.time || 'esa hora'}: el cliente no la escribió ni la aceptó con claridad (ofrecer una lista de horas no es elegir una). No se agendó nada. Ofrécele las horas reales y espera que elija.` });
           continue;
         }
         if (name === 'create_appointment' && !modalityEstablished()) {

@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { loadPackage, answerWithGroq } from './engine.js';
+import { loadPackage, answerWithGroq, changedBookingThisTurn } from './engine.js';
 import { notifySentinel } from './sentinel.js';
 import { recordUsage } from './metrics.js';
 import { agendaConfig, agendaSupabaseRequest, agendaSupabaseUpload, agendaUsesSupabase, appendAgendaFeedbackLocal, createAgendaAppointment, createAgendaAvailabilityBlock, createAgendaAvailabilityRule, bulkUpdateCustomers, createManualCustomer, deleteAgendaAvailabilityBlock, deleteAgendaAvailabilityRule, getAgendaDashboard, getAvailableSlots, getCustomerDetail, importAgendaCustomers, listCustomers, normalizeChilePhone, rescheduleAgendaAppointment, updateAgendaAppointment, updateAgendaFeedback, updateAppointmentNotes, updateCustomerSettings } from './agenda.js';
@@ -1395,7 +1395,10 @@ export async function handleRequest(req, res) {
       // debounce no alcanzaba y el agente igual contestaba dos veces seguidas (6 casos reales en
       // la primera semana de franciskom). La respuesta queda en el checkpoint del evento, así que
       // no se pierde trabajo: el evento nuevo la reemplaza con una que ya vio el mensaje completo.
-      if (generatedNow && await supersededByNewerInbound(conversation?.id, inbound?.created_at)) {
+      // Salvo que el turno ya haya creado, cambiado o anulado una hora: esa confirmación es del
+      // resultado real, no un borrador conversacional, y el cliente tiene que recibirla aunque haya
+      // seguido escribiendo (si no, queda con una hora tomada o anulada que nadie le confirmó).
+      if (generatedNow && !changedBookingThisTurn(reply.toolTrace) && await supersededByNewerInbound(conversation?.id, inbound?.created_at)) {
         await completeZavuEvent(eventId, claim.lease_token, 'ignored', { superseded: true, after_generation: true });
         return json(res, 200, { ok: true, superseded: true });
       }

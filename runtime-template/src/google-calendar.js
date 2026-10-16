@@ -388,6 +388,13 @@ export async function getGoogleCalendarBusyIntervals(startIso, endIso) {
   // termina 19:00, sin buffer ofrecíamos 19:00 igual, imposible de cumplir en la práctica).
   const bufferMs = ctx.travelBufferMinutes * 60_000;
   const calendars = body.calendars || {};
+  // Google responde 200 aunque un calendario no se haya podido leer (notFound, forbidden): su
+  // lista "busy" viene ausente y antes se leía como "libre". Un calendario ilegible es "desconocido".
+  const unreadable = ctx.busyCalendarIds.filter(id => (calendars[id]?.errors || []).length || !(id in calendars));
+  if (unreadable.length) {
+    const reasons = unreadable.map(id => (calendars[id]?.errors || []).map(e => e.reason).join('/') || 'sin respuesta').join(', ');
+    throw new Error(`Google Calendar no pudo leer ${unreadable.length} calendario(s) (${reasons}).`);
+  }
   return ctx.busyCalendarIds.flatMap(id => {
     const intervals = calendars[id]?.busy || [];
     if (!bufferMs || id === ctx.calendarId) return intervals;
