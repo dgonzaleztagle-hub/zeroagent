@@ -486,7 +486,12 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     const HAS_DURATION = /\b(hace|desde)\b[^.?!]{0,30}\b(d[ií]as?|semanas?|mes(es)?|a[ñn]os?|ayer|anoche)|\b(un|dos|tres|varios|unos|unas)\s+(d[ií]as?|semanas?|mes(es)?|a[ñn]os?)\b|\bmeses\b|\bsemanas\b/i;
     const HAS_DIAGNOSIS = /diagn[oó]stic|resonancia|radiograf|ecograf|examen|esc[aá]ner|traumat[oó]log|m[eé]dic[oa]|doctor|kinesi[oó]log/i;
     const WANTS_HOUR_NOW = /\b(hoy|ma[ñn]ana|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado)\b|\bahora\b|altiro|ya mismo|lo antes posible|urgente|s[oó]lo (quiero|necesito) (la |una )?hora|no importa/i;
-    const discoveryDue = toldPain && questionsSincePain === 0 && !hasBooking
+    // Regla invertida (16-10-2026): no se intenta reconocer el dolor por palabras ("me quedé trabado" no estaba en la lista);
+    // sencillamente no se ofrecen horas hasta haber conversado al menos una vez, salvo cierre o día nombrado.
+    const GREETING_QUESTION = /en qu[eé] (te|le|los?) (puedo|podemos|podr[ií]a\w*) ayudar|c[oó]mo (est[aá]s|est[aá]|puedo)|qu[eé] tal/i;
+    const conversationQuestions = history.filter(item => item.role === 'assistant' && isOpenQuestion(item.content) && !GREETING_QUESTION.test(String(item.content || ''))).length;
+    const discoveryDue = conversationQuestions === 0 && !hasBooking
+      && !history.some(item => item.role === 'assistant' && HOUR_PATTERN.test(item.content))
       && !(userTurns.some(text => HAS_DURATION.test(text)) && userTurns.some(text => HAS_DIAGNOSIS.test(text)))
       && !WANTS_HOUR_NOW.test(String(message || ''))
       && !(/@/.test(String(message || '')) && /\d{1,2}\.?\d{3}\.?\d{3}-?[0-9kK]/.test(String(message || '')));
@@ -663,7 +668,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           try {
             return rule?.id && !forbiddenRetried.has(rule.id)
               && new RegExp(rule.forbid, 'i').test(rawText)
-              && !userTurns.some(text => new RegExp(rule.unless, 'i').test(String(text || '')))
+              && !(rule.unless && userTurns.some(text => new RegExp(rule.unless, 'i').test(String(text || ''))))
               && !history.some(item => item.role === 'assistant' && new RegExp(rule.forbid, 'i').test(item.content));
           } catch { return false; }
         });

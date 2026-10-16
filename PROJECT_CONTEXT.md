@@ -2347,3 +2347,12 @@ Implementado (src idéntico en runtime-template y franciskom):
 - `pickSlotShortlist` en `agenda-tools.js`: horas agrupadas junto a citas existentes (agenda + Google Calendar), con espaciado mínimo = duración de sesión; penaliza fuera de 09:00–19:00. No verificado con datos reales (Calendar no disponible en local).
 - Otros 15-10: consent guards (cancelar/modalidad/hora), Calendar fail-closed, `kf-mascotas`, horario hasta 21:00.
 - Regresión: banco 83/4 y nuevos 53/2 antes de ajustes; fallas restantes conocidas: D-c-feriado-lunes-12 (tool-step-limit), h-mascotas (~1/6 flake). Los casos antiguos que exigían "hora directa → horas altiro" cambiaron a propósito.
+
+### Ajuste 16-10-2026 (tarde): urgencias eliminadas y descubrimiento invertido
+
+Daniel: el bot no debe mandar a urgencias nunca (lo decide Francisco, que recibe aviso con `avisar_al_dueno` ante señales graves) y la regla no puede depender de palabras sueltas como "atroz".
+- `forbidden_mentions` regla `sin_urgencias`: bloquea "urgencia" siempre (sin `unless`; el motor ahora acepta reglas sin `unless`).
+- `discovery_before_hours` invertido en `engine.js`: no se ofrecen horas hasta haber hecho una pregunta de conversación (excluye saludos tipo "¿en qué te ayudo?"), salvo día nombrado, duración+diagnóstico ya dados, cierre con RUT+correo, u horas ya ofrecidas antes. Ya no depende de la lista PAIN.
+- Casos nuevos en el holdout: saludo+dolor atroz, "me quedé trabado", "se me engarrotó", "insoportable", urgencia real (debe avisar a Francisco, no derivar).
+- Regla de proceso: cada cambio corre banco completo + holdout antes de subir; cada conversación mala real pasa a ser caso permanente (evita la deriva entre arreglos).
+- Fallas conocidas: D-c-feriado-lunes-12 (ofrece el feriado sin avisar), h-freno-plata (checker), h-diagnostico (checker/flake ~1/6 ignora la pregunta directa). Fixture pilar-modalidad-respondida tenía fecha pasada (corregida).
