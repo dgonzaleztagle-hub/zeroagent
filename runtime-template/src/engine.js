@@ -7,6 +7,7 @@ import { BASE_BEHAVIOR } from './base-behavior.js';
 import { cancelRequestedByClient as cancelRequestedByClientGuard, hourChosenByClient as hourChosenByClientGuard, modalityEstablished as modalityEstablishedGuard } from './consent-guards.js';
 import { AGENDA_BEHAVIOR } from './agenda-behavior.js';
 import { liveInjectedFacts } from './business-data.js';
+import { judgeConversationStage } from './conversation-judge.js';
 import { detectInternalLeak, dropRepeatedSentences, fixRelativeDays, isCourtesyOnly, repeatsLastAgentMessage, upcomingDaysTable } from './turn-guards.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -371,10 +372,8 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     let emptyRetried = false;
     let hoursRetried = false;
     let closingRetried = false;
-    let askFirstRetried = false;
-    let dryAskRetried = false;
-    let discoveryRetried = false;
-    let answerFirstRetried = false;
+    let stageVerdict = null;
+    let stageRejections = 0;
     const mentionRetried = new Set();
     const forbiddenRetried = new Set();
     let echoRetried = false;
@@ -459,45 +458,9 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     // puedo confirmar en la mañana" y el modelo le anuló la hora: el prompt solo no basta para una
     // acción que no se puede deshacer. Regla de Daniel: ante la duda, la hora se guarda.
     const cancelRequestedByClient = () => cancelRequestedByClientGuard({ message, lastAssistantText });
-    // Ritmo de venta acordado con Daniel (14-09-2026, a partir de cómo conversa Francisco): a quien
-    // pregunta algo seco (valor, ubicación, horario) primero se le pregunta con cercanía qué le
-    // molesta; cuando cuenta su dolor, como mucho una pregunta más; y en el mensaje siguiente, horas.
-    // Quien pide hora directo recibe horas de inmediato, y quien no contesta la pregunta, también.
-    const PAIN = /duel|dolor|molest|lesi[oó]n|contractur|lumba|dorsal|cervical|escapul|hernia|ci[aá]tic|flema|\btos\b|respir|espalda|cuello|rodilla|hombro|cadera|pierna|brazo|mu[ñn]eca|tobillo|cabeza|migra|mareo|postura|cirug|operad|esguince|tendin|tratar|tratamiento/i;
-    const ASKS_FOR_HOURS = /\bhoras?\b|agend|reserv|disponib|cupo|\b(hoy|ma[ñn]ana|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|semana)\b/i;
-    const isOpenQuestion = text => /\?/.test(String(text || '')) && !HOUR_PATTERN.test(String(text || ''));
+    // Ritmo de conversación (16-10-2026): ya no hay contadores ni listas de palabras. Un juez
+    // (conversation-judge.js) lee el hilo completo y decide si toca ofrecer horas o seguir conversando.
     const userTurns = [...history.filter(item => item.role === 'user').map(item => item.content), String(message || '')];
-    const toldPain = userTurns.some(text => PAIN.test(text));
-    // "¿Hasta qué hora atienden?" pregunta por el horario del negocio, no pide una hora: sin quitarlo,
-    // la palabra "hora" disparaba el modo "ofrecer horas" y el bot saltaba la pregunta cercana
-    // (replay 14-10-2026, 0 de 2).
-    const OPERATING_HOURS_QUESTION = /(hasta|desde|a)\s+qu[eé]\s+horas?\s+(atien\w*|abr\w*|cierr\w*|empiez\w*|trabaj\w*|est[aá]n|llegan)|qu[eé]\s+horas?\s+(atien\w*|abr\w*|cierr\w*)|horarios?\s+de\s+(atenci[oó]n|trabajo)/gi;
-    const askedForHours = ASKS_FOR_HOURS.test(String(message || '').replace(OPERATING_HOURS_QUESTION, ' '));
-    const lastAssistantAsked = isOpenQuestion(lastAssistantText);
-    const firstPainIndex = history.findIndex(item => item.role === 'user' && PAIN.test(item.content));
-    const questionsSincePain = firstPainIndex === -1 ? 0 : history.slice(firstPainIndex + 1).filter(item => item.role === 'assistant' && isOpenQuestion(item.content)).length;
-    const salesContext = toldPain || askedForHours || history.some(item => item.role === 'assistant' && /\$\s?\d/.test(item.content));
-    // Ya toca ofrecer horas: pidió hora, ya se le preguntó una vez después de contar su dolor, o
-    // no contestó la última pregunta con algo sobre su dolor.
-    // Francisco (16-10-2026): "ya no me está preguntando hace cuánto tiene el dolor ni si tiene un
-    // diagnóstico; le lanza la hora y eso me ha cortado las conversaciones". Aunque la persona haya
-    // pedido hora, si cuenta su dolor primero se conversa una vez (hace cuánto, diagnóstico médico) y
-    // recién después van las horas. No aplica si ya dio ambos datos, si nombra un día (quiere la hora
-    // ya) o si ya se le preguntó algo después de su dolor.
-    const HAS_DURATION = /\b(hace|desde)\b[^.?!]{0,30}\b(d[ií]as?|semanas?|mes(es)?|a[ñn]os?|ayer|anoche)|\b(un|dos|tres|varios|unos|unas)\s+(d[ií]as?|semanas?|mes(es)?|a[ñn]os?)\b|\bmeses\b|\bsemanas\b/i;
-    const HAS_DIAGNOSIS = /diagn[oó]stic|resonancia|radiograf|ecograf|examen|esc[aá]ner|traumat[oó]log|m[eé]dic[oa]|doctor|kinesi[oó]log/i;
-    const WANTS_HOUR_NOW = /\b(hoy|ma[ñn]ana|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado)\b|\bahora\b|altiro|ya mismo|lo antes posible|urgente|s[oó]lo (quiero|necesito) (la |una )?hora|no importa/i;
-    // Regla invertida (16-10-2026): no se intenta reconocer el dolor por palabras ("me quedé trabado" no estaba en la lista);
-    // sencillamente no se ofrecen horas hasta haber conversado al menos una vez, salvo cierre o día nombrado.
-    const GREETING_QUESTION = /en qu[eé] (te|le|los?) (puedo|podemos|podr[ií]a\w*) ayudar|c[oó]mo (est[aá]s|est[aá]|puedo)|qu[eé] tal/i;
-    const conversationQuestions = history.filter(item => item.role === 'assistant' && isOpenQuestion(item.content) && !GREETING_QUESTION.test(String(item.content || ''))).length;
-    const discoveryDue = conversationQuestions === 0 && !hasBooking
-      && !history.some(item => item.role === 'assistant' && HOUR_PATTERN.test(item.content))
-      && !(userTurns.some(text => HAS_DURATION.test(text)) && userTurns.some(text => HAS_DIAGNOSIS.test(text)))
-      && !WANTS_HOUR_NOW.test(String(message || ''))
-      && !(/@/.test(String(message || '')) && /\d{1,2}\.?\d{3}\.?\d{3}-?[0-9kK]/.test(String(message || '')));
-    const offerDue = !discoveryDue && (askedForHours
-      || (PAIN.test(String(message || '')) ? questionsSincePain >= 1 : lastAssistantAsked && salesContext));
     const concreteOfferMade = () => history.some(item => item.role === 'assistant' && HOUR_PATTERN.test(item.content))
       || toolTrace.some(item => item.name === 'get_availability' && item.result?.ok && (item.result.available_slots || []).length);
     // Horas reales para el seguimiento de un bloque oficial, consultadas por el runtime y no por el
@@ -528,7 +491,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
       }
       return parts.length ? `${parts.join('; y ')} (${service.name})` : null;
     };
-    for (let round = 0; round < 5; round++) {
+    for (let round = 0; round < 7; round++) {
       let data;
       try {
         const response = await fetch(`${llm.baseUrl}/chat/completions`, {
@@ -610,49 +573,24 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           messages.push({ role: 'system', content: 'Ese mensaje NO se envió: le pide al cliente que aclare lo que ya dijo. Interprétalo de la forma más natural (si nombra partes del cuerpo, es dolor o molestia ahí) y sigue la conversación sin repetir sus palabras.' });
           continue;
         }
-        // La otra mitad del ritmo: quien cuenta su dolor por primera vez sin decir hace cuánto ni si
-        // tiene exámenes recibe una pregunta cercana antes que las horas. Con las instrucciones
-        // sueltas el modelo saltaba directo a ofrecer ("me duele la espalda baja" → horas), y esa
-        // pregunta es la que genera cercanía con quien escribe seco.
-        const firstPainNow = PAIN.test(String(message || '')) && firstPainIndex === -1;
-        const caseAlreadyDescribed = /\b(hace|desde)\b|\bmes(es)?\b|\bañ?os?\b|semana|d[ií]as|examen|ex[aá]menes|resonancia|radiograf|ecograf|diagn[oó]stic|tratamiento|kine/i.test(String(message || ''));
         const answeringDataRequest = /direcci[oó]n|comuna|nombre|rut\b|correo/i.test(lastAssistantText) && /\?/.test(lastAssistantText);
-        if (rawText && agendaEnabled && !hasBooking && !handoffReason && round < 3 && !askFirstRetried && firstPainNow && !askedForHours && !caseAlreadyDescribed && !answeringDataRequest && HOUR_PATTERN.test(rawText)) {
-          askFirstRetried = true;
-          messages.push({ role: 'assistant', content: rawText });
-          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: es la primera vez que cuenta su dolor y todavía no sabes nada de su caso. Antes de ofrecer horas, escríbele un mensaje corto y cercano con UNA sola pregunta por lo que más falta (por ejemplo, hace cuánto le molesta). Sin horas en este mensaje; las ofreces cuando conteste.' });
-          continue;
-        }
-        // Una pregunta seca (horario, valor, ubicación) de alguien que aún no cuenta qué le pasa ni pidió
-        // hora no recibe horas: se le responde y se le pregunta con cercanía qué le molesta. Antes sólo se
-        // vigilaba quien contaba su dolor; el resto dependía de que el modelo lo recordara.
-        if (rawText && agendaEnabled && round < 4 && !discoveryRetried && discoveryDue && !handoffReason && !answeringDataRequest && (HOUR_PATTERN.test(rawText) || toolTrace.some(item => item.name === 'get_availability' && item.result?.ok && /\b\d{1,2}:\d{2}\b/.test(rawText)))) {
-          discoveryRetried = true;
-          rejectDraft('discovery_before_hours', rawText);
-          messages.push({ role: 'assistant', content: rawText });
-          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: todavía no conversaste con la persona sobre su dolor. Antes de ofrecer horas, en UNA sola frase cercana pregúntale lo que falte entre hace cuánto tiene ese dolor y si tiene algún diagnóstico médico o examen; no ofrezcas horas todavía ni hables de diagnóstico ni de urgencias. Las horas van en el mensaje siguiente.' });
-          continue;
-        }
-        // Daniel (16-10-2026): ante una pregunta sobre su caso ("¿tengo una hernia?") un humano responde y espera;
-        // no contesta y de inmediato tira horas. El turno siguiente ya puede traer las horas.
-        const PRACTICAL_QUESTION = /cu[aá]nto (cuesta|sale|vale)|precio|valor|d[oó]nde|direcci[oó]n|ubicaci|c[oó]mo (llego|pago)|pago|transfer|tarjeta|convenio|isapre|fonasa|boleta|a qu[eé] hora|horario/i;
-        const clientAskedAboutCase = /\?/.test(String(message || '')) && !askedForHours && !PRACTICAL_QUESTION.test(String(message || ''));
-        if (rawText && agendaEnabled && round < 4 && !answerFirstRetried && clientAskedAboutCase && !hasBooking && !handoffReason && !answeringDataRequest && (HOUR_PATTERN.test(rawText) || toolTrace.some(item => item.name === 'get_availability' && item.result?.ok && /\d{1,2}:\d{2}/.test(rawText)))) {
-          answerFirstRetried = true;
-          rejectDraft('answer_before_hours', rawText);
-          messages.push({ role: 'assistant', content: rawText });
-          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: la persona te hizo una pregunta sobre su caso y hay que contestarla antes de hablar de horas. Respóndele con honestidad en una o dos frases (con un gesto de cercanía; no diagnostiques, eso se ve evaluándolo) y espera su respuesta. No ofrezcas horas en este mensaje; si corresponde, termina con una pregunta corta.' });
-          continue;
-        }
-        const dryQuestionNow = !toldPain && !offerDue && !hasBooking && !handoffReason && !answeringDataRequest
-          && !history.some(item => item.role === 'assistant' && HOUR_PATTERN.test(item.content));
-        const consultedAvailabilityNow = toolTrace.some(item => item.name === 'get_availability' && item.result?.ok && (item.result.available_slots || []).length);
-        if (rawText && agendaEnabled && round < 3 && !dryAskRetried && dryQuestionNow && consultedAvailabilityNow) {
-          dryAskRetried = true;
-          rejectDraft('premature_hours_offer', rawText);
-          messages.push({ role: 'assistant', content: rawText });
-          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: le ofrece horas a alguien que sólo hizo una pregunta y todavía no cuenta qué le pasa. Respóndele lo que preguntó con los datos confirmados y cierra con UNA sola pregunta cercana sobre qué le está molestando o qué le gustaría tratar. Sin ofrecer horas todavía.' });
-          continue;
+        // Juez de ritmo: reemplaza las guardas por contadores (primer dolor, descubrimiento, responder primero,
+        // pregunta seca). Una sola vez por turno; si el juez falla, el borrador pasa.
+        const closingData = /@/.test(String(message || '')) && /\d{1,2}\.?\d{3}\.?\d{3}-?[0-9kK]/.test(String(message || ''));
+        const draftHasHours = Boolean(rawText) && (HOUR_PATTERN.test(rawText) || toolTrace.some(item => item.name === 'get_availability' && item.result?.ok && /\b\d{1,2}:\d{2}\b/.test(rawText)));
+        const bookingToolUsed = toolTrace.some(item => ['create_appointment', 'reschedule_appointment', 'cancel_appointment'].includes(item.name));
+        if (rawText && agendaEnabled && stageRejections < 2 && round < 5 && !hasBooking && !handoffReason && !answeringDataRequest && !closingData && !bookingToolUsed && draftHasHours) {
+          if (!stageVerdict) {
+            stageVerdict = await judgeConversationStage(llm, { history, message, draft: rawText }, { isGpt5Family }) || { stage: 'ofrecer', guidance: '', usage: { input: 0, output: 0 } };
+            totalInputTokens += stageVerdict.usage.input; totalOutputTokens += stageVerdict.usage.output;
+          }
+          if (stageVerdict.stage === 'conversar') {
+            stageRejections += 1;
+            rejectDraft('stage_conversar', rawText, stageVerdict.guidance);
+            messages.push({ role: 'assistant', content: rawText });
+            messages.push({ role: 'system', content: `Ese mensaje NO se envió: todavía no toca ofrecer horas. ${stageVerdict.guidance} Sin horas en este mensaje (no consultes la agenda); las horas van cuando la persona responda. Sé cercano y breve (una o dos frases, una sola pregunta como máximo).` });
+            continue;
+          }
         }
         // Reglas de "situación" del negocio que se verifican en código (package.agent.required_mentions):
         // si el mensaje del cliente cae en el patrón y el borrador no dice lo exigido, se devuelve una vez.
@@ -691,13 +629,10 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           messages.push({ role: 'system', content: 'Ese mensaje NO se envió: ' + (forbiddenRule.instruction || 'dice algo que no corresponde a lo que contó el cliente.') });
           continue;
         }
-        const oneQuestionTooMany = offerDue && salesContext && /\?/.test(rawText) && !toolTrace.some(item => ['create_appointment', 'reschedule_appointment', 'cancel_appointment'].includes(item.name));
-        if (rawText && agendaEnabled && !hasBooking && !handoffReason && round < 3 && !closingRetried && !HOUR_PATTERN.test(rawText) && (asksPermissionToBook.test(rawText) || postponesSale.test(rawText) || oneQuestionTooMany)) {
+        if (rawText && agendaEnabled && !hasBooking && !handoffReason && round < 3 && !closingRetried && !HOUR_PATTERN.test(rawText) && (asksPermissionToBook.test(rawText) || postponesSale.test(rawText))) {
           closingRetried = true;
           messages.push({ role: 'assistant', content: rawText });
-          messages.push({ role: 'system', content: oneQuestionTooMany && !asksPermissionToBook.test(rawText) && !postponesSale.test(rawText)
-            ? 'Ese mensaje NO se envió: ya es momento de ofrecer la hora, no de seguir preguntando. Consulta la agenda y remata con dos o tres horas reales y "¿cuál te dejo?". Puedes reconocer en media frase lo que te contó. No hables de diagnóstico salvo que el cliente lo haya pedido.'
-            : 'Ese mensaje NO se envió: pide permiso para buscar hora o deja la hora para después sin ofrecer nada concreto. Consulta la agenda y ofrécele dos o tres horas reales (si puso un freno de plata o de tiempo, en una fecha más adelante). Mantén el resto de lo que ibas a decir.' });
+          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: pide permiso para buscar hora o deja la hora para después sin ofrecer nada concreto. Consulta la agenda y ofrécele dos o tres horas reales (si puso un freno de plata o de tiempo, en una fecha más adelante). Mantén el resto de lo que ibas a decir.' });
           continue;
         }
         const leak = rawText ? detectInternalLeak(rawText, internalSources) : null;
@@ -868,7 +803,10 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
             // traslado, y ofrecérselas le prometía un horario que a domicilio puede no existir (medido
             // 14-09-2026). Para domicilio lo que falta es la dirección.
             const wantsHomeVisit = HOME_VISIT.test(String(message || ''));
-            const warmUp = !wantsHomeVisit && !offerDue && !toldPain;
+            // Después de un bloque oficial (precio, qué incluye) el juez decide si toca ofrecer horas o preguntar qué le pasa.
+            const stageAfterLiteral = wantsHomeVisit ? null : await judgeConversationStage(llm, { history, message, draft: '' }, { isGpt5Family }).catch(() => null);
+            if (stageAfterLiteral) { totalInputTokens += stageAfterLiteral.usage.input; totalOutputTokens += stageAfterLiteral.usage.output; }
+            const warmUp = !wantsHomeVisit && stageAfterLiteral?.stage === 'conversar';
             const suggested = wantsHomeVisit || warmUp ? null : await suggestedSlotsForFollowUp().catch(() => null);
             literalSuggested = suggested;
             if (warmUp) {
