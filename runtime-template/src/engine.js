@@ -374,6 +374,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     let askFirstRetried = false;
     let dryAskRetried = false;
     let discoveryRetried = false;
+    let answerFirstRetried = false;
     const mentionRetried = new Set();
     const forbiddenRetried = new Set();
     let echoRetried = false;
@@ -630,6 +631,17 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           rejectDraft('discovery_before_hours', rawText);
           messages.push({ role: 'assistant', content: rawText });
           messages.push({ role: 'system', content: 'Ese mensaje NO se envió: todavía no conversaste con la persona sobre su dolor. Antes de ofrecer horas, en UNA sola frase cercana pregúntale lo que falte entre hace cuánto tiene ese dolor y si tiene algún diagnóstico médico o examen; no ofrezcas horas todavía ni hables de diagnóstico ni de urgencias. Las horas van en el mensaje siguiente.' });
+          continue;
+        }
+        // Daniel (16-10-2026): ante una pregunta sobre su caso ("¿tengo una hernia?") un humano responde y espera;
+        // no contesta y de inmediato tira horas. El turno siguiente ya puede traer las horas.
+        const PRACTICAL_QUESTION = /cu[aá]nto (cuesta|sale|vale)|precio|valor|d[oó]nde|direcci[oó]n|ubicaci|c[oó]mo (llego|pago)|pago|transfer|tarjeta|convenio|isapre|fonasa|boleta|a qu[eé] hora|horario/i;
+        const clientAskedAboutCase = /\?/.test(String(message || '')) && !askedForHours && !PRACTICAL_QUESTION.test(String(message || ''));
+        if (rawText && agendaEnabled && round < 4 && !answerFirstRetried && clientAskedAboutCase && !hasBooking && !handoffReason && !answeringDataRequest && (HOUR_PATTERN.test(rawText) || toolTrace.some(item => item.name === 'get_availability' && item.result?.ok && /\d{1,2}:\d{2}/.test(rawText)))) {
+          answerFirstRetried = true;
+          rejectDraft('answer_before_hours', rawText);
+          messages.push({ role: 'assistant', content: rawText });
+          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: la persona te hizo una pregunta sobre su caso y hay que contestarla antes de hablar de horas. Respóndele con honestidad en una o dos frases (con un gesto de cercanía; no diagnostiques, eso se ve evaluándolo) y espera su respuesta. No ofrezcas horas en este mensaje; si corresponde, termina con una pregunta corta.' });
           continue;
         }
         const dryQuestionNow = !toldPain && !offerDue && !hasBooking && !handoffReason && !answeringDataRequest
