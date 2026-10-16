@@ -871,7 +871,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           answerTool({ ok: false, action: 'kept_booking', message: (HOME_VISIT.test(String(message || '')) ? 'Si lo que dice es que la sesión es en su casa: no le ofrezcas anular; dile que le avisas a Francisco para dejarla a domicilio y pídele la dirección (calle, número y comuna). ' : '') + 'No se anuló nada: el cliente no pidió anular su hora. Si pide tiempo para confirmar o tiene un inconveniente ("te confirmo mañana", "tengo turno"), dile en una frase que se la dejas guardada y que te avise; Francisco ya quedó avisado. Si de verdad parece que ya no le sirve o que se equivocó de sede o de lugar, nómbrale su hora, dale en el mismo mensaje lo que sí buscaba (por ejemplo, cómo se agenda en la otra sede) y pregúntale "¿te la anulo?"; espera su respuesta. No le preguntes por su dolor.' });
           continue;
         }
-        if (name === 'avisar_al_dueno' && !hasBooking && !concreteOfferMade()) {
+        if (name === 'avisar_al_dueno' && args?.grave !== true && !hasBooking && !concreteOfferMade()) {
           answerTool({ ok: false, action: 'offer_first', message: 'Todavía no le ofreciste horas concretas a este cliente. No se avisó al dueño: primero consulta la disponibilidad y ofrécele dos o tres horas reales. Si con eso sigue dudando, ahí sí avisa.' });
           continue;
         }
@@ -887,7 +887,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           const mentioned = [...history.filter(item => item.role === 'user').map(item => item.content), message].some(text => [...otherSedes, 'centro médico', 'centro medico'].some(term => String(text || '').toLowerCase().includes(term)));
           if (mentioned) result.aviso_sede = 'En esta conversación apareció otra sede (el centro médico). Estas horas son de la sede que consultaste, no de esa. Al ofrecerlas nombra la sede con su valor y, en una frase, aclara que si el cliente buscaba la otra sede esa hora se coordina directo con ellos; pregúntale cuál prefiere antes de dejarle una hora tomada.';
         }
-        if (name === 'avisar_al_dueno' && result?.ok) ownerAlert = String(args?.reason || 'El cliente necesita que el dueño entre a la conversación.').slice(0, 400);
+        if (name === 'avisar_al_dueno' && result?.ok) ownerAlert = ((args?.grave === true ? 'GRAVE (posible urgencia): ' : '') + String(args?.reason || 'El cliente necesita que el dueño entre a la conversación.')).slice(0, 400);
         if (name === 'request_human_handoff' && result?.ok) handoffReason = String(args?.reason || '').slice(0, 400);
         // Una herramienta puede pedir el aviso ella misma (un cambio de hora que falló por un
         // problema técnico): el dueño se entera aunque el modelo no llame avisar_al_dueno.

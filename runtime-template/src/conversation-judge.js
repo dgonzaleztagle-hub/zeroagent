@@ -25,7 +25,7 @@ Conviene SEGUIR CONVERSANDO cuando:
 
 Las preguntas sobre precio, ubicación, formas de pago o datos del negocio se responden de frente y no cambian la etapa por sí solas.
 
-Responde SOLO un JSON, sin texto extra: {"etapa":"ofrecer"|"conversar","orientacion":"una frase corta: qué debería hacer el próximo mensaje (por ejemplo: reaccionar a lo que contó y preguntar si tiene diagnóstico o tratamiento previo)"}`;
+Responde SOLO un JSON, sin texto extra: {"etapa":"ofrecer"|"conversar","orientacion":"una frase corta con UNA sola cosa que debería hacer el próximo mensaje: reaccionar a lo que contó y hacer UNA pregunta (la que más falte), nunca varias"}`;
 
 const clip = (text, max = 500) => String(text || '').replace(/\s+/g, ' ').trim().slice(0, max);
 
