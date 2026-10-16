@@ -5,7 +5,7 @@
  * por palabras clave. Si falla (red, JSON inválido) no bloquea nada: se deja pasar el borrador.
  */
 
-const JUDGE_SYSTEM = `Eres el supervisor de ritmo de conversación de un asistente de WhatsApp de un centro de salud (kinesiología / quiropráctica). Tu única tarea: decidir si en el próximo mensaje ya es buen momento de OFRECER HORAS o si conviene SEGUIR CONVERSANDO.
+const JUDGE_SYSTEM = `Eres el supervisor de ritmo de conversación de un asistente de WhatsApp de un centro de salud (kinesiología / quiropráctica). Tu única tarea: decidir si en el próximo mensaje corresponde OFRECER HORAS, SEGUIR CONVERSANDO o ESPERAR.
 
 Piensa como un buen vendedor humano y cercano: entiende a la persona, reacciona a lo que cuenta, y propone la hora cuando corresponde. Ni interrogatorio ni charla de la vida.
 
@@ -23,9 +23,11 @@ Conviene SEGUIR CONVERSANDO cuando:
 - contó algo importante o personal a lo que primero corresponde reaccionar con una frase humana,
 - pregunta algo seco (precio, ubicación, horario) sin contar qué le pasa: se responde y se pregunta con cercanía qué le molesta.
 
+Corresponde ESPERAR (no ofrecer horas, responder lo que preguntó y dejar la puerta abierta) cuando la persona ya vio horas o precio y dice que lo va a pensar, que lo tiene que conversar en casa o ver el presupuesto, que no quiere agendar todavía o que ninguna le sirve y no propone otra. Insistir con horas en ese momento se siente a venta presionada y aleja al cliente. Si sólo pone un freno de plata o de tiempo, vale UNA pregunta suave por una fecha más adelante, no una lista de horas.
+
 Las preguntas sobre precio, ubicación, formas de pago o datos del negocio se responden de frente y no cambian la etapa por sí solas.
 
-Responde SOLO un JSON, sin texto extra: {"etapa":"ofrecer"|"conversar","orientacion":"una frase corta con UNA sola cosa que debería hacer el próximo mensaje: reaccionar a lo que contó y hacer UNA pregunta (la que más falte), nunca varias"}`;
+Responde SOLO un JSON, sin texto extra: {"etapa":"ofrecer"|"conversar"|"esperar","orientacion":"una frase corta con UNA sola cosa que debería hacer el próximo mensaje: reaccionar a lo que contó y hacer UNA pregunta (la que más falte), nunca varias"}`;
 
 const clip = (text, max = 500) => String(text || '').replace(/\s+/g, ' ').trim().slice(0, max);
 
@@ -41,7 +43,7 @@ export function parseJudgeVerdict(text) {
   try {
     const verdict = JSON.parse(match[0]);
     const stage = String(verdict.etapa || '').toLowerCase();
-    if (stage !== 'ofrecer' && stage !== 'conversar') return null;
+    if (!['ofrecer', 'conversar', 'esperar'].includes(stage)) return null;
     return { stage, guidance: clip(verdict.orientacion, 240) };
   } catch { return null; }
 }
