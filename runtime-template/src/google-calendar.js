@@ -390,12 +390,22 @@ export async function getGoogleCalendarBusyIntervals(startIso, endIso) {
   const calendars = body.calendars || {};
   // Google responde 200 aunque un calendario no se haya podido leer (notFound, forbidden): su
   // lista "busy" viene ausente y antes se leía como "libre". Un calendario ilegible es "desconocido".
-  const unreadable = ctx.busyCalendarIds.filter(id => (calendars[id]?.errors || []).length || !(id in calendars));
-  if (unreadable.length) {
-    const reasons = unreadable.map(id => (calendars[id]?.errors || []).map(e => e.reason).join('/') || 'sin respuesta').join(', ');
+  const reasonsOf = id => (calendars[id]?.errors || []).map(e => e.reason);
+  const unreadable = ctx.busyCalendarIds.filter(id => reasonsOf(id).length || !(id in calendars));
+  // notFound/forbidden es permanente (calendario borrado o que dejó de compartirse, ej. el "Familia"
+  // automático de Google): descartarlo y seguir con los legibles. Antes UN calendario muerto tumbaba
+  // el freebusy entero y el bot ofrecía horas sin filtrar (franciskom, 19-10-2026: ofreció 20:00
+  // con Taekwondo en el Calendar). Un fallo transitorio (backendError, rateLimit, sin respuesta)
+  // sigue siendo "desconocido" y se propaga.
+  const permanent = id => { const r = reasonsOf(id); return r.length > 0 && r.every(x => /^(notFound|forbidden)$/.test(x)); };
+  const transient = unreadable.filter(id => !permanent(id));
+  const dead = unreadable.filter(permanent);
+  if (transient.length || dead.length >= ctx.busyCalendarIds.length) {
+    const reasons = unreadable.map(id => reasonsOf(id).join('/') || 'sin respuesta').join(', ');
     throw new Error(`Google Calendar no pudo leer ${unreadable.length} calendario(s) (${reasons}).`);
   }
-  return ctx.busyCalendarIds.flatMap(id => {
+  if (dead.length) console.warn(`[google-calendar] calendario(s) ilegibles descartados del freebusy: ${dead.join(', ')}`);
+  return ctx.busyCalendarIds.filter(id => !dead.includes(id)).flatMap(id => {
     const intervals = calendars[id]?.busy || [];
     if (!bufferMs || id === ctx.calendarId) return intervals;
     return intervals.map(interval => ({
