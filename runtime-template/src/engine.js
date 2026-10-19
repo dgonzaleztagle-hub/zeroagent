@@ -469,7 +469,9 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     // (medido 14-09-2026). Con las horas ya en la mano sólo tiene que redactar la oferta. Se usa el
     // primer servicio agendable en sede (sin traslado) y el próximo día que tenga horas cerrables.
     const suggestedSlotsForFollowUp = async () => {
-      const service = (catalogSource.services || []).find(item => item.bookable !== false && !Number(item.travel_buffer_minutes));
+      const mentionsRespiratory = /respirat|pulm|flema|secreci|bronq|neumon/i.test(userTurns.join(' '));
+      const inSite = (catalogSource.services || []).filter(item => item.bookable !== false && !Number(item.travel_buffer_minutes));
+      const service = (mentionsRespiratory ? inSite[0] : inSite.find(item => !/respirat/i.test(String(item.name || '')))) || inSite[0];
       const resource = (catalogSource.resources || [])[0];
       if (!service || !resource) return null;
       const dayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: businessTimeZone, year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -828,7 +830,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
             if (warmUp) {
               answerTool({
                 ok: true, action: 'literal_sent', id: chosen.id,
-                instruccion: 'Ese bloque oficial ya le llegó al cliente tal cual, en un mensaje aparte. Todavía no sabemos qué le pasa: escribe UN segundo mensaje corto con una sola pregunta cercana y abierta sobre qué le está molestando o qué le gustaría tratar (por ejemplo "Cuéntame, ¿qué te está molestando?"). No ofrezcas horas todavía, no repitas nada del bloque y no hagas más de una pregunta. ' + otherAsked
+                instruccion: 'Ese bloque oficial ya le llegó al cliente tal cual, en un mensaje aparte. Todavía no conversaron lo suficiente: escribe UN segundo mensaje corto con una sola pregunta cercana sobre lo que más falte. Si aún no sabes qué le molesta, pregúntalo ("Cuéntame, ¿qué te está molestando?"); si YA te contó qué le molesta, NO se lo vuelvas a preguntar: pregunta hace cuánto o si lo ha tratado antes. No ofrezcas horas todavía, no repitas nada del bloque y no hagas más de una pregunta. ' + otherAsked
               });
               continue;
             }
