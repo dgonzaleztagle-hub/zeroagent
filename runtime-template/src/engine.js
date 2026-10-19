@@ -469,6 +469,13 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     // (medido 14-09-2026). Con las horas ya en la mano sólo tiene que redactar la oferta. Se usa el
     // primer servicio agendable en sede (sin traslado) y el próximo día que tenga horas cerrables.
     const suggestedSlotsForFollowUp = async () => {
+      // Si en este turno el modelo ya consultó la agenda (con la preferencia del cliente, p. ej. "lo más tarde posible"), esas horas
+      // mandan: una consulta nueva del runtime las pisaba con otras (franciskom, 16-10-2026).
+      const alreadyConsulted = toolTrace.filter(item => item.name === 'get_availability' && item.result?.ok && (item.result.ofrecer_primero || []).length);
+      if (alreadyConsulted.length) {
+        const first = alreadyConsulted[alreadyConsulted.length - 1].result;
+        return `${first.dia}, a las ${first.ofrecer_primero.slice(0, 3).join(', ')} (${first.service})`;
+      }
       const mentionsRespiratory = /respirat|pulm|flema|secreci|bronq|neumon/i.test(userTurns.join(' '));
       const inSite = (catalogSource.services || []).filter(item => item.bookable !== false && !Number(item.travel_buffer_minutes));
       const service = (mentionsRespiratory ? inSite[0] : inSite.find(item => !/respirat/i.test(String(item.name || '')))) || inSite[0];

@@ -89,3 +89,16 @@ test('horas: si el día ya está cargado en los extremos, no ofrece el extremo v
 test('horas: con tres o menos, se ofrecen todas', () => {
   assert.equal(pickSlotShortlist(daySlots.slice(0, 3), { busy: [] }).length, 3);
 });
+
+test('applyTimePreference respeta "lo más tarde posible" y "tarde", y no deja el conjunto vacío', async () => {
+  const { applyTimePreference } = await import('../src/agenda-tools.js');
+  const hours = ['08:00', '09:00', '10:00', '11:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00'].map(h => ({ hora_local: h, at: `2026-10-17T${h}:00Z` }));
+  const late = applyTimePreference(hours, 'lo_mas_tarde');
+  assert.equal(late.applied, true);
+  assert.ok(late.slots.every(s => s.hora_local >= '15:00'));
+  assert.ok(applyTimePreference(hours, 'tarde').slots.every(s => s.hora_local >= '14:00' && s.hora_local < '19:00'));
+  assert.ok(applyTimePreference(hours, 'manana').slots.every(s => s.hora_local < '13:00'));
+  const empty = applyTimePreference(hours.filter(s => s.hora_local < '12:00'), 'noche');
+  assert.equal(empty.applied, false);
+  assert.equal(empty.slots.length, 4);
+});
