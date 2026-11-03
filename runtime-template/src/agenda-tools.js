@@ -249,7 +249,7 @@ const SURNAME_ERROR = { error: 'name_needs_surname', message: 'Falta el apellido
 // que era el centro médico de Buin y la confirmación solo decía "Box Buin": sede, valor y mapa de LA
 // hora tomada, y una invitación explícita a corregir si no era el lugar que buscaba.
 function confirmationData(packageData, locationName, service) {
-  const price = Number(service?.price_clp) > 0 ? `$${Number(service.price_clp).toLocaleString('es-CL')}` : '';
+  const price = String(service?.price_note || '').trim() || (Number(service?.price_clp) > 0 ? `${Number(service.price_clp).toLocaleString('es-CL')}` : '');
   const tokens = normName(locationName).replace(/\(.*?\)/g, ' ').split(/\s+/).filter(word => word.length > 2);
   const mapLink = literalReplies(packageData).find(item => /ubicaci/i.test(item.id || '') && tokens.length && tokens.every(word => normName(`${item.id} ${item.when || ''}`).includes(word)))?.text?.match(/https?:\/\/\S+/)?.[0] || '';
   return {
@@ -381,7 +381,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
         // El día ya resuelto en código: el modelo lo copia tal cual en vez de calcular si es "hoy",
         // "mañana" o qué día de la semana cae (ver turn-guards.js).
         dia: dayLabel(args.date, tz),
-        ...(Number(service.price_clp) > 0 ? { valor_sesion_clp: Number(service.price_clp), valor_nota: 'Es el valor completo de ESTE servicio (el traslado ya va incluido si es a domicilio). Si dices el precio, usa este número; no lo sumes ni lo restes ni uses el de otro servicio.' } : {}),
+        ...(String(service.price_note || '').trim() ? { valor_a_decir: String(service.price_note).trim(), valor_nota: 'Si dices el precio, di EXACTAMENTE el valor_a_decir, desglosado; nunca lo resumas en un total. No uses el valor de otro servicio.' } : Number(service.price_clp) > 0 ? { valor_sesion_clp: Number(service.price_clp), valor_nota: 'Si dices el precio de ESTE servicio, usa este número y no el de otro servicio.' } : {}),
         available_slots: availableSlots,
         total_disponibles: availableSlots.length,
         ofrecer_primero: shortlist.map(slot => slot.hora_local),

@@ -315,7 +315,7 @@ export async function answerWithGroq(packageData, message, context = {}) {
         // una hora que nunca iba a poder tomar (medido 3/3 con "quiero agendar en <esa sede>"). Es
         // el mismo criterio que ya usa la página pública de reservas, que los muestra separados.
         const describe = item => {
-          const details = [item.duration_minutes ? `${item.duration_minutes} min` : '', item.price_clp != null ? `$${Number(item.price_clp).toLocaleString('es-CL')}` : ''].filter(Boolean).join(', ');
+          const details = [item.duration_minutes ? `${item.duration_minutes} min` : '', String(item.price_note || '').trim() || (item.price_clp != null ? `${Number(item.price_clp).toLocaleString('es-CL')}` : '')].filter(Boolean).join(', ');
           return details ? `${item.name} (${details})` : item.name;
         };
         const bookableServices = (catalogSource.services || []).filter(item => item.bookable !== false);

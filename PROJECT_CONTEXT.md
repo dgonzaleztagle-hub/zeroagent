@@ -2418,3 +2418,10 @@ Daniel pidió arreglos generalistas, no listas de frases. La regla `sin_paradero
 - Mensaje de la rama "pregunta corta de plata con hora tomada" sin montos fijos y sin derivar por precios conocidos (claudia-son-30-mil: de ~50% a 6/6).
 - Casos nuevos en el holdout: `h-no-dice-paradero`, `h-paradero-otra-forma`, `h-confirma-hora-no-consultada`. Flakes conocidos que siguen: carmen-repite, pilar-sin-modalidad, D-b1-casa-tras-agendar, h-lo-mas-tarde.
 - Costo: +1 llamada corta al LLM por respuesta (~160 tokens de salida).
+
+### 03-11-2026 (noche) · Domicilio: sesión + recargo, nunca el total
+
+Regla de Francisco (lista de precios nuevos): a domicilio se dice "$38.000 la sesión + $6.000 de recargo por traslado", nunca "$44.000", porque la gente pregunta cuánto sale el domicilio y después aparece un turno extra que no corresponde. El primer arreglo (dar el valor exacto del servicio) había introducido justo el error contrario ("$44.000, traslado incluido"); corregido:
+- `za_services.price_note` (columna que ya existía y no se leía) del servicio "Atención a domicilio" = "$38.000 la sesión + $6.000 de recargo por el traslado a domicilio"; `price_clp` sigue en 44.000 sólo para el total interno de la reserva.
+- Mecanismo general: si un servicio tiene `price_note`, esa frase reemplaza al número en el catálogo del prompt (`engine.js`), en la confirmación de la reserva (`confirmationData`) y en `get_availability` (`valor_a_decir`, sin exponer el total). `agenda.js` ahora carga `price_note`. Aplica a cualquier servicio con precio desglosado, no sólo a domicilio.
+- Caso nuevo en el holdout: `h-domicilio-desglosa-precio`. `h-domicilio-en-zona` 4/4 con el desglose.
