@@ -525,11 +525,13 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
       // za_request_appointment dedupea reintentos devolviendo la fila existente — si ya tiene
       // event_id, un reintento acá crearía un segundo evento y una segunda invitación por correo.
       if (appointment.google_calendar_event_id) return;
+      // La cita ya trae su sede real (la resuelve la RPC aunque ni el bot ni el recurso la manden): sin esto el evento quedaba sin color.
+      const eventLocation = location || dashboard.catalog.locations.find(item => item.id === appointment.location_id) || null;
       const created = await createGoogleCalendarEvent({
         summary: `${calendarTitleName} — ${serviceName}`,
         description: [`Servicio: ${serviceName}`, `Teléfono: ${customerPhone}`, notesWithRisk].filter(Boolean).join('\n'),
         startIso: appointment.starts_at, endIso: appointment.ends_at,
-        attendeeEmail: customerEmail || null, colorId: colorIdForLocation(location?.name || '', service.delivery_mode || ''), locationName: location?.name || '', deliveryMode: service.delivery_mode || ''
+        attendeeEmail: customerEmail || null, colorId: colorIdForLocation(eventLocation?.name || '', service.delivery_mode || ''), locationName: eventLocation?.name || '', deliveryMode: service.delivery_mode || ''
       });
       if (!created) return;
       const { eventId, calendarId } = created;
