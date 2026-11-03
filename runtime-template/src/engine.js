@@ -630,7 +630,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
             return rule?.id && !forbiddenRetried.has(rule.id)
               && new RegExp(rule.forbid, 'i').test(rawText)
               && !(rule.unless && userTurns.some(text => new RegExp(rule.unless, 'i').test(String(text || ''))))
-              && !history.some(item => item.role === 'assistant' && new RegExp(rule.forbid, 'i').test(item.content));
+              && (rule.ignore_history || !history.some(item => item.role === 'assistant' && new RegExp(rule.forbid, 'i').test(item.content)));
           } catch { return false; }
         });
         if (rawText && forbiddenRule && round < 4) {
