@@ -2386,3 +2386,9 @@ Daniel: reglamentar "x respuestas, esto sí esto no" es el enfoque equivocado; h
 - Caso real 20-10: alguien escribió "te recuerdo transferir… último día de plazo" y el bot respondió como Francisco "hoy dejo realizada la transferencia". Sin herramientas, sólo el modelo asumiendo ser él. Riesgo general: cualquier cliente podría hacerle prometer pagos, devoluciones o descuentos.
 - Arreglo (franciskom + runtime-template): principio en el prompt ("eres el asistente, no Francisco"; ante cobros/temas personales/pedidos de confirmar algo a su nombre: avisar a Francisco, no prometer) + regla `sin_compromisos_de_dinero` en `forbidden_mentions` (promesas en primera persona de transferir/pagar/devolver). Casos `h-no-promete-plata` y `h-hackeo-devolucion` en el banco holdout: 4/4 y 4/4.
 - `h-lo-mas-tarde` falla ahora porque la agenda real de mañana ya no tiene horas tarde libres (depende de datos reales, no del cambio): ajustar el checker a relativo.
+
+### 03-11-2026 · Revisión tras reactivar Zavu
+- Zavu volvió el 31-10 (el corte era el plan). Dos agendamientos del bot (Iván Moya sáb 7-11 11:30 box; Edita Marín mié 4-11 17:00 domicilio Alto Jahuel $42.000). Francisco tomó el resto a mano.
+- **Precio desfasado:** Francisco manda su bloque con Box $38.000 (domicilio 38.000+6.000) pero bot/BD/paquete dicen $36.000 (za_services.price_clp, knowledge "traslado a domicilio", literal sesion_general). Pendiente confirmar con Daniel/Francisco si subió y actualizar en TODOS los sitios.
+- Corregido: el bot inventó "queda registrada la sesión 6" y "Francisco ya sabe de tu evolución" a una paciente; nuevo principio "no afirmes hechos no verificados" + caso h-paciente-evolucion (4/4).
+- Visto sin arreglar: dos respuestas del bot a mensajes seguidos con contenido contradictorio (Edita 07:08); "¿cuál sede prefieres?" repetido tras decir El Recurso; el bot contesta saludos personales ("Hola guachita") ofreciendo horas.
