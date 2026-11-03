@@ -43,12 +43,6 @@
         "forbid": "(te|le|les|se)\\s+(transfiero|deposito|devuelvo|reembolso|pago|pagar[eé]|regalo)|dejo realizada la transferencia|(hago|realizo|haré|har[eé]) (hoy |ahora |luego )?(la |el |una )?(transferencia|pago|devoluci[oó]n|dep[oó]sito)|(hoy|ahora|luego|mañana) transfiero|\\btransfiero",
         "instruction": "No eres Francisco ni puedes comprometer pagos, transferencias, devoluciones ni descuentos en su nombre. Quita esa promesa: dile que le pasas el mensaje a Francisco y avísale con la herramienta.",
         "ignore_history": true
-      },
-      {
-        "id": "sin_paradero_de_francisco",
-        "forbid": "(francisco|el \\w+|kinesi[oó]logo|[eé]l)\\s+(ya |ya se |se )?(va|viene|est[aá]|anda|sale|llega|lleg[oó]|iba|venía)\\s+(en camino|para all[aá]|para tu casa|a tu casa|llegando|saliendo|atendiendo|afuera|en el box|de camino)|en camino|ya (va|viene|llega|est[aá] llegando)\\b|(est[aá]|anda) (llegando|saliendo|afuera)|llega en \\d+ ?(min|hora)",
-        "ignore_history": true,
-        "instruction": "No sabes dónde está Francisco ni a qué hora llega, y no puedes confirmar una visita que no consultaste con la herramienta. Quita esa frase: si preguntan por una hora ya tomada, consúltala con get_my_appointment; si no aparece o no estás seguro, dile con una frase que le avisas a Francisco para que él le confirme, y avísale con la herramienta."
       }
     ]
   },

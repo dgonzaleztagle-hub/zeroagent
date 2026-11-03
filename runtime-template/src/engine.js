@@ -8,6 +8,7 @@ import { cancelRequestedByClient as cancelRequestedByClientGuard, hourChosenByCl
 import { AGENDA_BEHAVIOR } from './agenda-behavior.js';
 import { liveInjectedFacts } from './business-data.js';
 import { judgeConversationStage } from './conversation-judge.js';
+import { auditDraftGrounding } from './grounding-judge.js';
 import { detectInternalLeak, dropRepeatedSentences, fixRelativeDays, isCourtesyOnly, repeatsLastAgentMessage, upcomingDaysTable } from './turn-guards.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -379,6 +380,9 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     let echoRetried = false;
     let leakRetried = false;
     let repeatRetried = false;
+    let groundingRetried = false;
+    let mutationRetried = false;
+    let groundingNotice = false;
     let literalSuggested = null;
     const internalSources = internalFacts.map(fact => ({ id: fact.id, text: `${fact.subject}: ${fact.value}` }));
     // Cada borrador que una guarda rechaza queda en la traza con su motivo: sin esto la auditoría
@@ -670,6 +674,24 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           messages.push({ role: 'system', content: 'Ese mensaje NO se envió: es casi igual a tu mensaje anterior en esta conversación. No repitas: responde sólo a lo nuevo que dijo el cliente, en una o dos frases. Si no hay nada nuevo que responder, llama no_intervenir si la tienes; si no, haz una sola pregunta corta distinta.' });
           continue;
         }
+        // Auditor general de respaldo: lo que el borrador afirma del mundo tiene que venir de una herramienta de
+        // este turno o del conocimiento confirmado, no de mensajes viejos ni del modelo. También detecta la
+        // promesa de avisar al dueño para que el runtime la cumpla aunque el modelo no llame la herramienta.
+        if (rawText && !handoffReason && round < 4 && !groundingRetried && process.env.GROUNDING_AUDIT !== 'off') {
+          const audit = await auditDraftGrounding(llm, { history, message, draft: rawText, facts: selectedFacts, toolTrace, booked: upcomingAppointments }, { isGpt5Family }).catch(() => null);
+          if (audit) {
+            totalInputTokens += audit.usage.input; totalOutputTokens += audit.usage.output;
+            groundingNotice = audit.promisesNotice;
+            if (process.env.AUDIT_DEBUG) console.error('AUDIT', JSON.stringify({ draft: rawText.slice(0, 300), detail: audit.detail, unsupported: audit.unsupported }));
+            if (audit.unsupported) {
+              groundingRetried = true;
+              rejectDraft('ungrounded_claim', rawText, audit.detail);
+              messages.push({ role: 'assistant', content: rawText });
+              messages.push({ role: 'system', content: 'Ese mensaje NO se envió: afirma algo que no consultaste con una herramienta en este turno ni está en el conocimiento confirmado (' + audit.detail + '). Lo que se dijo antes en la conversación no vale como dato de hoy. Consulta la herramienta que corresponda y usa sólo lo que devuelve; si no puedes verificarlo, no lo afirmes: reformula sin esa parte y, sólo si es algo que únicamente Francisco puede confirmar, dile que le avisas y llama avisar_al_dueno.' });
+              continue;
+            }
+          }
+        }
         const finalText = finalizeText(rawText);
         let validation = validateMutationClaims(finalText, toolTrace, { appointmentOnFile: hasBooking });
         // "Le aviso a Francisco" sin haber llamado la herramienta: antes se reemplazaba por
@@ -680,9 +702,21 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           ownerAlert = ownerAlert || `El agente le dijo al cliente que te avisaba. Último mensaje del cliente: "${String(message || '').slice(0, 200)}"`;
           validation = { ok: true, text: finalText };
         }
+        // Afirmó una operación sin evidencia de herramienta: antes de caer al texto genérico de respaldo (que
+        // habla de "tu reserva" aunque la pregunta fuera otra) se le devuelve una vez al modelo para que lo corrija.
+        if (!validation.ok && !mutationRetried && round < 4) {
+          mutationRetried = true;
+          rejectDraft('unsupported_mutation_claim', rawText, validation.blockedTool);
+          messages.push({ role: 'assistant', content: rawText });
+          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: afirma que hiciste o dejaste hecha una operación (' + validation.blockedTool + ') y la herramienta no lo confirmó en este turno. No afirmes lo que no hiciste: si la persona pidió algo que no pudiste hacer o verificar, dile en una frase que le avisas a Francisco para que él le confirme, y llama avisar_al_dueno.' });
+          continue;
+        }
         const text = validation.text || bookingChangeNotice(toolTrace);
         if (!text) throw new Error('Groq devolvió una respuesta vacía');
         const handoff = toolTrace.some(item => item.name === 'request_human_handoff' && item.result?.ok);
+        if (groundingNotice && !handoff && !toolTrace.some(item => item.name === 'avisar_al_dueno' && item.result?.ok)) {
+          ownerAlert = ownerAlert || `El agente le dijo al cliente que te avisaba. Último mensaje del cliente: "${String(message || '').slice(0, 200)}"`;
+        }
         // Antes, un "no tengo ese dato confirmado" contaba como traspaso: dejaba el hilo mudo y le
         // mandaba un aviso urgente al dueño por no saber un dato. Ahora es un aviso blando — el
         // dueño se entera igual, pero el agente sigue atendiendo la conversación.
