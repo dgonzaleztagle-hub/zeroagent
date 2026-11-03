@@ -806,7 +806,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           // completo: la sede de su hora tiene un valor y se le dice en una frase. Reenviarlo mezclaba los
           // $30.000 de otra sede con los $36.000 de la suya (franciskom, 09-10-2026).
           if (chosen && !literalSent && hasBooking && /\$\s?\d/.test(chosen.text) && String(message || '').trim().split(/\s+/).length <= 8) {
-            answerTool({ ok: false, action: 'answer_in_words', message: 'El cliente ya tiene una hora tomada y hace una pregunta corta. No mandes el bloque de precios entero: respóndele en una frase con el valor de la sede de SU hora. Si el monto que menciona es el de otra sede o servicio, dile expresamente que ese valor corresponde a esa otra sede y cuál es el de su hora ("los $30.000 son de Eleva Salud; tu hora es en Box Buin y vale $36.000"), usando el conocimiento confirmado.' });
+            answerTool({ ok: false, action: 'answer_in_words', message: 'El cliente ya tiene una hora tomada y hace una pregunta corta. No mandes el bloque de precios entero: respóndele en una frase con el valor de la sede de SU hora. Si el monto que menciona es el de otra sede o servicio, dile expresamente que ese valor corresponde a esa otra sede y cuál es el de su hora ("ese valor es de la otra sede; tu hora es en <su sede> y vale <valor de esa sede>"), usando el conocimiento confirmado. Siempre da el valor de su sede en la misma respuesta: nunca respondas que "depende" ni lo derives a Francisco por una pregunta de precio que está en el conocimiento confirmado.' });
             continue;
           }
           // Si en este turno se anuló o se cambió la hora, el bloque no puede ir solo: el cliente se

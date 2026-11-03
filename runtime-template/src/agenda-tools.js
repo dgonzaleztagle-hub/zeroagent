@@ -381,6 +381,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
         // El día ya resuelto en código: el modelo lo copia tal cual en vez de calcular si es "hoy",
         // "mañana" o qué día de la semana cae (ver turn-guards.js).
         dia: dayLabel(args.date, tz),
+        ...(Number(service.price_clp) > 0 ? { valor_sesion_clp: Number(service.price_clp), valor_nota: 'Es el valor completo de ESTE servicio (el traslado ya va incluido si es a domicilio). Si dices el precio, usa este número; no lo sumes ni lo restes ni uses el de otro servicio.' } : {}),
         available_slots: availableSlots,
         total_disponibles: availableSlots.length,
         ofrecer_primero: shortlist.map(slot => slot.hora_local),
