@@ -529,7 +529,7 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
         summary: `${calendarTitleName} — ${serviceName}`,
         description: [`Servicio: ${serviceName}`, `Teléfono: ${customerPhone}`, notesWithRisk].filter(Boolean).join('\n'),
         startIso: appointment.starts_at, endIso: appointment.ends_at,
-        attendeeEmail: customerEmail || null, colorId: colorIdForLocation(location?.name || ''), locationName: location?.name || '', deliveryMode: service.delivery_mode || ''
+        attendeeEmail: customerEmail || null, colorId: colorIdForLocation(location?.name || '', service.delivery_mode || ''), locationName: location?.name || '', deliveryMode: service.delivery_mode || ''
       });
       if (!created) return;
       const { eventId, calendarId } = created;
@@ -602,7 +602,7 @@ export async function createAgendaAppointment(packageData, input, source = 'clie
       summary: `${calendarTitleName} — ${serviceName}`,
       description: [`Servicio: ${serviceName}`, `Teléfono: ${customerPhone}`, notesWithRisk].filter(Boolean).join('\n'),
       startIso: appointment.starts_at, endIso: new Date(endTime).toISOString(),
-      attendeeEmail: customerEmail || null, colorId: colorIdForLocation(appointment.location), locationName: appointment.location, deliveryMode: service.delivery_mode || ''
+      attendeeEmail: customerEmail || null, colorId: colorIdForLocation(appointment.location, service.delivery_mode || ''), locationName: appointment.location, deliveryMode: service.delivery_mode || ''
     });
     if (!created) return;
     const { eventId, calendarId } = created;

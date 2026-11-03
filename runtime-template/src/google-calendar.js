@@ -344,7 +344,9 @@ const LOCATION_COLOR_IDS = {
   'Atención a domicilio': '5'    // Banana (amarillo)
 };
 
-export function colorIdForLocation(locationName) {
+export function colorIdForLocation(locationName, deliveryMode = '') {
+  // Una visita a domicilio no tiene sede (location null): se reconoce por el modo de entrega del servicio.
+  if (deliveryMode === 'mobile') return LOCATION_COLOR_IDS['Atención a domicilio'];
   return LOCATION_COLOR_IDS[locationName] || null;
 }
 
