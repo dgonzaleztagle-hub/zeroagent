@@ -104,7 +104,7 @@
         "source_id": null,
         "category": "políticas",
         "subject": "traslado a domicilio",
-        "value": "La atención a domicilio cuesta $36.000 más el traslado. El traslado de $6.000 aplica sólo para Buin, Linderos, Paine centro, Alto Jahuel y Maipo. Para cualquier otra comuna (ej. Isla de Maipo u otras más lejanas), el valor del traslado varía según la distancia y no se debe cotizar de memoria — hay que preguntar la dirección/comuna exacta y confirmar el valor antes de dar un precio.",
+        "value": "La atención a domicilio cuesta $38.000 más el traslado. El traslado de $6.000 aplica sólo para Buin, Linderos, Paine centro, Alto Jahuel y Maipo. Para cualquier otra comuna (ej. Isla de Maipo u otras más lejanas), el valor del traslado varía según la distancia y no se debe cotizar de memoria — hay que preguntar la dirección/comuna exacta y confirmar el valor antes de dar un precio.",
         "notes": "",
         "confirmed_at": "2026-08-01T04:01:16.147Z"
       },
@@ -164,7 +164,7 @@
           {
             "name": "Sesión · Box Buin",
             "duration_minutes": 60,
-            "price_clp": 36000
+            "price_clp": 38000
           },
           {
             "name": "Sesión · Eleva Salud",
@@ -174,7 +174,7 @@
           {
             "name": "Atención a domicilio",
             "duration_minutes": 120,
-            "price_clp": 42000
+            "price_clp": 44000
           }
         ],
         "resources": [
