@@ -51,6 +51,33 @@ export function hourChosenByClient({ time, message, history = [] }) {
   return false;
 }
 
+// ---------- Día conversado ----------
+
+const WEEKDAY_NAMES = ['domingo', 'lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'];
+const ymdOf = (date, timeZone) => new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+const utcOf = ymd => { const [y, m, d] = String(ymd).split('-').map(Number); return Date.UTC(y, m - 1, d); };
+
+/**
+ * ¿El día `date` ("YYYY-MM-DD") salió en la conversación? El modelo no puede tomar una hora en un
+ * día que nadie nombró: Marjorie (14-11-2026) pidió "el jueves 26" y el intento fue el jueves 19.
+ * Vale si alguien escribió el número del día, si es hoy/mañana/pasado mañana, o si en los últimos
+ * mensajes se nombró ese día de la semana sin un número al lado y cae dentro de la semana que viene.
+ * Sin fecha legible no bloquea (lo valida la herramienta).
+ */
+export function dayDiscussed({ date, message, history = [], timeZone = 'America/Santiago', now = new Date() }) {
+  if (!/^\d{4}-\d{2}-\d{2}/.test(String(date || ''))) return true;
+  const ymd = String(date).slice(0, 10);
+  const offset = Math.round((utcOf(ymd) - utcOf(ymdOf(now, timeZone))) / 86_400_000);
+  if (offset >= 0 && offset <= 2) return true;
+  const texts = [...history.filter(item => item.role === 'user' || item.role === 'assistant').map(item => normalizeText(item.content)), normalizeText(message)];
+  const day = Number(ymd.slice(8));
+  const numberRe = new RegExp(`(^|[^\\d$.,:])0?${day}(?![\\d:.]|\\s*(?:hrs?|horas|am|pm|sesiones|anos|meses|semanas|dias|minutos|mil|lucas)\\b)`);
+  if (texts.some(text => numberRe.test(text))) return true;
+  const weekday = WEEKDAY_NAMES[new Date(utcOf(ymd)).getUTCDay()];
+  const bareWeekday = new RegExp(`\\b${weekday}\\b(?!\\s+\\d{1,2}(?![\\d:.]))`);
+  return offset > 0 && offset <= 7 && texts.slice(-4).some(text => bareWeekday.test(text));
+}
+
 // ---------- Cancelación ----------
 
 /**
@@ -85,7 +112,14 @@ export function cancelRequestedByClient({ message, lastAssistantText = '' }) {
 export function modalityEstablished({ offersBothModes, history = [], message, homeVisit, mentionsOnsite }) {
   if (!offersBothModes) return true;
   const clientTexts = [...history.filter(item => item.role === 'user').map(item => item.content), String(message || '')];
-  return clientTexts.some(text => homeVisit.test(text) || mentionsOnsite(text));
+  if (clientTexts.some(text => homeVisit.test(text) || mentionsOnsite(text))) return true;
+  // "¿La sesión es en el Box Buin, cierto?" contestado con "Siii": confirmar una sede nombrada sola
+  // (sin la alternativa de domicilio en la misma pregunta) es elegirla.
+  const lastAssistantText = [...history].reverse().find(item => item.role === 'assistant')?.content || '';
+  // Solo si el asistente preguntó explícitamente por la sede ("…, ¿cierto?"): aceptar una oferta de
+  // hora en el box no es elegir modalidad (una paciente de domicilio también dice "sí" a la hora).
+  return AFFIRM.test(normalizeText(message)) && /\b(cierto|verdad|correcto)\s*\?/i.test(lastAssistantText)
+    && mentionsOnsite(lastAssistantText) && !homeVisit.test(lastAssistantText);
 }
 
 export { normalizeText };

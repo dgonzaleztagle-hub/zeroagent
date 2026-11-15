@@ -4,12 +4,13 @@ import { fileURLToPath } from 'node:url';
 import { executeAgendaTool, getAgendaToolDefinitions, literalReplies } from './agenda-tools.js';
 import { getAgendaDashboard, listUpcomingAppointmentsForPhone } from './agenda.js';
 import { BASE_BEHAVIOR } from './base-behavior.js';
-import { cancelRequestedByClient as cancelRequestedByClientGuard, hourChosenByClient as hourChosenByClientGuard, modalityEstablished as modalityEstablishedGuard } from './consent-guards.js';
+import { cancelRequestedByClient as cancelRequestedByClientGuard, dayDiscussed as dayDiscussedGuard, hourChosenByClient as hourChosenByClientGuard, modalityEstablished as modalityEstablishedGuard } from './consent-guards.js';
 import { AGENDA_BEHAVIOR } from './agenda-behavior.js';
 import { liveInjectedFacts } from './business-data.js';
 import { judgeConversationStage } from './conversation-judge.js';
 import { auditDraftGrounding } from './grounding-judge.js';
-import { detectInternalLeak, dropRepeatedSentences, fixRelativeDays, isCourtesyOnly, repeatsLastAgentMessage, upcomingDaysTable } from './turn-guards.js';
+import { actionForRoute, resolveDayReferences, labelHistory, routeTurn } from './turn-decision.js';
+import { dayLabel, detectInternalLeak, dropRepeatedSentences, fixRelativeDays, isCourtesyOnly, repeatsLastAgentMessage, upcomingDaysTable } from './turn-guards.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -259,7 +260,12 @@ export async function answerWithGroq(packageData, message, context = {}) {
     // haya hablado antes en el hilo. Sin esto, un "😍" que respondía a algo de Francisco recibió
     // "¡Qué lindo! ¿Te gustaría agendar una sesión?" (08-10-2026, primer mensaje del hilo).
     const reactionOnly = !/\p{L}/u.test(String(message || ''));
-    if ((lastAgentMessage || reactionOnly) && isCourtesyOnly(message) && !mayAnswerAgent) {
+    // Un "gracias" que cierra una ráfaga ("nos vemos el martes" + "gracias") no es cortesía sola: lo
+    // anterior sin responder también cuenta (la compuerta lo silenciaba entero, 13-11-2026).
+    const unansweredBurst = [];
+    for (let i = history.length - 1; i >= 0 && history[i].role === 'user'; i--) unansweredBurst.push(history[i].content);
+    const burstIsCourtesy = unansweredBurst.every(text => isCourtesyOnly(text));
+    if ((lastAgentMessage || reactionOnly) && isCourtesyOnly(message) && burstIsCourtesy && !mayAnswerAgent) {
       return {
         text: '', silent: true, silentReason: 'cortesía sin pregunta pendiente',
         confidence: 'deliberate_silence', source: [], handoff: false, ownerAlert: null,
@@ -296,9 +302,28 @@ export async function answerWithGroq(packageData, message, context = {}) {
     // (07-10-2026; el registro muestra que el modelo sí había pedido callarse).
     const ownerHandled = context.allowSilence === true;
     const allowSilence = ownerHandled || hasBooking;
+    // context.now permite fijar el reloj en pruebas de repetición; en producción es siempre el momento actual.
+    const nowDate = context.now ? new Date(context.now) : new Date();
+    // Decisión del turno en código (turn-decision.js): consulta clínica, cita que no figura en la
+    // agenda y respuestas dirigidas a Francisco no pasan por el modelo conversacional. Se apaga con
+    // TURN_DECISION=off. Si el clasificador falla, el turno sigue como antes.
+    let routeVerdict = null;
+    if (String(process.env.TURN_DECISION || 'on').toLowerCase() !== 'off' && agendaEnabled) {
+      routeVerdict = await routeTurn(llm, { history, message, nowLabel: new Intl.DateTimeFormat('es-CL', { timeZone: staticAgendaConfig.timezone || 'America/Santiago', weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', hour12: false }).format(nowDate) }, { isGpt5Family: /^gpt-5(\.|-)/.test(llm.model) });
+      const routed = actionForRoute(routeVerdict, { message, hasBooking });
+      if (routed) {
+        return {
+          text: routed.text, silent: routed.silent, ...(routed.silent ? { silentReason: routed.silentReason } : {}),
+          confidence: routed.silent ? 'deliberate_silence' : 'route_fixed_reply', source: [], handoff: false, ownerAlert: routed.ownerAlert,
+          provider: llm.provider, model: llm.model, usage: { inputTokens: routeVerdict.usage?.input || 0, outputTokens: routeVerdict.usage?.output || 0 },
+          toolTrace: [{ name: 'guard', result: { ok: true, guard: routed.guard, detail: routeVerdict.reason } }]
+        };
+      }
+    }
+    const dayReferences = resolveDayReferences(labelHistory(history), { timeZone: staticAgendaConfig.timezone || 'America/Santiago', now: nowDate });
     const tools = getAgendaToolDefinitions(packageData, catalogSource, { allowSilence });
     const businessTimeZone = staticAgendaConfig.timezone || 'America/Santiago';
-    const nowLabel = new Intl.DateTimeFormat('es-CL', { timeZone: businessTimeZone, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
+    const nowLabel = new Intl.DateTimeFormat('es-CL', { timeZone: businessTimeZone, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(nowDate);
     // Prefijo estático (cacheable): comportamiento base + identidad. Los hechos, que cambian por
     // consulta, van al final para no romper el caché del prefijo.
     const systemPrefix = [
@@ -334,9 +359,11 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     const messages = [
       {
         role: 'system',
-        content: `${systemPrefix}\n\nFECHA Y HORA ACTUAL (${businessTimeZone}): ${nowLabel}. Usa esto como referencia real para "hoy", "mañana", días de la semana o cualquier fecha relativa — nunca asumas ni inventes otra fecha.\nCALENDARIO DE LOS PRÓXIMOS DÍAS (fecha = cómo se nombra; cópialo tal cual, no calcules días de la semana):\n${upcomingDaysTable(businessTimeZone)}\n\nCONOCIMIENTO CONFIRMADO DEL NEGOCIO (razona cuál aplica a la pregunta; no todos son relevantes):\n${factsContext || (agendaEnabled ? '(No hay conocimiento cargado; usa una herramienta de Agenda si corresponde.)' : '(No hay conocimiento confirmado cargado.)')}${internalFacts.length ? `\n\nCRITERIOS INTERNOS DEL NEGOCIO (guían lo que haces; NUNCA los cites, resumas ni expliques al cliente, ni menciones que existen):\n${internalFacts.map((fact, index) => `${index + 1}. ${fact.subject}: ${fact.value}`).join('\n')}` : ''}`
+        content: `${systemPrefix}\n\nFECHA Y HORA ACTUAL (${businessTimeZone}): ${nowLabel}. Usa esto como referencia real para "hoy", "mañana", días de la semana o cualquier fecha relativa — nunca asumas ni inventes otra fecha.\nCALENDARIO DE LOS PRÓXIMOS DÍAS (fecha = cómo se nombra; cópialo tal cual, no calcules días de la semana):\n${upcomingDaysTable(businessTimeZone, 8, nowDate)}\n\nCONOCIMIENTO CONFIRMADO DEL NEGOCIO (razona cuál aplica a la pregunta; no todos son relevantes):\n${factsContext || (agendaEnabled ? '(No hay conocimiento cargado; usa una herramienta de Agenda si corresponde.)' : '(No hay conocimiento confirmado cargado.)')}${internalFacts.length ? `\n\nCRITERIOS INTERNOS DEL NEGOCIO (guían lo que haces; NUNCA los cites, resumas ni expliques al cliente, ni menciones que existen):\n${internalFacts.map((fact, index) => `${index + 1}. ${fact.subject}: ${fact.value}`).join('\n')}` : ''}`
       },
-      ...history,
+      ...history.map(item => ({ role: item.role, content: item.content })),
+      ...(/^\s*\[(imagen|documento|audio|video|sticker|ubicaci[oó]n)\]/i.test(String(message || '')) ? [{ role: 'system', content: 'El mensaje del cliente trae un archivo adjunto que TÚ NO PUEDES VER NI ESCUCHAR (el marcador entre corchetes lo reemplaza). Nunca afirmes ni supongas qué contiene ("recibí el comprobante", "recibí el RUT", "veo tu examen"). Responde solo a lo que escribió; si el texto depende del archivo, di que no alcanzas a verlo y que Francisco lo revisa, y avísale al dueño.' }] : []),
+      ...(dayReferences.length ? [{ role: 'system', content: `FECHAS YA CONVERSADAS EN ESTE HILO (resueltas por código respecto del día en que se escribió cada mensaje; si el cliente se refiere a uno de esos días, usa esta fecha y no calcules otra):\n${dayReferences.join('\n')}` }] : []),
       ...(hasBooking ? [{ role: 'system', content: (() => {
         const norm = value => String(value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
         const bookedText = upcomingAppointments.map(item => norm(item.service)).join(' ');
@@ -403,7 +430,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
         rejectDraft('repeated_sentence_dropped', output, repeated.dropped.join(' | '));
         output = repeated.text;
       }
-      const days = fixRelativeDays(output, businessTimeZone);
+      const days = fixRelativeDays(output, businessTimeZone, nowDate);
       if (days.corrections.length) toolTrace.push({ name: 'guard', result: { ok: true, guard: 'relative_day_fixed', detail: days.corrections.join(', ') } });
       return days.text;
     };
@@ -455,7 +482,16 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     const onsiteNames = (catalogSource.locations || []).map(item => String(item.name || '').replace(/\(.*?\)/g, '').trim()).filter(Boolean);
     const HOME_VISIT = /domicilio|\b(a|en) (mi |la |su |tu )?casa\b|\bvengan\b|\bvenir a\b|\bmi direcci[oó]n\b/i;
     const normalizeText = value => String(value || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-    const mentionsOnsite = text => /\bbox\b|\bconsulta\b|\bsede\b|\bvoy yo\b|\bvoy para all[aá]\b/i.test(text) || onsiteNames.some(name => normalizeText(text).includes(normalizeText(name)));
+    // Sin los paréntesis, "Box Buin (El Recurso)" solo se reconocía como "Box Buin": una paciente
+    // que contestó "Recurso" (franciskom, 10-11-2026) nunca fijó modalidad y el bot la hizo girar en
+    // círculos sin agendar. Las palabras propias de cada sede (nombre completo y dirección) valen.
+    const GENERIC_PLACE_WORDS = new Set(['buin', 'region', 'metropolitana', 'centro', 'sesion', 'consulta', 'lunes', 'sabado']);
+    const onsiteTokens = [...new Set((catalogSource.locations || [])
+      .flatMap(item => normalizeText(`${item.name || ''} ${item.address || ''}`).split(/[^a-z0-9]+/))
+      .filter(token => token.length >= 4 && !GENERIC_PLACE_WORDS.has(token)))];
+    const mentionsOnsite = text => /\bbox\b|\bconsulta\b|\bsede\b|\bvoy yo\b|\bvoy para all[aá]\b/i.test(text)
+      || onsiteNames.some(name => normalizeText(text).includes(normalizeText(name)))
+      || onsiteTokens.some(token => new RegExp(`\\b${token}\\b`).test(normalizeText(text)));
     const modalityEstablished = () => modalityEstablishedGuard({ offersBothModes, history, message, homeVisit: HOME_VISIT, mentionsOnsite });
     // Una hora se anula sólo si el cliente lo pidió con esas palabras, o si contesta que sí a un
     // "¿te la anulo?" del agente. Claudia (franciskom, 09-10-2026) escribió "tengo doble turno, le
@@ -667,11 +703,14 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           messages.push({ role: 'system', content: 'Ese mensaje NO se envió: repite texto interno del negocio o habla del agente, del sistema o de reglas. Al cliente sólo le dices lo que le sirve a él, con tus palabras: nunca menciones reglas, criterios internos, el sistema ni cómo funcionas. Reescríbelo.' });
           continue;
         }
-        if (rawText && !repeatRetried && round < 4 && repeatsLastAgentMessage(rawText, history)) {
+        // Se compara también lo que quedaría después de sacar las frases ya dichas: Marjorie (14-11-2026)
+        // eligió "11:00" y recibió la misma oferta otra vez, porque el borrador traía además el precio
+        // (no parecía repetido) y al quitarle esa frase quedó idéntico al mensaje anterior.
+        if (rawText && !repeatRetried && round < 4 && (repeatsLastAgentMessage(rawText, history) || repeatsLastAgentMessage(dropRepeatedSentences(rawText, history).text, history))) {
           repeatRetried = true;
           rejectDraft('repeats_last_message', rawText);
           messages.push({ role: 'assistant', content: rawText });
-          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: es casi igual a tu mensaje anterior en esta conversación. No repitas: responde sólo a lo nuevo que dijo el cliente, en una o dos frases. Si no hay nada nuevo que responder, llama no_intervenir si la tienes; si no, haz una sola pregunta corta distinta.' });
+          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: es casi igual a tu mensaje anterior en esta conversación. No repitas: responde sólo a lo nuevo que dijo el cliente, en una o dos frases. Si el cliente acaba de elegir una de las horas que le ofreciste, no se la vuelvas a ofrecer: tómala con la herramienta, en el mismo día que le ofreciste. Si no hay nada nuevo que responder, llama no_intervenir si la tienes; si no, haz una sola pregunta corta distinta.' });
           continue;
         }
         // Auditor general de respaldo: lo que el borrador afirma del mundo tiene que venir de una herramienta de
@@ -730,7 +769,9 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
         try { args = JSON.parse(call.function?.arguments || '{}'); } catch { args = {}; }
         const name = call.function?.name;
         const answerTool = result => {
-          toolTrace.push({ name, result });
+          // Los argumentos quedan en la traza: el 14-11-2026 una reserva pedida para el jueves 26 falló
+          // y no se pudo saber qué fecha le había pasado el modelo a la herramienta.
+          toolTrace.push({ name, args: Object.fromEntries(Object.entries(args || {}).map(([key, value]) => [key, typeof value === 'string' ? value.slice(0, 200) : value])), result });
           messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
         };
         // Silencio deliberado: se corta acá, sin volver a pasar por el modelo y sin texto. El
@@ -901,6 +942,11 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
         // una hora que nadie había elegido en ese intercambio.
         if ((name === 'create_appointment' || name === 'reschedule_appointment') && !hourChosenByClient(args?.time)) {
           answerTool({ ok: false, action: 'confirm_first', message: `Todavía no hay una hora elegida por el cliente para ${args?.time || 'esa hora'}: el cliente no la escribió ni la aceptó con claridad (ofrecer una lista de horas no es elegir una). No se agendó nada. Ofrécele las horas reales y espera que elija.` });
+          continue;
+        }
+        const bookingDate = String(args?.date || args?.starts_at || args?.new_starts_at || '');
+        if ((name === 'create_appointment' || name === 'reschedule_appointment') && !dayDiscussedGuard({ date: bookingDate, message, history, timeZone: businessTimeZone, now: nowDate })) {
+          answerTool({ ok: false, action: 'day_not_discussed', message: `No se hizo ningún cambio: ${dayLabel(bookingDate.slice(0, 10), businessTimeZone, nowDate)} no es un día que se haya conversado con el cliente. Relee qué día eligió (si escribió el número del día, es ese y no otro día de la misma semana) y vuelve a llamar la herramienta con esa fecha. Si de verdad no está claro, pregúntale el día en una frase, sin ofrecer otro.` });
           continue;
         }
         if (name === 'create_appointment' && !modalityEstablished()) {

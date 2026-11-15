@@ -55,6 +55,15 @@ test('modalidad: preguntar no es elegir', () => {
   assert.equal(modalityEstablished({ ...modalityArgs, offersBothModes: false, history: [], message: 'hola' }), true);
 });
 
+test('modalidad: "Siii" a "¿…Box Buin, cierto?" elige la sede; "sí" a una oferta de hora no', () => {
+  const confirmQ = [u('Siii'), a('¿La sesión es en el Box Buin, sector El Recurso, cierto? Mantengo mañana a las 09:30.')];
+  assert.equal(modalityEstablished({ ...modalityArgs, history: confirmQ, message: 'Siii' }), true);
+  const offer = [u('quiero hora'), a('Tengo mañana a las 09:30 en el Box Buin por $38.000. ¿Te la dejo tomada?')];
+  assert.equal(modalityEstablished({ ...modalityArgs, history: offer, message: 'Siii' }), false);
+  const both = [u('quiero hora'), a('¿La sesión sería en el Box Buin, o a domicilio, cierto?')];
+  assert.equal(modalityEstablished({ ...modalityArgs, history: both, message: 'Siii' }), false);
+});
+
 // ---------- Preselección de horas (Francisco, 16-10-2026: no repartir 08:00 / 14:00 / 20:00) ----------
 import { pickSlotShortlist } from '../src/agenda-tools.js';
 
@@ -101,4 +110,32 @@ test('applyTimePreference respeta "lo más tarde posible" y "tarde", y no deja e
   const empty = applyTimePreference(hours.filter(s => s.hora_local < '12:00'), 'noche');
   assert.equal(empty.applied, false);
   assert.equal(empty.slots.length, 4);
+});
+
+test('día conversado: "el jueves 26" no autoriza el jueves 19 (Marjorie, 14-11-2026)', async () => {
+  const { dayDiscussed } = await import('../src/consent-guards.js');
+  const now = new Date('2026-11-14T15:27:00Z');
+  const history = [a('El miércoles 25 de noviembre tengo a las 11:00, 14:00 o 16:00. La sesión tiene un valor de $38.000.'), u('Agéndame mejor para el jueves 26 a las 12:00 por favor'), a('¿La sesión del jueves 26 a las 12:00 sería en el Box Buin o a domicilio?')];
+  assert.equal(dayDiscussed({ date: '2026-11-19', message: 'Box Buin', history, now }), false);
+  assert.equal(dayDiscussed({ date: '2026-11-26', message: 'Box Buin', history, now }), true);
+  assert.equal(dayDiscussed({ date: '2026-11-25', message: 'Box Buin', history, now }), true);
+});
+
+test('día conversado: hoy, mañana, día de semana sin número y fecha ilegible no bloquean', async () => {
+  const { dayDiscussed } = await import('../src/consent-guards.js');
+  const now = new Date('2026-11-14T15:27:00Z');
+  assert.equal(dayDiscussed({ date: '2026-11-14', message: 'a las 18:00', history: [], now }), true);
+  assert.equal(dayDiscussed({ date: '2026-11-15', message: 'mañana a las 10:00', history: [], now }), true);
+  assert.equal(dayDiscussed({ date: '2026-11-19', message: 'el jueves a las 10:00', history: [], now }), true);
+  assert.equal(dayDiscussed({ date: '2026-11-26', message: 'el jueves a las 10:00', history: [], now }), false);
+  assert.equal(dayDiscussed({ date: '', message: 'sí', history: [], now }), true);
+  assert.equal(dayDiscussed({ date: '2026-12-03', message: 'ya hice 3 sesiones, dame hora', history: [], now }), false);
+  assert.equal(dayDiscussed({ date: '2026-12-03', message: 'el 3 de diciembre a las 10:00', history: [], now }), true);
+});
+
+test('un nombre de relleno o un parentesco no cuenta como nombre y apellido', async () => {
+  const { executeAgendaTool } = await import('../src/agenda-tools.js');
+  const tryName = customer_name => executeAgendaTool({ solutions: {} }, 'create_appointment', { customer_name, date: '2026-11-26', time: '12:00' }, { dryRun: true });
+  for (const name of ['No informado', 'Sin nombre', 'mi mamá', 'Paciente Alejandro', 'Cliente WhatsApp', 'Claudia']) assert.equal((await tryName(name)).error, 'name_needs_surname', name);
+  for (const name of ['Marjorie Fuentes', 'Paciente Alejandra Farias', 'María de la Paz']) assert.equal((await tryName(name)).ok, true, name);
 });

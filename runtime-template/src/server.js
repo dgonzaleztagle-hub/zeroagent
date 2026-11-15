@@ -1362,7 +1362,9 @@ export async function handleRequest(req, res) {
       const generatedNow = !reply?.text;
       if (generatedNow) {
         const history = await loadConversationHistory(conversation?.id, 20, { excludeClientMessageId: inboundKey });
-        reply = await answerWithConfiguredAi(message, {
+        // Con adjunto, el modelo recibe el marcador ("[imagen] aquí va lo de ayer"): sin él creía que
+        // la foto era solo un texto y afirmaba qué contenía ("Recibí el RUT", 12-11-2026).
+        reply = await answerWithConfiguredAi(media ? storedContent : message, {
           callerPhone, conversationId: conversation?.id || event.data?.messageId || eventId,
           history, messageId: operationKey, operationKey, allowSilence: historyAllowsSilence(history)
         });
@@ -1399,6 +1401,21 @@ export async function handleRequest(req, res) {
       // resultado real, no un borrador conversacional, y el cliente tiene que recibirla aunque haya
       // seguido escribiendo (si no, queda con una hora tomada o anulada que nadie le confirmó).
       if (generatedNow && !changedBookingThisTurn(reply.toolTrace) && await supersededByNewerInbound(conversation?.id, inbound?.created_at)) {
+        // El texto se descarta, pero un aviso al dueño o un traspaso decidido en este turno no: el
+        // mensaje siguiente puede no repetirlo (Caro, 12-11-2026: la consulta clínica quedó sin aviso).
+        if (reply.handoff || reply.ownerAlert) {
+          await createHandoffTicket(packageData, {
+            channel: 'whatsapp', conversationId: callerPhone, customerMessage: message, agentReply: '',
+            customerName: conversation?.za_customers?.full_name || '',
+            conversationUuid: conversation?.id || '', customerId: conversation?.customer_id || '',
+            alertReason: reply.handoff ? (reply.handoffReason || '') : (reply.ownerAlert || ''),
+            kind: reply.handoff ? 'handoff' : 'owner_alert',
+            reason: reply.handoff
+              ? `Traspaso pedido por el agente: ${reply.handoffReason || 'el cliente pidió una persona o el tema no es del negocio'}`
+              : `Aviso para ti (el agente sigue atendiendo): ${reply.ownerAlert}`,
+            operationKey: `${operationKey}:handoff-ticket`
+          }).catch(error => console.error('[zavu] no se pudo guardar el aviso de un turno reemplazado:', error.message));
+        }
         await completeZavuEvent(eventId, claim.lease_token, 'ignored', { superseded: true, after_generation: true });
         return json(res, 200, { ok: true, superseded: true });
       }

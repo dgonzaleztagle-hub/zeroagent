@@ -2425,3 +2425,104 @@ Regla de Francisco (lista de precios nuevos): a domicilio se dice "$38.000 la se
 - `za_services.price_note` (columna que ya existía y no se leía) del servicio "Atención a domicilio" = "$38.000 la sesión + $6.000 de recargo por el traslado a domicilio"; `price_clp` sigue en 44.000 sólo para el total interno de la reserva.
 - Mecanismo general: si un servicio tiene `price_note`, esa frase reemplaza al número en el catálogo del prompt (`engine.js`), en la confirmación de la reserva (`confirmationData`) y en `get_availability` (`valor_a_decir`, sin exponer el total). `agenda.js` ahora carga `price_note`. Aplica a cualquier servicio con precio desglosado, no sólo a domicilio.
 - Caso nuevo en el holdout: `h-domicilio-desglosa-precio`. `h-domicilio-en-zona` 4/4 con el desglose.
+
+## Revisión de chats reales 03→08-11-2026 (franciskom)
+
+- Alcance: 1.024 mensajes, 49 hilos; el bot habló en 26 (106 mensajes); Francisco escribió 423 a mano. Bot creó 3 citas (Carla jue 20:00, Matías sáb 10:30, Camila sáb 12:30), todas correctas en hora/sede/precio $38.000. Sin fallos de entrega. Revisión a ojo, no con la vara formal del informe del 08-10.
+- Bien: tono cercano, una pregunta, cierre suave ante "lo voy a pensar", derivación Eleva Salud, desglose de domicilio, sin urgencias.
+- Errores vistos (detalle en el chat de la sesión, datos de pacientes fuera del repo): (1) bucle box/domicilio: ignora "Box Buin"/"Presencial" y repite la pregunta o pide dirección (2 hilos); (2) ignora la pregunta pendiente que Francisco dejó en el hilo ("A las 20" tomado 3 veces como pedido de videos) y habla >12 h después de un eco de Francisco; (3) fecha mal: "sábado 14" cuando el cliente hablaba de hoy sábado 7, ya pactado con Francisco; (4) consejo clínico que desvía la venta ("primero que lo evalúe el neurólogo", niño con migraña) y opinión sobre cirugía; (5) confirma cita sin respaldo ("nos vemos el martes", cita tomada por Francisco directo); (6) promesa sin acción ("Francisco quedó avisado" y luego "la hora aún no quedó agendada"); (7) interviene en pacientes en curso, amigos y comprobantes de pago (sigue pendiente el filtro por contacto); (8) audios: "no puedo escuchar audios" a un paciente en curso; (9) "no quedan horas" y Francisco igual las encuentra (3 hilos); (10) repite preguntas ya respondidas.
+
+## Spike Parlant vs motor actual · 08-11-2026
+
+- Qué: se modeló a Francisco en Parlant 4.0.3 (políticas en lenguaje natural, 5 herramientas simuladas, hechos de producción como glosario) y se corrieron 15 casos reales de la revisión del 08-11 (×2) contra Parlant y contra nuestro motor (paquete de producción ac64311, dryRun). Material en el scratchpad de la sesión (`spike/`: server.py, run.py, cases.json); no en el repo. Clave de OpenAI de Francisco usada solo para esto.
+- Resultado (n=2 por caso, sesgado a favor de Parlant porque sus políticas se escribieron conociendo los casos): Parlant 1 falla dura de 30 (tomó "Arturo Prat 116", que es Eleva Salud, como domicilio y cobró recargo) y 3 blandas; nuestro motor 5 fallas duras de 30 (confirma "nos vemos el martes" sin cita en agenda ×2, consejo clínico "primero el neurólogo" ×1 y un texto genérico de error ×1, fecha "sábado 14" ×1). Nuestro motor responde mejor al primer dolor (empático, una pregunta); Parlant a veces salta a preguntar modalidad.
+- Hallazgos: (1) Parlant distingue mensajes de Francisco (`human_agent`) de los del bot a nivel de evento; nosotros los mezclamos en rol assistant. (2) `manual` mode = traspaso nativo. (3) Parlant 4.0 ya no tiene journeys: los procedimientos son texto que el modelo sigue ("tracking which step"), o sea estado blando; el ejemplo `examples/healthcare.py` del repo usa una API que ya no existe. (4) No resuelve el estado duro (modalidad/fecha/slot): eso sigue siendo nuestro diseño. (5) Latencia ~9-21 s por turno; costo no medido.
+- Decisión pendiente de Daniel: no adoptar Parlant; robar ideas (separar mensajes de Francisco, políticas cortas por tema, traspaso por estado) y diseñar el estado duro propio (opción B + modo sombra).
+
+## Capa de decisión del turno (router + acciones en código) · 08-11-2026
+
+Archivo nuevo `runtime-template/src/turn-decision.js`, enganchado en `engine.js` antes del modelo conversacional (sin commit ni deploy aún). Apagable con `TURN_DECISION=off`; si el clasificador falla, el turno sigue como antes (fail-open).
+
+- Un clasificador barato (1 llamada corta, hilo etiquetado CLIENTE / ASISTENTE / FRANCISCO) elige ruta: `consulta_clinica`, `cita_no_verificada`, `respuesta_a_dueno`, `reserva`, `otro`.
+- Código decide: clínica → respuesta fija + aviso al dueño; cita que no figura en agenda ni fue ofrecida → respuesta fija + aviso; cliente respondiéndole a Francisco → silencio deliberado. El resto sigue al modelo.
+- Los días nombrados en el hilo ("el sábado" dicho el miércoles) se resuelven en código contra la fecha de cada mensaje (`resolveDayReferences`) y se inyectan al prompt. `conversations.js` ahora pasa `at` en el historial; `context.now` inyectable para pruebas.
+- Corrección a un hallazgo previo: producción SÍ marca los mensajes de Francisco con nota de sistema (conversations.js ~231); el arnés inicial del spike la omitía. El arnés fiel es `storage/vault/replay-franciskom/engine-run2.mjs`.
+
+Resultados (motor real, gpt-5.6-luna, 2 corridas por caso, DB en solo lectura):
+- Casos que fallaron + variantes nuevas (15 casos / 30 corridas): SIN capa 10/30, CON capa 30/30.
+- Banco original de 14 casos (28 corridas) CON capa: 28/28, sin regresiones. Tests unitarios 16/16.
+
+Límites honestos: n=2 por caso y los casos los escribí yo tras ver los fallos (sesgo); el router quedó 100% en clínicos, pero el riesgo real es falso positivo con pacientes que cuentan síntomas y preguntan algo cercano a clínico (respuesta fija seca + aviso innecesario). `no-paradero` ("¿Nos vemos hoy?" tras "Voy en camino") sale con la respuesta de "no me aparece esa hora": correcta en seguridad, tosca en tono. `resolveDayReferences` no se probó aislada (los casos con fecha cayeron en silencio por respuesta_a_dueno). Costo: +1 llamada corta por turno.
+
+No construido aún: estado de reserva persistido, reserva por slot_id, modo sombra sobre tráfico real, separar a Francisco en conversation-judge/grounding-judge. Siguiente paso recomendado: modo sombra (router corre y registra la ruta, sin actuar) 1–2 semanas sobre mensajes reales para medir falsos positivos antes de activarlo.
+
+### Despliegue de la capa · 08-11-2026
+Decisión de Daniel: a producción directo, sin modo sombra (probablemente la última oportunidad con Francisco). Portado al repo real (commit `2d9ed68`, tests 16/16), Vercel READY, franciskom.cl y /m responden 200. Verificación de comportamiento en vivo: pendiente de tráfico real. Revisión automática agendada para el 11-11-2026 09:00 (tarea `franciskom-revision-turn-decision`, usa `storage/vault/replay-franciskom/dump-chats.mjs`). Reversa: `TURN_DECISION=off` en Vercel + redeploy.
+
+## Revisión turn-decision adelantada · 10-11-2026
+Daniel adelantó la revisión (tarea agendada del 11-11 eliminada, c114 cerrado). Chats reales desde el deploy (08-11 15:11 → 10-11 ~21:40): 502 mensajes, 66 hilos, 62 respuestas del bot.
+- **La capa actuó 6 veces como consulta_clínica: 2 aciertos (resonancia con "queremos tu opinión"; discopatía L5S1 sola) y 4 falsos positivos** (paciente respondiendo "Nada" a "¿te golpeaste?", contando que tenía manguito rotador, "no puedo mover el cuello", síntomas de Pamela — a ella Francisco la respondió él). `cita_no_verificada`: 0 disparos. Silencios por respuesta a Francisco: sin errores visibles (no distinguibles del silencio de 12 h).
+- Corrección: el prompt del router ahora exige pedido explícito de opinión/recomendación; síntomas, antecedentes y respuestas a preguntas del bot son NO clínicos ("ante la duda, no clínico"). Casos reales agregados: 21/21 (3 corridas) y regresión de los 15 casos previos 30/30.
+- **Bug de producción aparte (captura de Daniel, paciente de El Recurso):** el bot giró sin agendar. Causa: `onsiteNames` quitaba el paréntesis de "Box Buin (El Recurso)", así que contestar "Recurso" (o "Siii" a "¿…cierto?") nunca fijaba la modalidad y `create_appointment` devolvía `ask_modality_first` en bucle. Arreglo general: palabras propias de cada sede (nombre completo + dirección) cuentan como sede, y un "sí" a una pregunta explícita "¿…en el Box, cierto?" también. Test unitario nuevo; replay del hilo real ahora agenda. Desplegado en commit `3b6f1d3`.
+- Sin verificar: tráfico real posterior al segundo deploy. Pendiente: separar a Francisco en los jueces y estado de reserva persistido.
+
+## Auditoría franciskom · 13-11-2026
+Tarea agendada (viernes), solo lectura. Ventana: desde el deploy de `3b6f1d3` (`dpl_Bzq6…`, 2026-11-11 00:45:57 UTC = 10-11 21:45 Chile) hasta el 13-11 ~11:00. `TURN_DECISION` no está definida en Vercel → capa encendida (default on). Fuentes: `dump-chats.mjs`, `tool_trace` de los mensajes del bot y `za_webhook_events.reply` (ahí queda la ruta del router aunque el turno no se envíe), `za_appointments`.
+
+**Cifras (≈2,5 días; muestra chica):**
+- 457 mensajes / 55 hilos: 238 entrantes, 159 de Francisco a mano, 50 del bot, 10 marcados `system`. Eventos webhook: 494 (297 completados, 13 silencios deliberados, 182 ignorados por handoff/superseded/muted, 1 fallido).
+- Turnos con capa activa: **4** — 1 `consulta_clinica`, 3 `respuesta_a_dueno`, 0 `cita_no_verificada`. Ningún texto fijo llegó a enviarse.
+- Clasificación del router: **4/4 aciertos, 0 falsos positivos** (el 10-11 fueron 4 FP de 6). Los 3 silencios: "Yaa porfis seríamos dos" (TeamK, Francisco contestó con audio), "Hola Francisco. Hoy voy" (Caro, Francisco: "si te tengo agendada a las 12"), "Quedó atento a lo que me digas Francisco" (Elías, Francisco respondió al día siguiente). Correctos.
+- **Falsos negativos: 1 confirmado** (abajo). Más 1 conducta clínica fuera del alcance del router.
+- Bucles de modalidad/hora: **0**. Repeticiones menores: el bot pidió dirección 2 veces en 20 s (Elías) y "¿hace cuánto?" 2 veces con una pregunta de precio entremedio (Cristina, aceptable).
+- Reservas: **1 aceptada → 1 agendada** (Rosita para Fernando, jue 12-11 11:00 Box Buin, `confirmed`; asistieron). Rosita preguntó "¿debo entrar por el recurso?" y el bot respondió y agendó sin girar: evidencia real (n=1) de que el arreglo de `onsiteNames` funciona. Francisco no tuvo que decir en ningún hilo que el bot no pudo.
+
+**Bug de clase general (no desplegado, requiere aprobación):** el router clasifica solo el ÚLTIMO mensaje del cliente y el veredicto de un turno reemplazado (`superseded`) se descarta.
+- Evidencia: Caro (paciente en curso) 12-11 14:11:07 "Deja consultarte algo. Me puse unas mancuernas en los talones para hacer sentadillas y puedes creer que bajo menos?" → router `consulta_clinica` correcto ("pregunta explícitamente…"), pero 15 s después llegó "Muy tullida", el turno quedó superseded, el nuevo turno clasificó solo "Muy tullida" (síntoma = no clínico, como pide el prompt corregido) y el modelo envió: "Sí, puede pasar… Prueba sin las mancuernas en los talones y con el apoyo firme de todo el pie." Consejo clínico a una paciente de Francisco, y el aviso al dueño nunca salió (se manda después del chequeo de superseded).
+- Alcance: afecta las tres rutas (una ráfaga "nos vemos el martes" + "gracias" también perdería `cita_no_verificada`). Arreglo propuesto: clasificar la ráfaga completa de mensajes del cliente desde la última intervención de ASISTENTE/FRANCISCO, y/o heredar el veredicto clínico del turno reemplazado; y enviar el `ownerAlert` aunque el texto se descarte.
+
+**Otros hallazgos (no son de la capa):**
+- Mismo hilo de Caro, 14:10:52: mandó una imagen + "aquí va lo de ayer" (probable comprobante) y el bot respondió "Recibí el RUT de ayer": afirma el contenido de una imagen que no ve, en un hilo que lleva Francisco. Sigue pendiente el filtro por contacto/paciente en curso.
+- Carlos (hernia L5-S1, "hoy no pude pujar"): el bot hizo preguntas de banderas rojas (orina, adormecimiento genital, debilidad) y luego derivó. Prudente en seguridad, pero es triaje, contra la regla de Francisco; el router no lo cubre porque no hay pedido de opinión.
+- Berta (paciente antigua, "quizás el sábado tienes tiempo me avisas"): el bot ofreció horas de Box; Francisco respondió con hora estimada "como a mediodía" (parece domicilio). Modalidad asumida sin preguntar.
+- `isAutomatedOwnerReply` marca como `system` mensajes reales de Francisco escritos <N s después del entrante (p. ej. "Ya super, nos vemos!", "Necesitaría que me hicieras la transferencia…"). Sin daño visible esta vez (esos hilos ya estaban en handoff), pero esos mensajes no cuentan como "Francisco lleva el hilo". A revisar.
+- Evento fallido: reacción (`media_kind: reaction`) reintentada 5 veces con `23505 duplicate provider_message_id` → la inserción entrante no es idempotente por `provider_message_id`. Sin impacto en el paciente.
+
+**No verificado:** logs de runtime de Vercel (el MCP cortó la conexión y el endpoint REST de runtime-logs solo transmite en vivo); las fallas del router son fail-open y no dejan rastro, así que no se pueden contar. La tabla de eventos (1 fallido, 0 colgados) es el único indicador de errores.
+
+**Recomendación:** dejar la capa encendida (0 FP, sin bucles, la reserva funcionó) y ajustar el bug de ráfaga/superseded antes de dar la clínica por cubierta. No apagar con `TURN_DECISION=off`: apagarla no evita el falso negativo (el modelo igual habría opinado). Volver a auditar con ≥1 semana de tráfico.
+
+## Mejoras post-auditoría · 13-11-2026 (commit `6814021`, desplegado)
+Todo lo corregible de la auditoría del 13-11:
+- **Ráfaga (falso negativo clínico de Caro):** el router clasifica el CONJUNTO de mensajes sin responder (`trailingClientBurst`), no solo el último; el aviso al dueño cita toda la ráfaga. La compuerta de cortesía del motor ("gracias" sin pregunta pendiente) ya no silencia un "gracias" que cierra una ráfaga con contenido ("nos vemos el martes" + "gracias" se tragaba la cita).
+- **Avisos no se pierden:** si un turno se descarta por `superseded` después de generar, el `ownerAlert`/handoff se guarda igual como ticket.
+- **Adjuntos:** el modelo recibe el marcador `[imagen]`/`[audio]`… junto al pie y una nota de sistema "no puedes ver el archivo, no afirmes qué contiene" (antes: "Recibí el RUT de ayer").
+- **Eco de Francisco:** `isAutomatedOwnerReply` ya no marca como automático un mensaje corto (<20 caracteres) aunque llegue rápido: los saludos automáticos son largos.
+- **Duplicados:** `appendConversationMessage` resuelve el choque 23505 por `provider_message_id` devolviendo la fila existente (la reacción dejaba de reintentarse 5 veces).
+- **Router más estable:** regla explícita de `respuesta_a_dueno` (quién habló último entre Francisco y asistente); medido 6/6 donde antes salía 3/6.
+- Pruebas: baterías cases 28/28, cases2 30/30, cases3 (reales) 14/14, cases5 (ráfagas, imagen, control) 10/10, tests unitarios 22/22 (nuevo `test/turn-decision.test.mjs`).
+- **No tocado, a propósito:** triaje de banderas rojas en dolor lumbar con síntomas neurológicos (es seguridad del paciente; Francisco decide si lo quiere distinto); modalidad asumida con pacientes antiguos (Berta) sigue pendiente — requiere regla de negocio. Sin verificar en tráfico real posterior a este deploy.
+
+## Re-revisión de tráfico real · 15-11-2026 (commit `327119b`, desplegado 15-11 20:31 Chile)
+Primera mirada al tráfico real tras `6814021` (13-11 13:10 → 15-11): 872 mensajes / 148 hilos, casi todo la campaña manual de reactivación de Francisco (406 mensajes suyos vs 31 del bot). 0 entregas fallidas, 0 errores de webhook, 2 tickets de derivación abiertos (Marjorie aviso suave; Cinthya derivación correcta), 1 sola cita creada por el bot.
+
+**Falla grave encontrada (Marjorie, 14-11):** pidió "después del 25" y luego "jueves 26 a las 12:00"; quedó agendada el **jueves 19 a las 11:00** (ZA-D5A851F6D2, sincronizada a Google). Causa raíz, en código nuestro: `resolveDayReferences` (turn-decision) convertía "jueves" de "jueves 26" en el jueves más cercano (19-11) y se lo inyectaba al modelo como "fecha ya conversada". En el turno siguiente ("Box Buin") el modelo llamó `create_appointment` con `date: 2026-11-19` en 3/3 corridas de replay; el 19 a las 12:00 estaba ocupado, el bot ofreció otras horas del 19 y ella dijo "11:00". **La cita real sigue en el 19: hay que confirmarla con ella (pendiente anotado).**
+
+Arreglos (generales, no del caso):
+- `turn-decision.js` · `explicitDayOfMonth`: "jueves 26" se resuelve al 26 (el próximo día 26 que caiga jueves, hasta 62 días); si el número no calza con el día de la semana se ignora el número.
+- `consent-guards.js` · `dayDiscussed` + seguro `day_not_discussed` en el motor (crear y reagendar): no se toma una hora en un día que nadie nombró (vale hoy/mañana/pasado, el número del día escrito en el hilo, o el día de la semana a secas en los últimos 4 mensajes dentro de 7 días).
+- `agenda-tools.js` · `slot_taken`: si la hora se ocupó al crear, la herramienta devuelve hasta 3 alternativas **del mismo día pedido** y la instrucción de no ofrecer un día anterior (antes el error salía como `tool_failed` y el modelo improvisaba otro día).
+- `agenda-tools.js` · `surnameMissing`: nombres de relleno ("No informado", "Pendiente de nombre") y parentescos ("mi mamá") ya no cuentan como nombre y apellido. Detectado en replay: sin ficha previa el modelo agendaba a "No informado".
+- Seguro de repetición: revisa también el borrador después de quitar frases repetidas (a Marjorie se le reofrecieron las mismas horas porque el borrador traía una frase de precio extra).
+- La traza guarda los **argumentos** de cada herramienta (`tool_trace.tools[].args`): desde este deploy se puede ver qué fecha pasó el modelo sin reproducir.
+
+Verificador: replay dryRun contra la BD real con el hilo de Marjorie (`storage/vault/replay-franciskom/cases-1511.json`, arnés nuevo `args-run.mjs` que imprime args): antes 3/3 agendaba el 19; después 8/8 pasa `2026-11-26`. Regresión: cases 14/14, cases2 15/15, cases3 7/7, cases5 5/5, cases4 5/6 (una corrida reofrece horas en vez de pedir el nombre; variación del modelo, no agenda nada). Tests unitarios 27/27. Deploy Vercel READY en producción con `327119b`, franciskom.cl responde 200.
+**No verificado:** tráfico real posterior al deploy (no hubo mensajes); estado del Google Calendar del 26-11 (la clave de cifrado vive solo en Vercel, localmente no se puede consultar freebusy); `bench.mjs` antiguo ya no corre (busca `literal_replies.sesion_general`, que el paquete ya no tiene) — usar `engine-run2.mjs`. La última tanda de regresión chocó con límite 429 del proveedor LLM (misma clave que producción): no correr baterías grandes seguidas.
+
+Hallazgos que NO se tocaron (reglas de negocio, decide Daniel/Francisco):
+- Juez de ritmo: a Manuel Meneses le hizo una tercera pregunta antes de ofrecer horas (`stage_conversar`). Es el diseño actual.
+- Modalidad: pregunta "¿Box o domicilio?" aunque todas las ofertas del hilo nombraban Box Buin.
+- Hueco: cuando el cliente le responde a Francisco y él no contesta (Stefi, un "si" que quedó un día sin ver), nadie se lo recuerda.
+- Cinthya (contacto personal): el bot contestó como si fuera Francisco antes de derivar.
+- `responder_textual` devolvió `mode_mismatch` con "…y domicilio. ¿Atiende en otro lugar?" (la palabra "domicilio" activó la regex de visita); la respuesta final salió bien, generó un aviso suave de más.
+- Oportunidad (genérica/portable): Francisco reactivó a mano ~400 contactos antiguos; es automatizable como campaña, pero con el cobro de Meta por mensaje y plantillas hay que costearlo antes.

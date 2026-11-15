@@ -241,8 +241,11 @@ const MUTATING_TOOLS = new Set(['create_appointment', 'cancel_appointment', 'res
 // herramienta ya pedia nombre y apellido en su descripcion y el modelo lo ignoro: se exige en codigo.
 const surnameMissing = args => {
   const who = String(args.patient_name || args.customer_name || '').trim();
-  return who.split(/\s+/).filter(word => /\p{L}{2,}/u.test(word)).length < 2;
+  return who.split(/\s+/).filter(word => /\p{L}{2,}/u.test(word) && !NOT_A_NAME.test(normName(word))).length < 2;
 };
+// Relleno que el modelo pone cuando no sabe el nombre ("No informado", replay 15-11-2026) o un
+// parentesco: no son nombre ni apellido, así que no cuentan para el mínimo de dos palabras.
+const NOT_A_NAME = /^(no|sin|por|mi|su|el|la|informad[oa]|nombre|apellido|desconocid[oa]|anonim[oa]|pendiente|confirmar|definir|cliente|paciente|usuario|whatsapp|mama|papa|pareja|hij[oa]|espos[oa]|marido|polol[oa]|herman[oa]|abuel[oa]|ti[oa]|amig[oa])$/;
 const SURNAME_ERROR = { error: 'name_needs_surname', message: 'Falta el apellido: pide nombre y apellido de quien se atiende (no sirve "pareja", "mi mamá" ni solo el nombre de pila) y vuelve a intentar. Si ya sabes el apellido por la ficha o la conversación, pásalo completo. No confirmes la hora al cliente todavía.' };
 
 // Datos que la confirmación de una reserva debe decir. Claudia (franciskom, 09-10-2026) agendó creyendo
@@ -493,13 +496,35 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
       }
       // Reusa createAgendaAppointment (ya cubre local/Supabase y el bump de segmento del
       // cliente) en vez de duplicar la llamada RPC — antes esta rama saltaba ese bump.
-      const appointment = await createAgendaAppointment(packageData, {
-        customer_name: String(args.customer_name || '').trim(), patient_name: String(args.patient_name || '').trim(), customer_phone: context.callerPhone, customer_email: String(args.email || '').trim(),
-        customer_rut: String(args.rut || '').trim(), customer_address: String(args.address || '').trim(),
-        customer_age: args.age, customer_occupation: String(args.occupation || '').trim(),
-        customer_medical_history: String(args.medical_history || '').trim(), customer_extra_symptoms: String(args.extra_symptoms || '').trim(),
-        service: service.name, resource: resource.name, location: location?.name || '', starts_at: requestedIso, notes: String(args.notes || '').trim()
-      }, 'whatsapp');
+      let appointment;
+      try {
+        appointment = await createAgendaAppointment(packageData, {
+          customer_name: String(args.customer_name || '').trim(), patient_name: String(args.patient_name || '').trim(), customer_phone: context.callerPhone, customer_email: String(args.email || '').trim(),
+          customer_rut: String(args.rut || '').trim(), customer_address: String(args.address || '').trim(),
+          customer_age: args.age, customer_occupation: String(args.occupation || '').trim(),
+          customer_medical_history: String(args.medical_history || '').trim(), customer_extra_symptoms: String(args.extra_symptoms || '').trim(),
+          service: service.name, resource: resource.name, location: location?.name || '', starts_at: requestedIso, notes: String(args.notes || '').trim()
+        }, 'whatsapp');
+      } catch (error) {
+        // Una hora que se ocupó entre la oferta y la reserva: se responde con el día pedido y las
+        // horas libres de ESE día (igual que al reagendar). Sin esto el modelo recibía sólo "elige otro
+        // horario" y saltó a otro día, contra lo que había pedido la clienta (Marjorie, 14-11-2026).
+        const message = String(error.message || '');
+        if (!/ocupad|disponib|bloquead|conflict|overlap|solap/i.test(message)) throw error;
+        const failTz = config.timezone || 'America/Santiago';
+        const requestedDay = new Intl.DateTimeFormat('en-CA', { timeZone: failTz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(requestedIso));
+        const hourOf = iso => new Intl.DateTimeFormat('es-CL', { timeZone: failTz, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(iso));
+        const sameDay = await getAvailableSlots(packageData, { service: service.name, resource: resource.name, date: requestedDay }).catch(() => []);
+        const alternatives = sameDay.filter(iso => new Date(iso).getTime() !== requestedTime)
+          .sort((a, b) => Math.abs(new Date(a).getTime() - requestedTime) - Math.abs(new Date(b).getTime() - requestedTime))
+          .slice(0, 3).sort().map(hourOf);
+        return {
+          error: 'slot_taken', message, nothing_created: true, dia_pedido: requestedDay, dia: dayLabel(requestedDay, failTz), hora_pedida: hourOf(requestedIso), alternativas_mismo_dia: alternatives,
+          guidance: alternatives.length
+            ? 'No se agendó nada. Dile en una frase que esa hora ya no está y ofrécele estas horas del MISMO día que pidió. No cambies de día por tu cuenta: sólo si ninguna le sirve consultas otro día, respetando lo que pidió (después de tal fecha, sólo en la tarde).'
+            : 'No se agendó nada y ese día no quedan horas. Díselo y consulta con get_availability el día siguiente que cumpla lo que el cliente pidió (después de tal fecha, sólo en la tarde); nunca un día anterior al que pidió.'
+        };
+      }
       // La ficha es opcional por diseño y va DESPUÉS de que la reserva ya existe: si falla, la
       // hora igual quedó tomada, así que nunca puede propagar su error hacia arriba. Sin este
       // catch, un problema de ficha (cliente que no calza, migración no aplicada en el Supabase

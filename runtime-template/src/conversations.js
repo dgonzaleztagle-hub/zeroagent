@@ -130,11 +130,13 @@ export const AUTOMATED_OWNER_REPLY_MS = 2_500;
 export async function isAutomatedOwnerReply(conversationId, text) {
   if (!agendaUsesSupabase() || !conversationId) return false;
   const base = `/rest/v1/za_conversation_messages?conversation_id=eq.${encodeURIComponent(conversationId)}`;
+  const content = String(text || '').trim();
+  // Los saludos automáticos son largos; un "Ya súper, nos vemos!" corto que llega rápido es Francisco
+  // respondiendo de verdad (12-11-2026 se marcaban como automáticos y no contaban como su atención).
+  if (content.length < 20) return false;
   const lastInbound = await agendaSupabaseRequest(`${base}&direction=eq.inbound&select=created_at&order=created_at.desc&limit=1`).catch(() => null);
   const lastInboundAt = Date.parse(lastInbound?.[0]?.created_at || '');
   if (Number.isFinite(lastInboundAt) && Date.now() - lastInboundAt <= AUTOMATED_OWNER_REPLY_MS) return true;
-  const content = String(text || '').trim();
-  if (content.length < 20) return false;
   const known = await agendaSupabaseRequest(
     `/rest/v1/za_conversation_messages?direction=eq.outbound&sender_type=eq.system&content=eq.${encodeURIComponent(content)}&select=id&limit=1`
   ).catch(() => null);
@@ -230,7 +232,7 @@ export async function loadConversationHistory(conversationId, limit = 20, option
   ordered.forEach((item, index) => {
     if (item.direction === 'outbound' && item.sender_type === 'human') history.push({ role: 'system', content: 'El siguiente mensaje lo escribió Francisco (el dueño) en persona desde su WhatsApp, no tú.' });
     if (item.direction === 'outbound' && item.sender_type === 'system') history.push({ role: 'system', content: 'El siguiente mensaje es el saludo automático de WhatsApp Business del dueño, ya enviado al cliente: no vuelvas a saludar ni repitas su pregunta; sigue desde lo que responda el cliente.' });
-    history.push({ role: item.direction === 'inbound' ? 'user' : 'assistant', content: item.content });
+    history.push({ role: item.direction === 'inbound' ? 'user' : 'assistant', content: item.content, at: item.created_at });
     if (index === noteInsertedAfter) history.push({ role: 'system', content: OWNER_HANDLED_NOTE });
   });
   return history;
@@ -267,11 +269,22 @@ export async function appendConversationMessage(conversationId, direction, conte
   const endpoint = clientMessageId
     ? '/rest/v1/za_conversation_messages?on_conflict=client_message_id'
     : '/rest/v1/za_conversation_messages';
-  const rows = await agendaSupabaseRequest(endpoint, {
-    method: 'POST',
-    headers: { Prefer: clientMessageId ? 'resolution=ignore-duplicates,return=representation' : 'return=representation' },
-    body: JSON.stringify(body)
-  });
+  let rows;
+  try {
+    rows = await agendaSupabaseRequest(endpoint, {
+      method: 'POST',
+      headers: { Prefer: clientMessageId ? 'resolution=ignore-duplicates,return=representation' : 'return=representation' },
+      body: JSON.stringify(body)
+    });
+  } catch (error) {
+    // Una reacción o una reentrega trae el mismo provider_message_id con otra clave de cliente:
+    // chocaba con el índice único y el evento se reintentaba 5 veces. Es el mismo mensaje.
+    if (body.provider_message_id && /23505|duplicate key/i.test(String(error?.message || ''))) {
+      const existing = await agendaSupabaseRequest(`/rest/v1/za_conversation_messages?provider_message_id=eq.${encodeURIComponent(body.provider_message_id)}&select=*&limit=1`).catch(() => null);
+      if (existing?.[0]) return existing[0];
+    }
+    throw error;
+  }
   return rows?.[0] || (clientMessageId ? findConversationMessageByClientId(clientMessageId) : null);
 }
 
