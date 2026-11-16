@@ -135,8 +135,11 @@ try {
   delete process.env.SUPABASE_URL;
   delete process.env.SUPABASE_SERVICE_ROLE_KEY;
   const agendaModule = await import(pathToFileURL(path.join(temporary, 'src', 'agenda.js')).href);
-  const start = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-  start.setUTCMinutes(0, 0, 0);
+  // Fijar mediodía del negocio: usar la hora actual hacía fallar el banco cerca de medianoche,
+  // porque una sesión de 60 minutos cruzaba el fin de la jornada 23:59.
+  const testDay = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Santiago', year: 'numeric', month: '2-digit', day: '2-digit' })
+    .format(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+  const start = new Date(agendaModule.asIso(`${testDay}T12:00`, 'America/Santiago'));
   await assert.rejects(() => agendaModule.createAgendaAppointment(packageData, {
     customer_name: 'Sin horario QA', customer_phone: '+56900000000', service: 'Servicio QA', resource: 'Profesional QA',
     location: 'Sede QA', starts_at: start.toISOString()

@@ -1,3 +1,5 @@
+import { labelThread } from './thread.js';
+
 /**
  * Decisión del turno antes del modelo conversacional. Lo que el modelo no debería decidir solo
  * se decide acá, con el hilo ya separado por quién habló (cliente / asistente / Francisco):
@@ -12,7 +14,6 @@
  * Si el clasificador falla, no bloquea nada: la ruta es "otro" y el turno sigue como antes.
  */
 
-const OWNER_NOTE = /^El siguiente mensaje lo escribió Francisco/;
 const clip = (text, max = 400) => String(text || '').replace(/\s+/g, ' ').trim().slice(0, max);
 const WEEKDAYS = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
 const MONTHS = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
@@ -25,18 +26,8 @@ export const FIXED_REPLIES = {
 
 /** Separa el hilo por autor: la nota de sistema que antecede a un mensaje de Francisco lo marca. */
 export function labelHistory(history = []) {
-  const events = [];
-  let nextIsOwner = false;
-  for (const item of history) {
-    if (item?.role === 'system') {
-      nextIsOwner = OWNER_NOTE.test(String(item.content || ''));
-      continue;
-    }
-    if (item?.role === 'user') events.push({ who: 'CLIENTE', text: item.content, at: item.at });
-    else if (item?.role === 'assistant') events.push({ who: nextIsOwner ? 'FRANCISCO' : 'ASISTENTE', text: item.content, at: item.at });
-    nextIsOwner = false;
-  }
-  return events;
+  // Las notas son contexto para los jueces, pero no son intervenciones que cierren una ráfaga.
+  return labelThread(history).filter(event => event.who !== 'NOTA');
 }
 
 function ymdInZone(date, timeZone) {
@@ -98,6 +89,7 @@ const ROUTER_SYSTEM = `Clasificas el último mensaje de un cliente en el WhatsAp
 
 Rutas (elige UNA):
 - consulta_clinica: el cliente HACE UNA PREGUNTA o PIDE UNA OPINIÓN explícita sobre algo clínico: qué especialista ver o en qué orden, si debe operarse o ir a otro médico, qué tiene, si es grave, qué tratamiento conviene, qué opina de un examen o informe, si la sesión sirve para su caso concreto. Debe haber un pedido de opinión/recomendación/interpretación dirigido al bot o a Francisco.
+  También es consulta_clinica pedir que interprete el efecto de un ejercicio o explique por qué un movimiento empeora o cambia al hacerlo: eso pide juicio sobre el caso aunque esté formulado informalmente. Evalúa la pregunta pendiente de la ráfaga, aunque el último mensaje sólo agregue cómo se siente.
   NO es clínica (es "reserva" u "otro"): contar o describir síntomas, dolor, antecedentes, diagnósticos que ya le dieron, tratamientos que probó o medicamentos que toma; responder lo que el ASISTENTE le preguntó (desde cuándo, si se golpeó, si tiene diagnóstico: "nada", "no puedo mover el cuello", "tenía el manguito rotador inflamado", "hace un mes"); mencionar un diagnóstico solo como dato; preguntar precio, horarios, ubicación, medios de pago ni pedir hora. Ante la duda entre clínica y no clínica, elige NO clínica.
 - respuesta_a_dueno: el último mensaje que NO es del cliente en el hilo lo escribió FRANCISCO (una pregunta, un saludo con pregunta, una propuesta de hora o de día) y el mensaje del cliente le responde a él de forma coherente, aunque sea breve o informal ("mucho mejor gracias", "sii perfecto", "a las 20", "ya po"). Mira SIEMPRE quién habló último entre FRANCISCO y ASISTENTE: si fue FRANCISCO y el cliente le contesta, es esta ruta, aunque no sea una pregunta de reserva. Si lo pendiente lo planteó el ASISTENTE, o el cliente hace una consulta nueva e independiente (precio, ubicación, pedir hora), NO es esta ruta.
 - cita_no_verificada: el cliente da por hecha o confirma una cita ("nos vemos el martes", "¿nos vemos hoy?", "voy llegando", "confirmo mi hora") y esa hora NO fue ofrecida por el ASISTENTE en este hilo ni propuesta por FRANCISCO en este hilo. Si el cliente acepta una hora que ofreció el ASISTENTE, es reserva.

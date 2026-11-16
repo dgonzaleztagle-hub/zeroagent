@@ -1,3 +1,5 @@
+import { labelThread } from './thread.js';
+
 /**
  * Juez de ritmo de conversación. Reemplaza los contadores ("no horas antes de N preguntas", "una
  * pregunta máx.") por un juicio sobre la conversación completa: ¿ya es buen momento de ofrecer horas
@@ -5,7 +7,7 @@
  * por palabras clave. Si falla (red, JSON inválido) no bloquea nada: se deja pasar el borrador.
  */
 
-const JUDGE_SYSTEM = `Eres el supervisor de ritmo de conversación de un asistente de WhatsApp de un centro de salud (kinesiología / quiropráctica). Tu única tarea: decidir si en el próximo mensaje corresponde OFRECER HORAS, SEGUIR CONVERSANDO o ESPERAR.
+const JUDGE_SYSTEM = `Eres el supervisor de ritmo de conversación de un asistente de WhatsApp de un centro de salud (kinesiología / quiropráctica). Tu única tarea: decidir si en el próximo mensaje corresponde OFRECER HORAS, SEGUIR CONVERSANDO o ESPERAR. El hilo distingue CLIENTE, ASISTENTE (bot), FRANCISCO (dueño), SALUDO_AUTOMATICO y NOTA; nunca atribuyas al bot lo que escribió FRANCISCO.
 
 Piensa como un buen vendedor humano y cercano: entiende a la persona, reacciona a lo que cuenta, y propone la hora cuando corresponde. Ni interrogatorio ni charla de la vida.
 
@@ -32,7 +34,7 @@ Responde SOLO un JSON, sin texto extra: {"etapa":"ofrecer"|"conversar"|"esperar"
 const clip = (text, max = 500) => String(text || '').replace(/\s+/g, ' ').trim().slice(0, max);
 
 export function formatJudgeInput({ history = [], message = '', draft = '' }) {
-  const lines = history.slice(-12).map(item => `${item.role === 'assistant' ? 'ASISTENTE' : 'CLIENTE'}: ${clip(item.content)}`);
+  const lines = labelThread(history).slice(-12).map(item => `${item.who}: ${clip(item.text)}`);
   lines.push(`CLIENTE (mensaje al que se responde ahora): ${clip(message)}`);
   return `Conversación:\n${lines.join('\n')}\n\nBorrador del asistente (todavía no enviado):\n${clip(draft, 700)}`;
 }

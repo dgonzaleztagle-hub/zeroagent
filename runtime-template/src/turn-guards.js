@@ -190,3 +190,14 @@ export function dropRepeatedSentences(text, history = []) {
   if (!dropped.length || !kept.length) return { text, dropped: [] };
   return { text: kept.join(' ').replace(/;(\s|$)/g, (match, space, offset, all) => (offset === all.length - 1 ? '.' : match)).trim(), dropped };
 }
+
+export function dedupeDraftParagraphs(text) {
+  const seen = new Set();
+  return String(text || '').split(/\n+/).filter(paragraph => {
+    const key = paragraph.replace(/\s+/g, ' ').trim();
+    if (key.length < 35) return true;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).join('\n').trim();
+}

@@ -171,6 +171,7 @@ async function dashboardOrError(packageData) {
 // la RPC aunque Supabase esté conectado: se trata como preview, y quien registra el ticket en la
 // Bandeja es el llamador (server.js), no esta función.
 async function requestHandoff(reason, context) {
+  if (context.dryRun === true) return { ok: true, action: 'handoff_requested', dry_run: true, event_id: null };
   if (agendaUsesSupabase() && isUuid(context.conversationId)) {
     const result = await agendaSupabaseRequest('/rest/v1/rpc/za_request_handoff', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ p_conversation_id: context.conversationId, p_reason: String(reason || '').slice(0, 800), p_caller_phone: normalizePhone(context.callerPhone), p_operation_key: context.operationKey ? `${String(context.operationKey).slice(0, 200)}:handoff-outbox` : null }) });
     const handoff = Array.isArray(result) ? result[0] : result;
@@ -235,11 +236,10 @@ const looksLikeAddress = value => /\d/.test(String(value || '')) || /^\s*(calle|
 // Modo ensayo, sólo para medir el comportamiento del agente contra la agenda real: las lecturas
 // (disponibilidad, reservas) van de verdad, pero ninguna escritura toca la base ni manda la
 // invitación de Google Calendar. El servidor nunca pasa este flag; lo usa el medidor.
-const MUTATING_TOOLS = new Set(['create_appointment', 'cancel_appointment', 'reschedule_appointment', 'update_customer_profile']);
 
 // Francisco, 09-10-2026: el bot agendo a "Claudia" sin apellido (y antes a otros dos como "pareja"). La
 // herramienta ya pedia nombre y apellido en su descripcion y el modelo lo ignoro: se exige en codigo.
-const surnameMissing = args => {
+export const surnameMissing = args => {
   const who = String(args.patient_name || args.customer_name || '').trim();
   return who.split(/\s+/).filter(word => /\p{L}{2,}/u.test(word) && !NOT_A_NAME.test(normName(word))).length < 2;
 };
@@ -262,19 +262,11 @@ function confirmationData(packageData, locationName, service) {
 }
 
 export async function executeAgendaTool(packageData, name, args = {}, context = {}) {
-  if (context.dryRun === true && MUTATING_TOOLS.has(name)) {
-    if (name === 'create_appointment') {
-      if (surnameMissing(args)) return SURNAME_ERROR;
-      if (looksLikeAddress(args.customer_name) || looksLikeAddress(args.patient_name)) return { error: 'name_looks_like_address', message: 'Ese nombre parece una dirección, no una persona. Pídele al cliente su nombre y apellido; la dirección va en address.' };
-      const dryService = (packageData.solutions?.agenda?.config?.services || []).find?.(item => normName(item.name) === normName(args.service)) || null;
-      return { ok: true, action: 'created', dry_run: true, para_la_confirmacion: confirmationData(packageData, args.location || '', dryService), received: args, appointment: { status: 'confirmed', reference: 'ZA-ENSAYO', starts_at: `${args.date}T${args.time}`, cuando_local: `${args.date} ${args.time}` } };
-    }
-    if (name !== 'reschedule_appointment') return { ok: true, action: { cancel_appointment: 'cancelled', update_customer_profile: 'profile_updated' }[name], dry_run: true, received: args };
-  }
   try {
+    const nowMs = context.now ? new Date(context.now).getTime() : Date.now();
     const config = agendaConfig(packageData);
     if (!config) return { error: 'agenda_disabled' };
-    const dashboard = await dashboardOrError(packageData);
+    const dashboard = context.dryRun === true && context.agendaSnapshot ? context.agendaSnapshot : await dashboardOrError(packageData);
     if (dashboard.error) return dashboard;
     if (name === 'get_availability') {
       const resourceMatch = resolveCatalogItem(dashboard.catalog.resources, args.resource);
@@ -408,6 +400,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
     }
     if (name === 'update_customer_profile') {
       if (!context.callerPhone) return { error: 'identity_required', message: 'No hay teléfono verificado para esta conversación.' };
+      if (context.dryRun === true) return { ok: true, action: 'profile_updated', dry_run: true, received: args };
       try {
         const saved = await updateCustomerIntakeRecord(packageData, context.callerPhone, { email: args.email, rut: args.rut }, {
           source: 'whatsapp', sourceMessageId: context.messageId, operationKey: context.operationKey, createdBy: 'agent'
@@ -453,11 +446,11 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
       // abajo — se creaba un ticket de handoff para una hora que ya ocurrió.
       const requestedTime = new Date(requestedIso || '').getTime();
       if (!Number.isFinite(requestedTime)) return { error: 'invalid_starts_at', message: 'La hora solicitada no es una fecha válida.' };
-      if (requestedTime < Date.now()) return { error: 'starts_at_in_past', message: 'Esa fecha/hora ya pasó. Pide una fecha futura y vuelve a intentar.' };
+      if (requestedTime < nowMs) return { error: 'starts_at_in_past', message: 'Esa fecha/hora ya pasó. Pide una fecha futura y vuelve a intentar.' };
       const minimumNoticeMs = Number(config.rules?.minimum_notice_hours || 0) * 3_600_000;
-      if (requestedTime - Date.now() < minimumNoticeMs) return { error: 'minimum_notice_not_met', message: `Esa hora está demasiado próxima — se necesitan al menos ${config.rules?.minimum_notice_hours || 0} horas de aviso. Ofrece un horario más adelante.` };
+      if (requestedTime - nowMs < minimumNoticeMs) return { error: 'minimum_notice_not_met', message: `Esa hora está demasiado próxima — se necesitan al menos ${config.rules?.minimum_notice_hours || 0} horas de aviso. Ofrece un horario más adelante.` };
       const maximumAdvanceMs = Number(config.rules?.maximum_advance_days || 730) * 86_400_000;
-      if (requestedTime - Date.now() > maximumAdvanceMs) return { error: 'maximum_advance_exceeded', message: `Esa hora supera la anticipación máxima de ${config.rules?.maximum_advance_days || 730} días. Ofrece una fecha más cercana.` };
+      if (requestedTime - nowMs > maximumAdvanceMs) return { error: 'maximum_advance_exceeded', message: `Esa hora supera la anticipación máxima de ${config.rules?.maximum_advance_days || 730} días. Ofrece una fecha más cercana.` };
       const existing = (dashboard.appointments || []).find(item => isActiveAgendaAppointment(item)
         && samePhone(item.customer_phone, context.callerPhone)
         && normName(item.service) === normName(service.name)
@@ -493,6 +486,13 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
           ? ` Como respaldo, hoy mismo hay hora libre a las ${new Intl.DateTimeFormat('es-CL', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(alternative.starts_at))} para "${alternative.service}" — ofrécesela como alternativa segura si el cliente prefiere no esperar la confirmación.`
           : '';
         return { ...handoff, action: 'needs_manual_confirmation', message: `Explícale al cliente que ese horario necesita verificación manual (${riskWindow.reason || 'depende de una condición externa'}) y que el equipo retomará la conversación para avisar si queda disponible. No confirmes la reserva tú mismo.${alternativeText}` };
+      }
+      if (context.dryRun === true) {
+        const day = String(args.date || requestedIso.slice(0, 10));
+        const slots = context.availableSlots || await getAvailableSlots(packageData, { service: service.name, resource: resource.name, date: day });
+        if (!slots.some(iso => new Date(iso).getTime() === requestedTime)) return { error: 'slot_taken', nothing_created: true, dia_pedido: day, message: 'La hora pedida no está disponible. No se creó ninguna reserva.' };
+        return { ok: true, action: 'created', dry_run: true, para_la_confirmacion: confirmationData(packageData, location?.name || '', service), received: args,
+          appointment: { status: 'confirmed', reference: 'ZA-ENSAYO', starts_at: requestedIso, cuando_local: `${args.date} ${args.time}` } };
       }
       // Reusa createAgendaAppointment (ya cubre local/Supabase y el bump de segmento del
       // cliente) en vez de duplicar la llamada RPC — antes esta rama saltaba ese bump.
@@ -560,7 +560,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
     if (name === 'cancel_appointment') {
       const owned = await resolveOwnedAppointment(packageData, dashboard, args.reference, context.callerPhone); if (owned.error) return appointmentOutsideSystem(owned, 'cancel', args);
       if (!isActiveAgendaAppointment(owned.appointment)) return { error: 'invalid_status', message: 'Esa reserva ya no se puede cancelar.' };
-      await updateAgendaAppointment(packageData, owned.appointment.id, 'cancelled');
+      if (context.dryRun !== true) await updateAgendaAppointment(packageData, owned.appointment.id, 'cancelled');
       // El dueño se entera de toda hora que se libera: la de Claudia (09-10-2026) se anuló y él no
       // supo nada hasta revisar el Calendar.
       const cancelledWhen = new Intl.DateTimeFormat('es-CL', { timeZone: config.timezone || 'America/Santiago', weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(owned.appointment.starts_at));
@@ -596,7 +596,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
       if (newTime === new Date(current.starts_at).getTime()) {
         return { ok: true, action: 'already_matched', reference: current.reference, cuando_local: original.cuando_local, message: 'La reserva ya está en ese horario; no hubo que cambiar nada.' };
       }
-      if (newTime < Date.now()) return unchanged('Esa hora ya pasó.');
+      if (newTime < nowMs) return unchanged('Esa hora ya pasó.');
       // Se verifica contra la disponibilidad real ANTES de escribir. Si la hora nueva se cruza con la
       // propia reserva (moverla media hora el mismo día), la disponibilidad la ve ocupada por ella
       // misma: en ese caso decide la función atómica de la base.

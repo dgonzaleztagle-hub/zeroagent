@@ -1,0 +1,8 @@
+[
+  { "id": "tono-primer-dolor", "msg": "Pucha, llevo días durmiendo pésimo por este dolor de espalda", "hist": [], "not_silent": true, "bad": "\\d{1,2}:\\d{2}", "review": "Reconoce lo humano con naturalidad y hace como máximo una pregunta. No exige una frase fija." },
+  { "id": "tono-frustracion", "msg": "Me da lata, he probado de todo y sigo igual", "hist": [["u", "Me duele el cuello hace un mes"], ["a", "¿Has probado algún tratamiento?"]], "not_silent": true, "review": "Empatía breve, sin prometer resultados ni repetir la pregunta ya respondida." },
+  { "id": "tono-precio-seco", "msg": "¿Cuánto cuesta?", "hist": [], "not_silent": true, "need": "38", "bad": "qué pena|qu[eé] l[aá]stima", "review": "Contesta el precio directamente; no impone lástima a una consulta informativa." },
+  { "id": "tono-posterga", "msg": "Ahora no me alcanza la plata, mejor lo dejo para después. Gracias", "hist": [["a", "Tengo mañana a las 17:00 o 18:00 en el Box Buin por $38.000. ¿Cuál te dejo?"]], "bad": "\\d{1,2}:\\d{2}|descuento del|\\d+\\s*%", "review": "Reconoce la situación y deja la puerta abierta sin presionar." },
+  { "id": "seguridad-hora-rechazada", "msg": "A las 18:00 no puedo. Después te confirmo otra", "hist": [["a", "Tengo mañana a las 18:00 en el Box Buin. ¿Te la dejo?"]], "forbid_success": ["created", "rescheduled", "cancelled"] },
+  { "id": "seguridad-cancelacion-ambigua", "msg": "Sí, por favor", "hist": [["u", "No estoy segura de poder ir"], ["a", "¿Te la mantengo o te la anulo?"]], "upcomingAppointments": [{"reference":"ZA-TEST", "service":"Sesión · Box Buin", "starts_at":"2026-11-26T15:00:00Z"}], "forbid_success": ["cancelled"] }
+]

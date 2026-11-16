@@ -133,7 +133,14 @@ async function asset(res, fileName, contentType) {
 
 async function answerWithConfiguredAi(message, context = {}) {
   const resolved = await resolveRuntimeLlmConfig();
-  return answerWithGroq(packageData, message, { ...context, ...(resolved ? { llm: resolved } : {}) });
+  return answerWithGroq(packageData, message, { ...context, requireModel: true, ...(resolved ? { llm: resolved } : {}) });
+}
+
+// Se vuelve a consultar justo antes del envío: la pausa puede activarse mientras el LLM genera.
+async function sendAutomaticWhatsApp(phone, text, options) {
+  const current = await getAgentControl();
+  if (current.control.mode === 'paused') throw new Error('AGENT_PAUSED_BEFORE_SEND');
+  return sendZavuWhatsApp(phone, text, options);
 }
 
 function aiDashboardView(account) {
@@ -259,7 +266,7 @@ async function sendFollowUpMessage({ conversationId, callerPhone, text, outbound
       });
     }
     if (deliveredStates.includes(row?.delivery_status)) return row;
-    const provider = zavuProviderMessage(await sendZavuWhatsApp(callerPhone, text, { idempotencyKey: followUpKey }));
+    const provider = zavuProviderMessage(await sendAutomaticWhatsApp(callerPhone, text, { idempotencyKey: followUpKey }));
     return await updateConversationMessageDelivery({
       id: row?.id, providerMessageId: provider.id,
       status: deliveredStates.includes(provider.status) ? provider.status : 'sent', failureReason: ''
@@ -901,12 +908,12 @@ export async function handleRequest(req, res) {
         let outbound = await findConversationMessageByClientId(outboundKey);
         if (outbound && outbound.content !== reply.text) throw new Error('La operación ya tiene otra respuesta persistida.');
         if (!outbound) {
-          outbound = await appendConversationMessage(conversation?.id, 'outbound', reply.text, { tools: reply.toolTrace || [] }, {
+          outbound = await appendConversationMessage(conversation?.id, 'outbound', reply.text, { tools: reply.toolTrace || [], diagnostics: reply.diagnostics || {} }, {
             senderType: 'agent', deliveryStatus: 'sending', clientMessageId: outboundKey
           });
         }
         if (!['queued', 'sent', 'delivered', 'read'].includes(outbound?.delivery_status)) {
-          const provider = zavuProviderMessage(await sendZavuWhatsApp(callerPhone, reply.text, {
+          const provider = zavuProviderMessage(await sendAutomaticWhatsApp(callerPhone, reply.text, {
             idempotencyKey: outboundKey, imageUrl: reply.imageUrl || ''
           }));
           outbound = await updateConversationMessageDelivery({
@@ -1348,7 +1355,7 @@ export async function handleRequest(req, res) {
           });
         }
         if (!['queued', 'sent', 'delivered', 'read'].includes(outbound?.delivery_status)) {
-          const provider = zavuProviderMessage(await sendZavuWhatsApp(callerPhone, mediaReply, { idempotencyKey: outboundKey }));
+          const provider = zavuProviderMessage(await sendAutomaticWhatsApp(callerPhone, mediaReply, { idempotencyKey: outboundKey }));
           await updateConversationMessageDelivery({
             id: outbound?.id, providerMessageId: provider.id,
             status: ['queued', 'sent', 'delivered', 'read'].includes(provider.status) ? provider.status : 'sent', failureReason: ''
@@ -1435,14 +1442,14 @@ export async function handleRequest(req, res) {
       let outbound = await findConversationMessageByClientId(outboundKey);
       if (outbound && outbound.content !== reply.text) throw new Error('La operación Zavu ya tiene otra respuesta persistida.');
       if (!outbound) {
-        outbound = await appendConversationMessage(conversation?.id, 'outbound', reply.text, { tools: reply.toolTrace || [] }, {
+        outbound = await appendConversationMessage(conversation?.id, 'outbound', reply.text, { tools: reply.toolTrace || [], diagnostics: reply.diagnostics || {} }, {
           senderType: 'agent', deliveryStatus: 'sending', clientMessageId: outboundKey
         });
       }
       if (!['queued', 'sent', 'delivered', 'read'].includes(outbound?.delivery_status)) {
         // reply.imageUrl sólo lo trae una respuesta literal del negocio que declara imagen; el
         // texto viaja como pie de foto para que llegue como UN mensaje y no como dos sueltos.
-        const provider = zavuProviderMessage(await sendZavuWhatsApp(callerPhone, reply.text, {
+        const provider = zavuProviderMessage(await sendAutomaticWhatsApp(callerPhone, reply.text, {
           idempotencyKey: outboundKey, imageUrl: reply.imageUrl || ''
         }));
         outbound = await updateConversationMessageDelivery({

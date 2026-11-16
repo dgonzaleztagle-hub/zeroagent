@@ -230,9 +230,13 @@ export async function loadConversationHistory(conversationId, limit = 20, option
   // tiene que ver qué horas o datos ya se le dieron al cliente— pero con una nota antes: sin ella el
   // modelo leía las palabras de Francisco como propias y retomaba el hilo con su voz (11-10-2026).
   ordered.forEach((item, index) => {
-    if (item.direction === 'outbound' && item.sender_type === 'human') history.push({ role: 'system', content: 'El siguiente mensaje lo escribió Francisco (el dueño) en persona desde su WhatsApp, no tú.' });
-    if (item.direction === 'outbound' && item.sender_type === 'system') history.push({ role: 'system', content: 'El siguiente mensaje es el saludo automático de WhatsApp Business del dueño, ya enviado al cliente: no vuelvas a saludar ni repitas su pregunta; sigue desde lo que responda el cliente.' });
-    history.push({ role: item.direction === 'inbound' ? 'user' : 'assistant', content: item.content, at: item.created_at });
+    if (item.direction === 'outbound' && item.sender_type === 'human') history.push({ role: 'system', actor: 'owner', content: 'El siguiente mensaje lo escribió Francisco (el dueño) en persona desde su WhatsApp, no tú.' });
+    if (item.direction === 'outbound' && item.sender_type === 'system') history.push({ role: 'system', actor: 'automatic', content: 'El siguiente mensaje es el saludo automático de WhatsApp Business del dueño, ya enviado al cliente: no vuelvas a saludar ni repitas su pregunta; sigue desde lo que responda el cliente.' });
+    history.push({
+      role: item.direction === 'inbound' ? 'user' : 'assistant',
+      actor: item.direction === 'inbound' ? 'client' : item.sender_type === 'human' ? 'owner' : item.sender_type === 'system' ? 'automatic' : 'assistant',
+      content: item.content, at: item.created_at
+    });
     if (index === noteInsertedAfter) history.push({ role: 'system', content: OWNER_HANDLED_NOTE });
   });
   return history;

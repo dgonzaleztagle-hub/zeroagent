@@ -37,7 +37,14 @@ export function hourChosenByClient({ time, message, history = [] }) {
   if (!match) return true;
   const hour = Number(match[1]); const minutes = match[2];
   const clientTexts = [...history.filter(item => item.role === 'user').map(item => item.content), String(message || '')];
-  if (clientTexts.some(text => hourMentions(String(text || ''), hour, minutes))) return true;
+  const lastMention = [...clientTexts].reverse().find(text => hourMentions(String(text || ''), hour, minutes));
+  if (lastMention) {
+    // Mencionar una hora para rechazarla no permite reservarla. Una elección posterior sí puede
+    // sustituir el rechazo; por eso se mira la última mención y no cualquier coincidencia vieja.
+    const normalized = normalizeText(lastMention);
+    if (/\bno\s+(?:puedo|me sirve|me acomoda|quiero|alcanzo)|\b(?:descarta|imposible|ocupad[oa])\b/.test(normalized)) return false;
+    return true;
+  }
   const lastAssistantText = [...history].reverse().find(item => item.role === 'assistant')?.content || '';
   const offered = offeredHours(lastAssistantText);
   const wanted = `${String(hour).padStart(2, '0')}:${minutes}`;
@@ -68,8 +75,11 @@ export function dayDiscussed({ date, message, history = [], timeZone = 'America/
   if (!/^\d{4}-\d{2}-\d{2}/.test(String(date || ''))) return true;
   const ymd = String(date).slice(0, 10);
   const offset = Math.round((utcOf(ymd) - utcOf(ymdOf(now, timeZone))) / 86_400_000);
-  if (offset >= 0 && offset <= 2) return true;
   const texts = [...history.filter(item => item.role === 'user' || item.role === 'assistant').map(item => normalizeText(item.content)), normalizeText(message)];
+  const recent = texts.slice(-4);
+  if (offset === 0 && recent.some(text => /\bhoy\b/.test(text))) return true;
+  if (offset === 1 && recent.some(text => /\bmanana\b/.test(text) && !/\bpasado\s+manana\b|\bpor la manana\b/.test(text))) return true;
+  if (offset === 2 && recent.some(text => /\bpasado\s+manana\b/.test(text))) return true;
   const day = Number(ymd.slice(8));
   const numberRe = new RegExp(`(^|[^\\d$.,:])0?${day}(?![\\d:.]|\\s*(?:hrs?|horas|am|pm|sesiones|anos|meses|semanas|dias|minutos|mil|lucas)\\b)`);
   if (texts.some(text => numberRe.test(text))) return true;
@@ -90,6 +100,7 @@ export function cancelRequestedByClient({ message, lastAssistantText = '' }) {
   const text = normalizeText(message);
   const wordRe = new RegExp(CANCEL_WORD, 'i');
   const answersOffer = /anul|cancel/i.test(normalizeText(lastAssistantText)) && /\?/.test(lastAssistantText)
+    && !/\b(?:mantengo|mantener|guardo|guardar)\b/.test(normalizeText(lastAssistantText))
     // Sin \b: en JavaScript la "í" no es letra para \b, y "Sí, por favor" nunca calzaba.
     && AFFIRM.test(text);
   if (!wordRe.test(text) && !/\bya no (voy|vamos|ir[eé]|quiero|necesito)(?![a-záéíóúñ])/i.test(text)) return answersOffer;
