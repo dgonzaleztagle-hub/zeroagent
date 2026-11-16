@@ -84,4 +84,6 @@ Evidencia resumida: `reports/franciskom-luna6-2026-11-16.json`.
 Los contratos de Calendar se ejercitan sin crear citas reales; no se confunde esa prueba con
 una escritura productiva ni una prueba de carrera entre procesos independientes de PostgreSQL.
 
-Los cambios son locales; todavía no existe certificación productiva ni despliegue de GPT-6 Luna.
+La candidata `8f5a924` ya está desplegada y verificada en producción como
+`dpl_GAGg71vmKBtPjKB1B2u38imt7vXP`. Se conserva la pausa. El canario productivo confirma
+créditos agotados; la activación queda reservada a la indicación de Francisco.

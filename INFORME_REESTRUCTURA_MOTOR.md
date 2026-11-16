@@ -1,7 +1,13 @@
 # Revisión, correcciones y evaluación con GPT-6 Luna
 
-Estado: candidata con certificación local, SQL real y conversaciones con GPT-6 Luna. No desplegada.
-Francisco sigue pausado.
+Estado: candidata validada y desplegada en producción con GPT-6 Luna. Francisco sigue pausado.
+
+Despliegue verificado el 16-11-2026 a las 14:52 UTC: `dpl_GAGg71vmKBtPjKB1B2u38imt7vXP`,
+código `8f5a924`, asignado a franciskom.cl. Configuración efectiva: OpenAI, `gpt-6-luna`,
+`RUNTIME_MODE=production`, canal Zavu; selección de IA por entorno, sin override BYOK.
+Se conservó la credencial de Francisco y la landing propia. Nueve comprobaciones HTTP pasaron,
+incluido el control autenticado que confirma `paused`. El canario directo con su cuenta volvió
+a dar 429 por créditos agotados. Sólo quedan cargar créditos y despausar por indicación de Francisco.
 El alcance y los pendientes se detallan en `PLAN_REESTRUCTURA_MOTOR_V2.md`.
 
 Resultado final de la segunda revisión: **68/68 pruebas locales, 12/12 gates, 53/53 casos
@@ -74,14 +80,14 @@ en memoria para freebusy; no se escribió en archivos env.
 Google informa que el calendario público de feriados no es legible y lo descarta; la conexión
 operativa de Calendar sí se usó en la última corrida.
 
-Se confirmó mediante lectura de Vercel que la configuración productiva actual sigue siendo:
+Antes del despliegue se confirmó mediante lectura de Vercel esta configuración productiva:
 
 - `LLM_MODEL=gpt-5.6-luna`.
 - `RUNTIME_MODE=preview_local`, que explica el fallback observado cuando se agotó el crédito.
 
-Se verificó que el control global continúa `paused` y que no hay mensajes automáticos registrados
-desde la pausa solicitada. Cambiar el modelo o desplegar requiere portar y verificar la candidata;
-no se cambió el entorno productivo ni se reactivó el bot durante estas pruebas.
+Durante esa evaluación de la candidata no se cambió el entorno productivo ni se reactivó el bot.
+El despliegue posterior solicitado por Daniel está documentado al principio de este informe;
+la pausa se conservó y se verificó desde el runtime publicado.
 
 ## Segunda revisión: contratos y repetibilidad
 

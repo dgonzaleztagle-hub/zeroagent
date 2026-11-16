@@ -1,6 +1,6 @@
 {
   "date": "2026-11-16",
-  "status": "validated-candidate-not-deployed",
+  "status": "validated-and-deployed-paused",
   "model_tested": "gpt-6-luna",
   "node": "v24.16.0",
   "source_sha256": "ad84ca2ac4ff770a15c919d51d675ee2b84c78a2b9f547e4a1cdb4264cd466e4",
@@ -12,7 +12,17 @@
     "prior_run": "contratos-congelados-01: 52/53; corrected partial parsing of 09:30 as 09:00; original failure preserved in private vault."
   },
   "real_model_conversations": { "businesses": 2, "turns": 8, "passed": true, "inference_calls": 32, "steps": ["create", "preserve-on-uncertainty", "reschedule", "explicit-cancel"], "command": "node scripts/verify-luna-conversations.mjs" },
-  "production": { "last_control_read": "paused", "paused_since": "2026-11-16T01:55:28.093+00:00", "deployed_by_this_certification": false, "automatically_resume_on_credit": false, "resume_authority": "Francisco" },
+  "production": {
+    "deployment_id": "dpl_GAGg71vmKBtPjKB1B2u38imt7vXP",
+    "deployed_commit": "8f5a9244d4af40ce16ea966f41244c1749687af5",
+    "ready_state": "READY",
+    "verified_at": "2026-11-16T14:52:19.868Z",
+    "domain": "https://franciskom.cl",
+    "model": "gpt-6-luna", "runtime_mode": "production", "channel_provider": "zavu", "effective_ai_source": "environment",
+    "http_checks": 9, "http_checks_passed": 9,
+    "same_francisco_credential": true, "provider_http_status": 429, "credit_exhausted": true,
+    "last_control_read": "paused", "paused_since": "2026-11-16T01:55:28.093+00:00", "automatically_resume_on_credit": false, "resume_authority": "Francisco"
+  },
   "evidence": "Raw reports, histories and snapshots remain in the ignored private vault; this public summary contains no client histories or credentials.",
   "scope": "Local coordinator and real tools, actual SQL and migrations in PGlite, Calendar adapter with simulated HTTP, actual Luna inference. No live Calendar writes, WhatsApp sends or independent-process PostgreSQL race test."
 }
