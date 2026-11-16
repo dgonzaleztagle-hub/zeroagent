@@ -21,6 +21,7 @@ import { appendCustomerRecordEntry, listCustomerRecord } from './customer-record
 import { buildGoogleAuthUrl, completeGoogleCalendarConnection, disconnectGoogleCalendar, getGoogleCalendarStatus, refreshGoogleCalendarList, setGoogleCalendarBuffer, setGoogleCalendarRoute, setGoogleCalendarTarget, signGoogleOAuthState, verifyGoogleOAuthState } from './google-calendar.js';
 import { syncGoogleContacts } from './google-contacts.js';
 import { isBareGreeting } from './turn-guards.js';
+import { deliverAutomatic } from './automatic-delivery.js';
 
 // Capturar errores de inicialización en vez de dejar que el módulo falle al
 // importarse: en Vercel eso da un FUNCTION_INVOCATION_FAILED opaco en cada
@@ -138,9 +139,7 @@ async function answerWithConfiguredAi(message, context = {}) {
 
 // Se vuelve a consultar justo antes del envío: la pausa puede activarse mientras el LLM genera.
 async function sendAutomaticWhatsApp(phone, text, options) {
-  const current = await getAgentControl();
-  if (current.control.mode === 'paused') throw new Error('AGENT_PAUSED_BEFORE_SEND');
-  return sendZavuWhatsApp(phone, text, options);
+  return deliverAutomatic({ readControl: getAgentControl, send: sendZavuWhatsApp }, phone, text, options);
 }
 
 function aiDashboardView(account) {
@@ -1228,7 +1227,7 @@ export async function handleRequest(req, res) {
         // Francisco contesta a mano, y se retoma solo a las HANDOFF_AUTO_RETURN_HOURS (12h por
         // defecto) desde su último mensaje real en ese hilo.
         if (!automated && echoConversation?.id && echoConversation.status !== 'handoff') {
-          await updateConversationOperation(echoConversation.id, { status: 'handoff', needs_human: true, handoff_reason: 'Francisco está respondiendo directamente desde su WhatsApp' }).catch(error => {
+          await updateConversationOperation(echoConversation.id, { status: 'handoff', needs_human: true, handoff_reason: 'el equipo está respondiendo directamente desde su WhatsApp' }).catch(error => {
             console.error('[zavu] no se pudo pasar la conversación a handoff tras el eco:', error.message);
           });
         }

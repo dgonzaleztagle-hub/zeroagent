@@ -189,7 +189,7 @@ async function assertNotBusyOnGoogleCalendar(startIso, endIso, source = 'client_
     // como antes, para no dejar a nadie sin poder reservar si Google tiene un problema pasajero.
     if (source === 'whatsapp') {
       console.error('[google-calendar] freebusy check en creación falló, la reserva por WhatsApp NO se confirma:', error.message);
-      throw new Error('No se pudo verificar el Google Calendar de Francisco en este momento, así que la hora NO se agendó. No le confirmes nada al cliente: dile que Francisco le confirma la hora personalmente y avisa al dueño con avisar_al_dueno.');
+      throw new Error('No se pudo verificar el Google Calendar de el equipo en este momento, así que la hora NO se agendó. No le confirmes nada al cliente: dile que el equipo le confirma la hora personalmente y avisa al dueño con avisar_al_dueno.');
     }
     console.error('[google-calendar] freebusy check en creación falló, se permite la reserva sin verificar:', error.message);
     return;

@@ -20,15 +20,15 @@ El bot de Francisco permanece pausado. La clave del restaurante nunca se instala
 
 | Fase | Estado | Evidencia / trabajo restante |
 |---|---|---|
-| 0. Banco y compatibilidad GPT-6 | Implementado localmente | Canario de tool calling HTTP 200; banco con expectativas, errores, traza y consumo. Falta congelar dependencias para replay histórico reproducible. |
+| 0. Banco y compatibilidad GPT-6 | Implementado localmente | Canario HTTP 200; banco con expectativas, trazas, consumo, reloj y agenda congelados; red restringida a inferencia. |
 | 1. Cableado y seguridad inmediata | Implementado localmente | P1, reloj en motor/herramientas, consentimiento negativo/ambiguo, canal requireModel, pausa antes de enviar. Reloj SQL/disponibilidad viva sigue siendo real. |
 | 2. Hilo canónico | Implementado localmente | actor explícito prevalece; notas no cortan ráfagas; jueces comparten etiquetas. Compatibilidad textual histórica preservada. |
-| 3. Estado derivado | Parcial | `turn-state.js`: señales, evidencia, candidato, consentimiento, cambios y turno de habla. Se registra como diagnostics, separado de herramientas. Falta consolidar la elección conjunta fecha/hora/modalidad y toda su invalidación. |
+| 3. Estado derivado | Implementado con transición | `turn-state.js` conserva diagnóstico; `booking-selection.js` comprueba la última elección de fecha/hora, rechazos, ambigüedad y cambios. Modalidad mantiene su guarda separada, verificada antes de crear. |
 | 4. Borradores ordenados | Implementado con transición | `draft-checks.js` ejecuta lista ordenada asíncrona; preserva textos y contadores previos. Auditor también revisa reintentos y seguimientos literales. El contexto mutable todavía necesita simplificarse. |
 | 5. Autorización y silencio | Parcial | Mutaciones en `tool-authorization.js`; ramas de herramientas de silencio en `silence-policy.js`. Cortesía/vacío y flujo literal conservan lógica en otros módulos; falta completar su consolidación. |
-| 6. Simulación de escrituras | Parcial | Crear valida catálogo, identidad, apellido, zona, tiempo y disponibilidad; cancelación/perfil/handoff no escriben; reagenda conserva simulación. Freebusy real verificado; no certifica locks ni escrituras RPC/Calendar. |
-| 7. Política por negocio | Pendiente | Extraer política de Francisco con esquema validado, preservación en Studio y snapshots de prompts; no hacer sustituciones textuales globales. |
-| 8. Memoria persistente | Pendiente de observación | Decisión posterior al tráfico real; requiere evidencia e invalidación, no sólo booleanos guardados. |
+| 6. Agenda y SQL | Validado localmente | Herramientas reales sobre agenda congelada; SQL real y migraciones en PGlite: idempotencia, ocupación, identidad, rollback y permisos. Adaptador Calendar real probado con servidor simulado. Freebusy productivo verificado sólo en lectura. |
+| 7. Política por negocio | Implementado localmente | Esquema versionado, perfil de Francisco en paquete y `client-policies`, preservación Studio, snapshots y prueba de construcción de barbería desde SQLite temporal. |
+| 8. Memoria persistente | Decisión diferida por diseño | No es requisito de esta candidata: el estado se deriva con evidencia del hilo. No agregar memoria persistente sin una necesidad medida y reglas de invalidación. |
 
 ## Batería y aislamiento
 
@@ -44,7 +44,25 @@ tokens. No hay equivalencia garantizada por una sola corrida. Si falla un caso, 
 y se agrega una prueba determinista antes de repetir. La API no se utiliza para probar mecánica
 que ya puede ejercitarse con respuestas guionadas.
 
+## Verificación repetible de la candidata
+
+- `npm run test:certify`: runtime, SQL real, paquete, fechas, afirmaciones, fichas,
+  conocimiento, matcher, seguridad de preview, instalación limpia y preservación de políticas.
+  Fuerza SQLite temporal para Studio y no utiliza las claves productivas.
+- Guarda informe nuevo con SHA256 de las fuentes y rechaza corridas donde el código cambie
+  durante la certificación. Los resultados privados quedan en `storage/vault/certification/`.
+- `LLM_TEST_API_KEY=<clave autorizada> node scripts/verify-luna-conversations.mjs`: dos negocios
+  sintéticos con Luna real, herramientas reales y agenda congelada; reserva, duda sin cancelar,
+  reagenda y cancelación explícita. No exige frases fijas de empatía.
+- Banco privado: `node storage/vault/replay-franciskom/banco.mjs <fase-nueva> gpt-6-luna --all --frozen`.
+  Conserva la misma foto de catálogo/conocimiento, reloj, casos y huella del fixture. No vuelve a
+  consultar producción durante los casos. Los historiales privados no se suben a GitHub.
+
 ## Resultados intermedios
+
+La candidata posterior a esos resultados pasó 68/68 pruebas locales, 12/12 gates, 53/53
+replays congelados con GPT-6 Luna y ocho turnos completos de dos negocios sintéticos.
+Evidencia resumida: `reports/franciskom-luna6-2026-11-16.json`.
 
 - Referencia inicial sobre los cambios locales anteriores: 28/30, sin excepciones.
 - Correcciones ampliadas: 45/47; un límite de pasos y un fallo de expectativa.
@@ -57,13 +75,13 @@ que ya puede ejercitarse con respuestas guionadas.
 
 ## Antes de desplegar o reactivar
 
-1. Cerrar la corrida actual y revisar también el texto completo, particularmente tono y errores.
-2. Resolver los fallos que aparezcan; no marcar el plan entero como terminado por un replay verde.
-3. Verificar el despliegue/credencial efectivos de Francisco y recuperar saldo de su cuenta.
-4. La lectura de Calendar ya se verificó con configuración sólo en memoria; falta probar las
-   escrituras de reservas sobre staging aislado.
-5. Portar únicamente la candidata validada, manteniendo pausa, y verificar el despliegue real.
-6. Reactivar sólo después de verificar salud del proveedor. La autorización de pruebas con la
-   clave del restaurante no autoriza cambiar la cuenta productiva de Francisco.
+1. Usar la candidata y evidencia indicadas en `INFORME_REESTRUCTURA_MOTOR.md`.
+2. Aplicar `releases/franciskom-luna6.json` al desplegar y verificar también la selección BYOK
+   efectiva: puede prevalecer sobre LLM_MODEL. Conservar exclusivamente la cuenta de Francisco.
+3. Verificar despliegue, salud del proveedor y control `paused` antes y después del cambio.
+4. Mantener pausa aun con créditos cargados. Reactivar únicamente por indicación de Francisco.
+
+Los contratos de Calendar se ejercitan sin crear citas reales; no se confunde esa prueba con
+una escritura productiva ni una prueba de carrera entre procesos independientes de PostgreSQL.
 
 Los cambios son locales; todavía no existe certificación productiva ni despliegue de GPT-6 Luna.

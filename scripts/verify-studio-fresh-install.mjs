@@ -88,6 +88,7 @@ try {
     method: 'PUT', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       enabled: true, timezone: 'America/Santiago', confirmation_mode: 'manual',
+      conversation_policy: { version: 1, owner_name: 'Camila', business_scope: 'cortes de cabello', default_service: 'Corte QA' },
       locations: [{ name: 'Local QA', address: 'Dirección QA' }],
       services: [{ name: 'Corte QA', duration_minutes: 30, price_clp: 10000 }],
       resources: [{ name: 'Barbero QA', specialty: 'Barbería', services: ['Corte QA'], location: 'Local QA' }],
@@ -95,6 +96,14 @@ try {
     })
   });
   assert.equal(agendaResponse.status, 200, `configurar catálogo explícito debe funcionar: ${await agendaResponse.text()}`);
+  const storedConfig = await (await fetch(`http://127.0.0.1:${port}/api/clients/${clientId}/agenda`)).json();
+  const editableConfig = storedConfig.config || storedConfig;
+  delete editableConfig.conversation_policy;
+  const resave = await fetch(`http://127.0.0.1:${port}/api/clients/${clientId}/agenda`, {
+    method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(editableConfig)
+  });
+  assert.equal(resave.status, 200);
+  assert.equal((await resave.json()).conversation_policy.owner_name, 'Camila', 'Guardar desde una UI anterior no borra la política');
 
   const versionResponse = await fetch(`http://127.0.0.1:${port}/api/clients/${clientId}/versions`, {
     method: 'POST',
@@ -105,6 +114,7 @@ try {
   assert.equal(versionResponse.status, 201, `versionar vertical debe funcionar: ${versionBody}`);
   const version = JSON.parse(versionBody);
   assert.equal(version.package.vertical.key, 'barberia', 'el paquete debe congelar el contrato vertical');
+  assert.equal(version.package.agent.conversation_policy.owner_name, 'Camila', 'Regenerar el paquete conserva la política del negocio');
   assert.ok(version.package.solutions.agenda.agent_flow_contract.tools.includes('update_customer_profile'), 'el contrato debe declarar la ingesta de ficha');
   const rejectedApproval = await fetch(`http://127.0.0.1:${port}/api/clients/${clientId}/versions/${version.versionId}/approve`, { method: 'PUT' });
   assert.equal(rejectedApproval.status, 409, 'no se debe aprobar una versión sin pruebas activas');

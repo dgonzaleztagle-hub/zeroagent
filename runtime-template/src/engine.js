@@ -4,13 +4,12 @@ import { silenceDecision } from './silence-policy.js';
 import { DRAFT_RETRY, runDraftChecks } from './draft-checks.js';
 import { authorizeToolCall } from './tool-authorization.js';
 import { unexpectedCatalogPrices } from './price-checks.js';
+import { resolveConversationPolicy } from './conversation-policy.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { executeAgendaTool, getAgendaToolDefinitions, literalReplies } from './agenda-tools.js';
 import { getAgendaDashboard, listUpcomingAppointmentsForPhone } from './agenda.js';
-import { BASE_BEHAVIOR } from './base-behavior.js';
 import { cancelRequestedByClient as cancelRequestedByClientGuard, dayDiscussed as dayDiscussedGuard, hourChosenByClient as hourChosenByClientGuard, modalityEstablished as modalityEstablishedGuard } from './consent-guards.js';
-import { AGENDA_BEHAVIOR } from './agenda-behavior.js';
 import { liveInjectedFacts } from './business-data.js';
 import { judgeConversationStage } from './conversation-judge.js';
 import { auditDraftGrounding } from './grounding-judge.js';
@@ -104,17 +103,17 @@ const MUTATION_CLAIMS = [
     tool: 'request_human_handoff',
     evidence: 'handoff',
     patterns: [
-      claimPattern(`${IMMEDIATE_NEGATION}\\bte\\s+(?:derive|escale|pase|traspase|comunique)\\b.{0,60}\\b(?:equipo|persona|humano|humana|francisco)\\b`),
+      claimPattern(`${IMMEDIATE_NEGATION}\\bte\\s+(?:derive|escale|pase|traspase|comunique)\\b.{0,60}\\b(?:equipo|persona|humano|humana|[a-z]+)\\b`),
       claimPattern(`${IMMEDIATE_NEGATION}\\b(?:derive|escale|pase|traspase)\\b.{0,60}\\b(?:tu caso|tu consulta|la conversacion)\\b`),
-      claimPattern(`${IMMEDIATE_NEGATION}\\b(?:avise|notifique)\\b.{0,60}\\b(?:equipo|persona|humano|humana|francisco)\\b`),
+      claimPattern(`${IMMEDIATE_NEGATION}\\b(?:avise|notifique)\\b.{0,60}\\b(?:equipo|persona|humano|humana|[a-z]+)\\b`),
       claimPattern(`\\b(?:tu caso|tu consulta|la conversacion)\\b(?!.{0,30}\\b(?:no|nunca)\\b).{0,60}\\b(?:derivad[ao]|escalad[ao]|traspasad[ao])\\b`),
-      claimPattern(`\\b(?:el equipo|francisco|una persona|un humano|una humana)\\b(?!.{0,30}\\b(?:no|nunca)\\b).{0,60}\\b(?:avisad[ao]|notificad[ao])\\b`),
+      claimPattern(`\\b(?:el equipo|[a-z]+|una persona|un humano|una humana)\\b(?!.{0,30}\\b(?:no|nunca)\\b).{0,60}\\b(?:avisad[ao]|notificad[ao])\\b`),
       // La promesa en futuro es el mismo problema que la afirmación en pasado: "voy a avisarle a
       // Francisco" sin llamar la herramienta deja al cliente esperando a alguien que nunca supo
       // de él. Medido el 12-09-2026 sobre un cliente dudando: el modelo anunciaba el aviso en el
       // texto y no ejecutaba nada, 3 de 3 veces.
-      claimPattern(`\\bvoy a (?:avisar|avisarle|derivar|derivarte|escalar|pasar|traspasar|comunicar)\\b.{0,60}\\b(?:equipo|persona|humano|humana|dueno|francisco)\\b`),
-      claimPattern(`\\b(?:le avisare|le aviso|les aviso|avisare)\\b.{0,60}\\b(?:equipo|persona|dueno|francisco)\\b`)
+      claimPattern(`\\bvoy a (?:avisar|avisarle|derivar|derivarte|escalar|pasar|traspasar|comunicar)\\b.{0,60}\\b(?:equipo|persona|humano|humana|dueno|[a-z]+)\\b`),
+      claimPattern(`\\b(?:le avisare|le aviso|les aviso|avisare)\\b.{0,60}\\b(?:equipo|persona|dueno|[a-z]+)\\b`)
     ]
   },
   {
@@ -213,6 +212,15 @@ export function validateMutationClaims(text, toolTrace = [], { appointmentOnFile
 }
 
 async function runTurn(packageData, message, context = {}) {
+  const policy = resolveConversationPolicy(packageData);
+  // Los adaptadores de producción y los del banco congelado recorren el mismo coordinador.
+  // Sólo el código servidor construye este contexto; nunca se acepta desde el payload del cliente.
+  const services = { liveInjectedFacts, getAgendaDashboard, listUpcomingAppointmentsForPhone,
+    executeAgendaTool, routeTurn, judgeConversationStage, auditDraftGrounding, fetch: globalThis.fetch, ...context.services };
+  for (const name of ['routeTurn', 'judgeConversationStage', 'auditDraftGrounding']) {
+    const invoke = services[name];
+    services[name] = (llm, input, options) => invoke(llm, { ...input, policy }, options);
+  }
   const fallback = answer(packageData, message);
   // El runtime cloud puede resolver una cuenta administrada o BYOK por negocio y pasarla
   // por contexto. Studio/playground conserva la configuración local por variables de entorno.
@@ -228,7 +236,7 @@ async function runTurn(packageData, message, context = {}) {
   // Datos/Info que el propio dueño cargó desde su consola: van primero porque son la fuente
   // más reciente (no esperaron rebuild), y no pasaron por curación de Daniel+Claude como sí
   // pasan las confirmed_facts horneadas — ver business-data.js.
-  const liveFacts = await liveInjectedFacts(packageData).catch(() => null);
+  const liveFacts = await services.liveInjectedFacts(packageData).catch(() => null);
   // Si el negocio ya tiene su conocimiento en la base (za_knowledge_facts), esa es la única fuente:
   // los hechos horneados en el paquete quedan sólo como respaldo para un negocio sin Supabase o
   // para cuando la consulta falla. Mezclar ambas fuentes es lo que dejó vivo un hecho obsoleto.
@@ -296,7 +304,7 @@ async function runTurn(packageData, message, context = {}) {
     // acá describía servicios/recursos "horneados" en el último build aprobado, así que un servicio
     // agregado directo en Supabase (sin pasar por un nuevo build) nunca aparecía en las
     // instrucciones del modelo, aunque las herramientas sí lo encontraran y pudieran agendarlo.
-    const liveAgendaDashboard = agendaEnabled ? await getAgendaDashboard(packageData).catch(() => null) : null;
+    const liveAgendaDashboard = agendaEnabled ? await services.getAgendaDashboard(packageData).catch(() => null) : null;
     const catalogSource = liveAgendaDashboard?.catalog || staticAgendaConfig;
     // Enum del catálogo LIVE en la propia definición de la herramienta: el modelo elige de una
     // lista real en vez de escribir el nombre libre y fallar la primera vez contra el match exacto
@@ -308,7 +316,7 @@ async function runTurn(packageData, message, context = {}) {
     // concretos y puede callarse ante avisos, saludos o agradecimientos.
     const upcomingAppointments = Array.isArray(context.upcomingAppointments)
       ? context.upcomingAppointments
-      : (agendaEnabled && context.callerPhone ? await listUpcomingAppointmentsForPhone(packageData, context.callerPhone).catch(() => []) : []);
+      : (agendaEnabled && context.callerPhone ? await services.listUpcomingAppointmentsForPhone(packageData, context.callerPhone).catch(() => []) : []);
     const hasBooking = upcomingAppointments.length > 0;
     // ownerHandled: el hilo lo viene llevando el dueño por fuera. Ahí la decisión del modelo de no
     // intervenir se respeta siempre — antes un "?" en el mensaje la anulaba, y así el bot le
@@ -323,9 +331,9 @@ async function runTurn(packageData, message, context = {}) {
     // TURN_DECISION=off. Si el clasificador falla, el turno sigue como antes.
     let routeVerdict = null;
     if (String(process.env.TURN_DECISION || 'on').toLowerCase() !== 'off' && agendaEnabled) {
-      routeVerdict = await routeTurn(llm, { history, message, nowLabel: new Intl.DateTimeFormat('es-CL', { timeZone: staticAgendaConfig.timezone || 'America/Santiago', weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', hour12: false }).format(nowDate) }, { isGpt5Family: Object.hasOwn(chatCompletionTuning(llm.model), 'reasoning_effort') });
+      routeVerdict = await services.routeTurn(llm, { history, message, nowLabel: new Intl.DateTimeFormat('es-CL', { timeZone: staticAgendaConfig.timezone || 'America/Santiago', weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', hour12: false }).format(nowDate) }, { isGpt5Family: Object.hasOwn(chatCompletionTuning(llm.model), 'reasoning_effort') });
       if (context.diagnostics) context.diagnostics.route = routeVerdict;
-      const routed = actionForRoute(routeVerdict, { message, hasBooking });
+      const routed = actionForRoute(routeVerdict, { message, hasBooking, policy });
       if (routed) {
         return {
           text: routed.text, silent: routed.silent, ...(routed.silent ? { silentReason: routed.silentReason } : {}),
@@ -345,9 +353,9 @@ async function runTurn(packageData, message, context = {}) {
       `Eres ${packageData.agent?.name || 'un asistente'} de ${packageData.business?.display_name || 'un negocio'}.`,
       `Tu función es: ${packageData.agent?.role || 'atender consultas del negocio'}.`,
       `Tono y estilo aprobados: ${(packageData.agent?.tone_policy?.instructions || []).join(' ') || packageData.agent?.tone || 'claro y profesional'}.`,
-      BASE_BEHAVIOR,
+      policy.base_behavior,
       tools.length === 0 ? 'CAPACIDAD EN ESTA CONVERSACIÓN: no tienes ninguna herramienta para ejecutar acciones (agendar, reservar, cotizar en firme, tomar pedidos, etc.). Sólo informas con el conocimiento confirmado. Para cualquier gestión, deriva a una persona; nunca ofrezcas ni des a entender que tú puedes concretarla.' : '',
-      agendaEnabled ? AGENDA_BEHAVIOR : '',
+      agendaEnabled ? policy.agenda_behavior : '',
       agendaEnabled ? (() => {
         const names = list => (list || []).map(item => item.name).filter(Boolean).join('; ') || '(ninguno)';
         // Lo que no se agenda por este canal va en una lista APARTE, no como una nota al lado del
@@ -377,7 +385,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
         content: `${systemPrefix}\n\nFECHA Y HORA ACTUAL (${businessTimeZone}): ${nowLabel}. Usa esto como referencia real para "hoy", "mañana", días de la semana o cualquier fecha relativa — nunca asumas ni inventes otra fecha.\nCALENDARIO DE LOS PRÓXIMOS DÍAS (fecha = cómo se nombra; cópialo tal cual, no calcules días de la semana):\n${upcomingDaysTable(businessTimeZone, 8, nowDate)}\n\nCONOCIMIENTO CONFIRMADO DEL NEGOCIO (razona cuál aplica a la pregunta; no todos son relevantes):\n${factsContext || (agendaEnabled ? '(No hay conocimiento cargado; usa una herramienta de Agenda si corresponde.)' : '(No hay conocimiento confirmado cargado.)')}${internalFacts.length ? `\n\nCRITERIOS INTERNOS DEL NEGOCIO (guían lo que haces; NUNCA los cites, resumas ni expliques al cliente, ni menciones que existen):\n${internalFacts.map((fact, index) => `${index + 1}. ${fact.subject}: ${fact.value}`).join('\n')}` : ''}`
       },
       ...history.map(item => ({ role: item.role, content: item.content })),
-      ...(/^\s*\[(imagen|documento|audio|video|sticker|ubicaci[oó]n)\]/i.test(String(message || '')) ? [{ role: 'system', content: 'El mensaje del cliente trae un archivo adjunto que TÚ NO PUEDES VER NI ESCUCHAR (el marcador entre corchetes lo reemplaza). Nunca afirmes ni supongas qué contiene ("recibí el comprobante", "recibí el RUT", "veo tu examen"). Responde solo a lo que escribió; si el texto depende del archivo, di que no alcanzas a verlo y que Francisco lo revisa, y avísale al dueño.' }] : []),
+      ...(/^\s*\[(imagen|documento|audio|video|sticker|ubicaci[oó]n)\]/i.test(String(message || '')) ? [{ role: 'system', content: 'El mensaje del cliente trae un archivo adjunto que TÚ NO PUEDES VER NI ESCUCHAR (el marcador entre corchetes lo reemplaza). Nunca afirmes ni supongas qué contiene ("recibí el comprobante", "recibí el RUT", "veo tu examen"). Responde solo a lo que escribió; si el texto depende del archivo, di que no alcanzas a verlo y que el equipo lo revisa, y avísale al dueño.' }] : []),
       ...(dayReferences.length ? [{ role: 'system', content: `FECHAS YA CONVERSADAS EN ESTE HILO (resueltas por código respecto del día en que se escribió cada mensaje; si el cliente se refiere a uno de esos días, usa esta fecha y no calcules otra):\n${dayReferences.join('\n')}` }] : []),
       ...(hasBooking ? [{ role: 'system', content: (() => {
         const norm = value => String(value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -387,7 +395,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           .map(item => String(item.text).replace(/\s+/g, ' ')).join(' | ');
         const fmt = new Intl.DateTimeFormat('es-CL', { timeZone: businessTimeZone, weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', hour12: false });
         const list = upcomingAppointments.map(item => `${fmt.format(new Date(item.starts_at))}${item.service ? ` (${item.service})` : ''}`).join('; ');
-        return `ESTE CLIENTE YA TIENE HORA TOMADA: ${list}. Esa venta está cerrada. No le preguntes por su dolor, su historia ni sus antecedentes: eso lo conversa Francisco en la consulta. Atiende sólo lo que pida en concreto: cambiar o cancelar la hora, una hora para otra persona, o una consulta como la ubicación, el precio o cómo pagar — para esas usa responder_textual si hay una respuesta oficial, igual que con cualquier cliente. Antes de responder, juzga con tu criterio qué quiso decir: si el mensaje significa que esa hora ya no le sirve o que se equivocó (de sede, de lugar, de servicio o de día), dicho como lo diga, anúlala con cancel_appointment sólo si pidió anularla (si solo duda, pregúntale "¿te la anulo?"; si pide tiempo para confirmar, como "te confirmo mañana", NO la anules: dile que se la dejas guardada), nómbrale la hora y dale en el mismo mensaje lo que sí buscaba; en ese caso no mandes un bloque oficial solo, y no des teléfonos ni correos de otra sede que no estén en los datos oficiales (el número de este WhatsApp es del negocio, no de otra sede). Datos oficiales de las otras sedes: ${otherSedeFacts || '(usa el conocimiento confirmado)'}. Si sólo avisa que llegó, saluda, agradece, confirma o manda su RUT o correo, no le respondas: guarda el RUT o correo con update_customer_profile si los mandó y llama no_intervenir.`;
+        return `ESTE CLIENTE YA TIENE HORA TOMADA: ${list}. Esa venta está cerrada. No vuelvas a descubrir necesidades ni pidas datos personales ajenos a la gestión: atiende la reserva que ya existe. Atiende sólo lo que pida en concreto: cambiar o cancelar la hora, una hora para otra persona, o una consulta como la ubicación, el precio o cómo pagar — para esas usa responder_textual si hay una respuesta oficial, igual que con cualquier cliente. Antes de responder, juzga con tu criterio qué quiso decir: si el mensaje significa que esa hora ya no le sirve o que se equivocó (de sede, de lugar, de servicio o de día), dicho como lo diga, anúlala con cancel_appointment sólo si pidió anularla (si solo duda, pregúntale "¿te la anulo?"; si pide tiempo para confirmar, como "te confirmo mañana", NO la anules: dile que se la dejas guardada), nómbrale la hora y dale en el mismo mensaje lo que sí buscaba; en ese caso no mandes un bloque oficial solo, y no des teléfonos ni correos de otra sede que no estén en los datos oficiales (el número de este WhatsApp es del negocio, no de otra sede). Datos oficiales de las otras sedes: ${otherSedeFacts || '(usa el conocimiento confirmado)'}. Si sólo avisa que llegó, saluda, agradece, confirma o manda su RUT o correo, no le respondas: guarda el RUT o correo con update_customer_profile si los mandó y llama no_intervenir.`;
       })() }] : []),
       { role: 'user', content: String(message) }
     ];
@@ -469,7 +477,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
       }
       let checked = draft && !/SIN_SEGUIMIENTO/i.test(draft) ? validateMutationClaims(finalizeText(draft), toolTrace, { appointmentOnFile: hasBooking }) : null;
       if (checked?.ok && process.env.GROUNDING_AUDIT !== 'off') {
-        const audit = await auditDraftGrounding(llm, { history, message, draft: checked.text, facts: selectedFacts, toolTrace, booked: upcomingAppointments }, { isGpt5Family: usesDisabledReasoning });
+        const audit = await services.auditDraftGrounding(llm, { history, message, draft: checked.text, facts: selectedFacts, toolTrace, booked: upcomingAppointments }, { isGpt5Family: usesDisabledReasoning });
         if (audit) {
           totalInputTokens += audit.usage.input; totalOutputTokens += audit.usage.output;
           if (audit.promisesNotice) ownerAlert ||= `El agente ofreció avisarte: "${String(message).slice(0, 200)}"`;
@@ -515,7 +523,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     // Sin los paréntesis, "Box Buin (El Recurso)" solo se reconocía como "Box Buin": una paciente
     // que contestó "Recurso" (franciskom, 10-11-2026) nunca fijó modalidad y el bot la hizo girar en
     // círculos sin agendar. Las palabras propias de cada sede (nombre completo y dirección) valen.
-    const GENERIC_PLACE_WORDS = new Set(['buin', 'region', 'metropolitana', 'centro', 'sesion', 'consulta', 'lunes', 'sabado']);
+    const GENERIC_PLACE_WORDS = new Set(policy.generic_place_words);
     const onsiteTokens = [...new Set((catalogSource.locations || [])
       .flatMap(item => normalizeText(`${item.name || ''} ${item.address || ''}`).split(/[^a-z0-9]+/))
       .filter(token => token.length >= 4 && !GENERIC_PLACE_WORDS.has(token)))];
@@ -546,9 +554,9 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
         const first = alreadyConsulted[alreadyConsulted.length - 1].result;
         return `${first.dia}, a las ${first.ofrecer_primero.slice(0, 3).join(', ')} (${first.service})`;
       }
-      const mentionsRespiratory = /respirat|pulm|flema|secreci|bronq|neumon/i.test(userTurns.join(' '));
       const inSite = (catalogSource.services || []).filter(item => item.bookable !== false && !Number(item.travel_buffer_minutes));
-      const service = (mentionsRespiratory ? inSite[0] : inSite.find(item => !/respirat/i.test(String(item.name || '')))) || inSite[0];
+      const preferred = (policy.service_preferences || []).find(rule => new RegExp(rule.when, 'i').test(userTurns.join(' ')));
+      const service = inSite.find(item => item.name === (preferred?.service || policy.default_service)) || inSite[0];
       const resource = (catalogSource.resources || [])[0];
       if (!service || !resource) return null;
       const dayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: businessTimeZone, year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -559,7 +567,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
       let count = 0;
       for (let offset = 0; offset < 7 && count < 2; offset += 1) {
         const day = new Date(nowDate.getTime() + offset * 86_400_000);
-        const result = await executeAgendaTool(packageData, 'get_availability', { service: service.name, resource: resource.name, date: dayFmt.format(day) }, { ...context, now: nowDate }).catch(() => null);
+        const result = await services.executeAgendaTool(packageData, 'get_availability', { service: service.name, resource: resource.name, date: dayFmt.format(day) }, { ...context, now: nowDate }).catch(() => null);
         if (result?.ok && (result.ofrecer_primero || []).length) {
           toolTrace.push({ name: 'get_availability', result });
           const label = offset === 0 ? `hoy ${labelFmt.format(day)}` : offset === 1 ? `mañana ${labelFmt.format(day)}` : labelFmt.format(day);
@@ -573,7 +581,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
     for (let round = 0; round < 7; round++) {
       let data;
       try {
-        const response = await fetch(`${llm.baseUrl}/chat/completions`, {
+        const response = await services.fetch(`${llm.baseUrl}/chat/completions`, {
           method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${llm.apiKey}` },
           body: JSON.stringify({
             model: llm.model, max_completion_tokens: 260, messages,
@@ -601,7 +609,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
       }
       const calls = assistantMessage.tool_calls || [];
       if (!calls.length) {
-        const draftContext = { catalogSource, selectedHour, literalSent, literalSuggested, closingRetried, round, assistantMessage, messages, literalResult, allowSilence, ownerHandled, bringsNewRequest, changedBookingThisTurn, toolTrace, hasBooking, postponesConfirmation, llm, usage, emptyRetried, hoursRetried, HOUR_PATTERN, echoRetried, lastAssistantText, agendaEnabled, stageRejections, handoffReason, stageVerdict, judgeConversationStage, usesDisabledReasoning, totalInputTokens, totalOutputTokens, rejectDraft, packageData, message, history, mentionRetried, forbiddenRetried, userTurns, asksPermissionToBook, postponesSale, internalSources, detectInternalLeak, leakRetried, repeatsLastAgentMessage, dropRepeatedSentences, repeatRetried, groundingRetried, auditDraftGrounding, selectedFacts, upcomingAppointments, groundingNotice, bookingChangeNotice, ownerAlert, finalizeText, validateMutationClaims, mutationRetried };
+        const draftContext = { catalogSource, selectedHour, literalSent, literalSuggested, closingRetried, round, assistantMessage, messages, literalResult, allowSilence, ownerHandled, bringsNewRequest, changedBookingThisTurn, toolTrace, hasBooking, postponesConfirmation, llm, usage, emptyRetried, hoursRetried, HOUR_PATTERN, echoRetried, lastAssistantText, agendaEnabled, stageRejections, handoffReason, stageVerdict, judgeConversationStage: services.judgeConversationStage, usesDisabledReasoning, totalInputTokens, totalOutputTokens, rejectDraft, packageData, message, history, mentionRetried, forbiddenRetried, userTurns, asksPermissionToBook, postponesSale, internalSources, detectInternalLeak, leakRetried, repeatsLastAgentMessage, dropRepeatedSentences, repeatRetried, groundingRetried, auditDraftGrounding: services.auditDraftGrounding, selectedFacts, upcomingAppointments, groundingNotice, bookingChangeNotice, ownerAlert, finalizeText, validateMutationClaims, mutationRetried };
         const checkedDraft = await runDraftChecks(draftContext);
         ({ closingRetried, emptyRetried, hoursRetried, echoRetried, stageRejections, stageVerdict, totalInputTokens, totalOutputTokens, leakRetried, repeatRetried, groundingRetried, groundingNotice, ownerAlert, mutationRetried } = draftContext);
         if (checkedDraft === DRAFT_RETRY) continue;
@@ -661,7 +669,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           // completo: la sede de su hora tiene un valor y se le dice en una frase. Reenviarlo mezclaba los
           // $30.000 de otra sede con los $36.000 de la suya (franciskom, 09-10-2026).
           if (chosen && !literalSent && hasBooking && /\$\s?\d/.test(chosen.text) && String(message || '').trim().split(/\s+/).length <= 8) {
-            answerTool({ ok: false, action: 'answer_in_words', message: 'El cliente ya tiene una hora tomada y hace una pregunta corta. No mandes el bloque de precios entero: respóndele en una frase con el valor de la sede de SU hora. Si el monto que menciona es el de otra sede o servicio, dile expresamente que ese valor corresponde a esa otra sede y cuál es el de su hora ("ese valor es de la otra sede; tu hora es en <su sede> y vale <valor de esa sede>"), usando el conocimiento confirmado. Siempre da el valor de su sede en la misma respuesta: nunca respondas que "depende" ni lo derives a Francisco por una pregunta de precio que está en el conocimiento confirmado.' });
+            answerTool({ ok: false, action: 'answer_in_words', message: 'El cliente ya tiene una hora tomada y hace una pregunta corta. No mandes el bloque de precios entero: respóndele en una frase con el valor de la sede de SU hora. Si el monto que menciona es el de otra sede o servicio, dile expresamente que ese valor corresponde a esa otra sede y cuál es el de su hora ("ese valor es de la otra sede; tu hora es en <su sede> y vale <valor de esa sede>"), usando el conocimiento confirmado. Siempre da el valor de su sede en la misma respuesta: nunca respondas que "depende" ni lo derives a el equipo por una pregunta de precio que está en el conocimiento confirmado.' });
             continue;
           }
           // Si en este turno se anuló o se cambió la hora, el bloque no puede ir solo: el cliente se
@@ -674,7 +682,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           const bookedOnsite = upcomingAppointments.some(item => (catalogSource.services || []).find(service => normalizeText(service.name) === normalizeText(item.service))?.delivery_mode !== 'mobile');
           if (chosen && !literalSent && hasBooking && offersBothModes && bookedOnsite && HOME_VISIT.test(String(message || '')) && /maps\.|waze/i.test(chosen.text || '')) {
             ownerAlert = ownerAlert || `Tiene hora en la consulta, pero dice que la sesión es a domicilio: "${String(message || '').slice(0, 200)}". Revisa la modalidad de su cita.`;
-            answerTool({ ok: false, action: 'mode_mismatch', message: 'No se envió la ubicación: el cliente dice que la sesión es en su casa y su hora quedó en la consulta. Dile en una frase que le avisas a Francisco para dejarla a domicilio y pídele la dirección (calle, número y comuna). No anules ni cambies la hora.' });
+            answerTool({ ok: false, action: 'mode_mismatch', message: 'No se envió la ubicación: el cliente dice que la sesión es en su casa y su hora quedó en la consulta. Dile en una frase que le avisas a el equipo para dejarla a domicilio y pídele la dirección (calle, número y comuna). No anules ni cambies la hora.' });
             continue;
           }
           if (chosen && !literalSent && hasBooking && changedBookingNow) {
@@ -713,7 +721,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
             // 14-09-2026). Para domicilio lo que falta es la dirección.
             const wantsHomeVisit = HOME_VISIT.test(String(message || ''));
             // Después de un bloque oficial (precio, qué incluye) el juez decide si toca ofrecer horas o preguntar qué le pasa.
-            const stageAfterLiteral = wantsHomeVisit ? null : await judgeConversationStage(llm, { history, message, draft: '' }, { isGpt5Family: usesDisabledReasoning }).catch(() => null);
+            const stageAfterLiteral = wantsHomeVisit ? null : await services.judgeConversationStage(llm, { history, message, draft: '' }, { isGpt5Family: usesDisabledReasoning }).catch(() => null);
             if (stageAfterLiteral) { totalInputTokens += stageAfterLiteral.usage.input; totalOutputTokens += stageAfterLiteral.usage.output; }
             const warmUp = !wantsHomeVisit && stageAfterLiteral?.stage === 'conversar';
             const waiting = !wantsHomeVisit && stageAfterLiteral?.stage === 'esperar';
@@ -757,7 +765,7 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
         // oferta de horas para TODO aviso dejaba estas consultas sin destinatario. El modelo sigue
         // recibiendo la política comercial en la herramienta, pero el aviso ya decidido se cumple.
         // clientTexts: lo que dijo el cliente, para que las herramientas verifiquen que un dato extraído (la comuna) salió de él y no lo supuso el modelo.
-        const result = await executeAgendaTool(packageData, name, args, { ...context, now: nowDate, clientTexts: userTurns });
+        const result = await services.executeAgendaTool(packageData, name, args, { ...context, now: nowDate, clientTexts: userTurns });
         // Claudia (franciskom, 09-10-2026) había pedido en septiembre los datos del centro médico y hoy
         // pidió "una hora": el bot le dejó el Box sin que nadie le preguntara la sede. Si en la
         // conversación (de cualquier día) apareció otra sede, las horas no se ofrecen sin decirlo.
@@ -765,8 +773,8 @@ Servicios: ${servicesDetail}. Profesionales: ${names(catalogSource.resources)}.$
           const asked = String(args?.location || args?.service || '').toLowerCase();
           const otherSedes = (catalogSource.locations || []).map(item => String(item.name || '').replace(/\(.*?\)/g, '').trim().toLowerCase())
             .filter(term => term && !asked.includes(term));
-          const mentioned = [...history.filter(item => item.role === 'user').map(item => item.content), message].some(text => [...otherSedes, 'centro médico', 'centro medico'].some(term => String(text || '').toLowerCase().includes(term)));
-          if (mentioned) result.aviso_sede = 'En esta conversación apareció otra sede (el centro médico). Estas horas son de la sede que consultaste, no de esa. Al ofrecerlas nombra la sede con su valor y, en una frase, aclara que si el cliente buscaba la otra sede esa hora se coordina directo con ellos; pregúntale cuál prefiere antes de dejarle una hora tomada.';
+          const mentioned = [...history.filter(item => item.role === 'user').map(item => item.content), message].some(text => [...otherSedes, ...policy.external_place_words].some(term => String(text || '').toLowerCase().includes(term)));
+          if (mentioned) result.aviso_sede = 'En esta conversación apareció otra sede. Estas horas son de la sede que consultaste, no de esa. Al ofrecerlas nombra la sede con su valor y aclara cómo se coordina la otra sede según los datos confirmados; pregúntale cuál prefiere antes de tomar una hora.';
         }
         if (name === 'avisar_al_dueno' && result?.ok) ownerAlert = String(args?.reason || 'El cliente necesita que el dueño entre a la conversación.').slice(0, 400);
         if (name === 'request_human_handoff' && result?.ok) handoffReason = String(args?.reason || '').slice(0, 400);

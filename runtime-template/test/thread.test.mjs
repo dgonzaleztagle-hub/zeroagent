@@ -7,14 +7,14 @@ test('etiqueta cliente, bot y dueño con actor explícito', () => {
     { role: 'user', actor: 'client', content: 'Hola' },
     { role: 'assistant', actor: 'owner', content: 'Hola, ¿cómo sigues?' },
     { role: 'user', actor: 'client', content: 'Mejor' }
-  ]).map(x => x.who), ['CLIENTE', 'FRANCISCO', 'CLIENTE']);
+  ]).map(x => x.who), ['CLIENTE', 'DUEÑO', 'CLIENTE']);
 });
 
 test('mantiene compatibilidad con la nota histórica de Francisco', () => {
   assert.equal(labelThread([
     { role: 'system', content: 'El siguiente mensaje lo escribió Francisco (el dueño) en persona desde su WhatsApp, no tú.' },
     { role: 'assistant', content: 'Nos vemos a las 12' }
-  ])[0].who, 'FRANCISCO');
+  ])[0].who, 'DUEÑO');
 });
 
 test('distingue saludo automático y conserva notas', () => {

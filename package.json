@@ -5,6 +5,7 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
+    "test:certify": "node scripts/verify-runtime-certification.mjs",
     "start": "node server.js",
     "dev": "node server.js",
     "test:agenda-package": "node scripts/verify-agenda-package.mjs",

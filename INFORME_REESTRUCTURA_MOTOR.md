@@ -1,8 +1,15 @@
 # Revisión, correcciones y evaluación con GPT-6 Luna
 
-Estado: candidata local evaluada en lectura; reestructura parcialmente implementada. No desplegada.
+Estado: candidata con certificación local, SQL real y conversaciones con GPT-6 Luna. No desplegada.
 Francisco sigue pausado.
 El alcance y los pendientes se detallan en `PLAN_REESTRUCTURA_MOTOR_V2.md`.
+
+Resultado final de la segunda revisión: **68/68 pruebas locales, 12/12 gates, 53/53 casos
+congelados con GPT-6 Luna y ocho turnos completos en dos negocios sintéticos**. Cero errores
+del banco final y cero intentos de acceso externo fuera de inferencia durante los casos.
+Resumen publicable y huellas: `reports/franciskom-luna6-2026-11-16.json`.
+La corrida congelada final costó aproximadamente US$0,0302; es una estimación de inferencia,
+no una consulta de saldo. Los resultados anteriores se conservan como historial.
 
 ## Cambios locales implementados
 
@@ -76,13 +83,40 @@ Se verificó que el control global continúa `paused` y que no hay mensajes auto
 desde la pausa solicitada. Cambiar el modelo o desplegar requiere portar y verificar la candidata;
 no se cambió el entorno productivo ni se reactivó el bot durante estas pruebas.
 
-## Límites que permanecen abiertos
+## Segunda revisión: contratos y repetibilidad
 
-- Replay histórico reproducible con dependencias congeladas y reloj uniforme en todas las capas.
-- Consentimiento conjunto fecha/hora/modalidad y su invalidación completa ante cambios de idea.
+- El motor acepta dependencias explícitas del banco para congelar las lecturas externas sin
+  cambiar el recorrido productivo. Las herramientas reales validan las solicitudes; los efectos
+  del banco se confirman en una agenda local y nunca se escriben en producción.
+- `booking-selection.js` valida la última elección cronológica y evita cruzar días/horas antiguos.
+  Se verifican negaciones, preguntas, alternativas, meses, años, fechas inválidas y fechas relativas
+  ancladas al mensaje. La propiedad de minutos recorre 24 horas por cuatro minutos por dos
+  formatos, con elección escrita y aceptación, y rechaza el minuto vecino.
+- La primera corrida congelada dio 52/53. Reveló una falla del lector: la rama «las 09» consumía
+  parcialmente «las 09:30». Se corrigió la lectura completa, no la expectativa del caso.
+- Se verificaron RPC y migraciones reales en PostgreSQL embebido (PGlite): duplicación, choque
+  de horarios, pertenencia al teléfono, rollback de reagenda, liberación de cupo y permisos.
+- Se probaron las funciones reales de Calendar con HTTP simulado: rutas por sede/modalidad,
+  invitación por correo, cambio/borrado en el calendario original, 404/410, caída de OAuth y
+  freebusy transitorio. No se crean eventos ni se mandan invitaciones reales.
+- El perfil de Francisco vive en datos versionados. Se preserva al guardar desde Studio incluso
+  si la interfaz omite el campo. Se construyó y verificó una barbería desde una base SQLite temporal.
+- Dos negocios sintéticos completaron ocho turnos con Luna real: reservar, postergar confirmación
+  sin anular, reagendar y cancelar. Una revisión textual detectó que el marcador dry_run del
+  simulador confundía al auditor; el banco ahora comunica éxito sólo después del efecto local.
+  La repetición posterior pasó los ocho turnos y la explicación del cambio.
+- La pausa se prueba por salida: estado pausado, estado desconocido o fallo de lectura impiden
+  enviar. Una lectura remota posterior confirmó que Francisco sigue `paused`.
+
+## Alcance de la candidata y operación
+
 - Consolidación de cortesía, vacío y flujo literal; reducción del contexto mutable de los checks.
-- Extraer completamente la política de Francisco y conservarla al regenerar paquetes en Studio.
-- Integración de escritura sobre staging aislado y observación posterior al despliegue.
-- Decisión de memoria persistente tras medir tráfico real.
+- La separación arquitectónica de esos bloques sigue siendo gradual; los contratos observables
+  se verifican antes de cualquier despliegue. No se presenta esa limpieza como un requisito nuevo.
+- Las pruebas locales no certifican disponibilidad futura de OpenAI, entrega real de WhatsApp,
+  escrituras reales de Google ni concurrencia entre procesos independientes de PostgreSQL.
+- La publicación y la activación son pasos distintos. La configuración objetivo y el orden de
+  verificación están en `releases/franciskom-luna6.json`; recuperar saldo no autoriza activar.
 
-Un resultado verde en el banco no equivale a completar estos pendientes ni a certificar producción.
+El archivo `runtime-template/CANDIDATA_LUNA6.md` acompaña al paquete preparado. El bot seguirá
+pausado hasta la instrucción expresa de Francisco; la cuenta del restaurante no viaja en el paquete.

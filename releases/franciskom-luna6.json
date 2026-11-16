@@ -1,0 +1,16 @@
+{
+  "client_id": "franciskom",
+  "source_branch": "codex/reestructura-motor-luna6",
+  "target": { "LLM_PROVIDER": "openai", "LLM_MODEL": "gpt-6-luna", "RUNTIME_MODE": "production", "CHANNEL_PROVIDER": "zavu" },
+  "required_agent_control": "paused",
+  "credentials": "Conservar exclusivamente la cuenta de Francisco. La clave de Rishtedar sólo está autorizada para pruebas locales.",
+  "local_gate": "npm run test:certify",
+  "llm_gate": "LLM_TEST_API_KEY=<credencial autorizada> node scripts/verify-luna-conversations.mjs",
+  "reactivation": "No activar automáticamente al recuperar saldo. Requiere indicación expresa de Francisco.",
+  "deployment_verification": [
+    "Verificar selección efectiva de modelo: BYOK en Supabase prevalece sobre las variables de entorno.",
+    "Verificar que el control global siga paused antes y después del despliegue.",
+    "Comprobar saldo/acceso con la cuenta de Francisco sin generar mensajes a clientes.",
+    "Mantener pausa aunque las comprobaciones sean exitosas."
+  ]
+}

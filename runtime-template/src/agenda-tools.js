@@ -47,7 +47,7 @@ function homeZoneBlock(config, service, location, comuna, clientTexts) {
   const zoneList = (config?.home_visit_zone || []).join(', ');
   if (check.status === 'missing') return { error: 'comuna_required', message: `Para atender a domicilio primero necesito la comuna o localidad del cliente (zona de atención: ${zoneList}). Pregúntasela en una frase y vuelve a llamar con "comuna" tal como la dijo; no la supongas.` };
   if (check.status === 'ambiguous') return { error: 'comuna_ambiguous', message: `Esa localidad puede estar dentro o fuera de la zona (${zoneList}). Pregúntale en qué sector exacto está antes de ofrecer horas a domicilio.` };
-  if (check.status === 'outside') return { ok: true, action: 'outside_zone', zona_de_atencion: zoneList, message: `"${comuna}" está fuera de la zona de atención a domicilio (${zoneList}). NO ofrezcas horas a domicilio: dile en una frase que ahí el traslado lo coordina Francisco, ofrécele el Box Buin consultando get_availability con location "Box Buin", y avisa a Francisco con avisar_al_dueno.` };
+  if (check.status === 'outside') return { ok: true, action: 'outside_zone', zona_de_atencion: zoneList, message: `"${comuna}" está fuera de la zona de atención a domicilio (${zoneList}). No ofrezcas horas a domicilio: ese traslado lo confirma el equipo. Ofrece atención en una sede agendable del catálogo y avisa al equipo con avisar_al_dueno.` };
   return null;
 }
 const normalizePhone = value => String(value || '').replace(/\D/g, '');
@@ -69,7 +69,7 @@ export function getAgendaToolDefinitions(packageData, catalog, options = {}) {
   const resourceSchema = withEnum({ type: 'string' }, namesOf(catalog?.resources));
   const locationSchema = withEnum({ type: 'string' }, namesOf(catalog?.locations));
   return [
-    { type: 'function', function: { name: 'get_availability', description: 'Consulta los horarios realmente disponibles. Úsala SIEMPRE que pregunten por horarios, disponibilidad o cupos, incluidas preguntas de sí/no como "¿tienen hora?" o "¿hay cupo?". Nunca inventes horarios ni respondas disponibilidad sin llamarla. Para saber si hay hora sólo hace falta la SEDE (Box Buin o domicilio) — el servicio exacto (sesión general, sesión respiratoria) casi no cambia la duración real y es una pregunta posterior, no un requisito para buscar hora; pásalo sólo si el cliente ya lo dijo espontáneamente.', parameters: { type: 'object', properties: { location: { type: 'string', description: 'Sede pedida por el cliente.', enum: ['Box Buin', 'Domicilio'] }, service: serviceSchema, resource: resourceSchema, date: { type: 'string', description: 'YYYY-MM-DD' }, preferencia: { type: 'string', enum: ['manana', 'tarde', 'noche', 'lo_mas_tarde', 'lo_mas_temprano'], description: 'Preferencia de horario que expresó el cliente: "en la mañana" -> manana; "en la tarde" -> tarde; "después del trabajo"/"de noche" -> noche; "lo más tarde posible" -> lo_mas_tarde; "lo más temprano posible" -> lo_mas_temprano. Pásala siempre que el cliente diga algo así; si no dijo nada, omítela.' }, comuna: { type: 'string', description: 'Sólo para atención a domicilio: la comuna o localidad que dijo el cliente, tal cual. No la supongas ni la inventes; si no la dijo, pregúntasela antes de consultar.' }, fuera_de: { type: 'array', description: 'Rangos en que el cliente dijo en CUALQUIER momento de la conversación que NO puede, en hora local, para que la herramienta los saque. Ej.: "entreno de 17:30 a 22:30" -> [{"desde":"17:30","hasta":"22:30"}]; "sólo después de las 18" -> [{"desde":"00:00","hasta":"18:00"}]; "en la mañana" -> [{"desde":"13:00","hasta":"23:59"}]. Pásalo en cada consulta mientras siga vigente; omítelo si no dijo nada.', items: { type: 'object', properties: { desde: { type: 'string', description: 'HH:MM' }, hasta: { type: 'string', description: 'HH:MM' } }, required: ['desde', 'hasta'] } } }, required: ['location', 'resource', 'date'] } } },
+    { type: 'function', function: { name: 'get_availability', description: 'Consulta los horarios realmente disponibles. Úsala SIEMPRE que pregunten por horarios, disponibilidad o cupos, incluidas preguntas de sí/no como "¿tienen hora?" o "¿hay cupo?". Nunca inventes horarios ni respondas disponibilidad sin llamarla. Usa la sede y el servicio que el cliente eligió, con los nombres del catálogo. Si falta una elección necesaria o hay varias opciones, pide una aclaración.', parameters: { type: 'object', properties: { location: { ...locationSchema, description: 'Sede pedida por el cliente, con su nombre exacto de catálogo.' }, service: serviceSchema, resource: resourceSchema, date: { type: 'string', description: 'YYYY-MM-DD' }, preferencia: { type: 'string', enum: ['manana', 'tarde', 'noche', 'lo_mas_tarde', 'lo_mas_temprano'], description: 'Preferencia de horario que expresó el cliente: "en la mañana" -> manana; "en la tarde" -> tarde; "después del trabajo"/"de noche" -> noche; "lo más tarde posible" -> lo_mas_tarde; "lo más temprano posible" -> lo_mas_temprano. Pásala siempre que el cliente diga algo así; si no dijo nada, omítela.' }, comuna: { type: 'string', description: 'Sólo para atención a domicilio: la comuna o localidad que dijo el cliente, tal cual. No la supongas ni la inventes; si no la dijo, pregúntasela antes de consultar.' }, fuera_de: { type: 'array', description: 'Rangos en que el cliente dijo en CUALQUIER momento de la conversación que NO puede, en hora local, para que la herramienta los saque. Ej.: "entreno de 17:30 a 22:30" -> [{"desde":"17:30","hasta":"22:30"}]; "sólo después de las 18" -> [{"desde":"00:00","hasta":"18:00"}]; "en la mañana" -> [{"desde":"13:00","hasta":"23:59"}]. Pásalo en cada consulta mientras siga vigente; omítelo si no dijo nada.', items: { type: 'object', properties: { desde: { type: 'string', description: 'HH:MM' }, hasta: { type: 'string', description: 'HH:MM' } }, required: ['desde', 'hasta'] } } }, required: ['location', 'resource', 'date'] } } },
     { type: 'function', function: { name: 'get_my_appointment', description: 'Consulta las reservas activas del cliente que escribe. Requiere identidad verificada por canal.', parameters: { type: 'object', properties: {} } } },
     { type: 'function', function: { name: 'create_appointment', description: 'Crea la reserva apenas tengas los datos requeridos (nombre, servicio, profesional, horario) y el cliente haya confirmado que quiere agendar ese horario. Al pedir los datos pídelos TODOS en la misma frase: nombre y apellido, RUT y correo (ej. "para dejarte tomada la hora necesito tu nombre y apellido, tu RUT para la boleta y un correo, así te llega la invitación al calendario"). Pregúntalo UNA sola vez: si el cliente no los da o responde sin alguno, AGENDA IGUAL con lo que tengas y menciona al confirmar qué dato quedó pendiente para la boleta — nunca retengas la hora esperando el RUT ni vuelvas a insistir. Salvo el nombre, ninguno de esos datos bloquea la reserva. Si la respuesta trae ask_intake_details:true, sigue el texto de intake_prompt para pedir esos datos opcionales DESPUÉS, en el mismo mensaje donde confirmas que la hora quedó agendada — nunca antes de crear la reserva. Si la respuesta trae action:"needs_manual_confirmation", NO digas que la reserva quedó agendada: sigue el mensaje que te devuelve la herramienta (el profesional debe confirmar esa hora en particular manualmente).', parameters: { type: 'object', properties: { customer_name: { type: 'string', description: 'Nombre y apellido de quien ESCRIBE (el dueño del teléfono). Una dirección (calle y número) nunca es un nombre.' }, patient_name: { type: 'string', description: 'Nombre de quien se ATIENDE, sólo si es otra persona (hijo, mamá, pareja). Si son varias personas, una reserva por cada una.' }, email: { type: 'string', description: 'Correo del cliente, si lo dio.' }, rut: { type: 'string', description: 'RUT del cliente, si lo dio (se pide para emitir la boleta).' }, address: { type: 'string', description: 'Dirección de atención (calle, número, comuna) — obligatoria si el servicio es a domicilio.' }, comuna: { type: 'string', description: 'Sólo a domicilio: la comuna o localidad del cliente, tal como la dijo.' }, service: serviceSchema, resource: resourceSchema, location: locationSchema, date: { type: 'string', description: 'Día de la hora, YYYY-MM-DD.' }, time: { type: 'string', description: 'Hora local HH:MM, tal como viene en hora_local de get_availability (ej. 18:30). Nunca conviertas zonas horarias.' }, notes: { type: 'string' } }, required: ['customer_name', 'service', 'resource', 'date', 'time'] } } },
     { type: 'function', function: { name: 'update_customer_profile', description: 'Guarda el RUT o el correo que el cliente entrega después de agendar. Es SÓLO para guardar esos datos: no implica crear, cambiar ni revisar ninguna reserva. Llámala apenas entregue alguno.', parameters: { type: 'object', properties: { email: { type: 'string' }, rut: { type: 'string' } } } } },
@@ -77,14 +77,14 @@ export function getAgendaToolDefinitions(packageData, catalog, options = {}) {
     { type: 'function', function: { name: 'reschedule_appointment', description: 'Cambia la hora de una reserva del cliente que escribe, después de que eligió día y hora. Si tiene una sola reserva activa no hace falta la referencia. Si el cambio no se puede, la reserva original queda intacta y la respuesta trae alternativas reales de ese día: ofrécelas. Nunca canceles para cambiar una hora.', parameters: { type: 'object', properties: { reference: { type: 'string', description: 'Referencia ZA-... sólo si la tienes de una herramienta en este turno; si no, omítela.' }, date: { type: 'string', description: 'Día nuevo, YYYY-MM-DD.' }, time: { type: 'string', description: 'Hora local nueva HH:MM, tal como viene en hora_local de get_availability.' } }, required: ['date', 'time'] } } },
     ...(literalReplies(packageData).length ? [{ type: 'function', function: { name: 'responder_textual', description: `Envía una respuesta oficial del negocio TAL CUAL fue escrita por el dueño. Úsala SIEMPRE que el mensaje del cliente caiga en uno de estos casos, en vez de redactar tú la respuesta:
 ${literalReplies(packageData).map(item => `- "${item.id}": ${item.when}`).join('\n')}
-El texto se manda literal y completo; tú no lo reescribes, no lo resumes y no le agregas nada antes ni después. NO la uses cuando el cliente hace una pregunta puntual que se contesta con un dato ("¿son 30 mil?", "¿es quiropráctico?", "¿atienden hasta las 8?"): respóndele tú en una frase con los hechos confirmados, usando el precio o la sede de su hora si ya tiene una. El bloque oficial es para cuando pide la información completa y todavía no la tiene.`, parameters: { type: 'object', properties: { id: { type: 'string', enum: literalReplies(packageData).map(item => item.id), description: 'Cuál de las respuestas oficiales corresponde.' }, ademas: { type: 'string', enum: literalReplies(packageData).map(item => item.id), description: 'Si en el mismo mensaje el cliente preguntó por DOS cosas que tienen respuesta oficial (ej. dónde queda y cuánto vale), el id de la segunda. Omítelo si preguntó una sola.' } }, required: ['id'] } } }] : []),
+El texto se manda literal y completo; tú no lo reescribes, no lo resumes y no le agregas nada antes ni después. NO la uses cuando el cliente hace una pregunta puntual que se contesta con un dato ("¿son 30 mil?", "¿ofrecen ese servicio?", "¿atienden hasta las 8?"): respóndele tú en una frase con los hechos confirmados, usando el precio o la sede de su hora si ya tiene una. El bloque oficial es para cuando pide la información completa y todavía no la tiene.`, parameters: { type: 'object', properties: { id: { type: 'string', enum: literalReplies(packageData).map(item => item.id), description: 'Cuál de las respuestas oficiales corresponde.' }, ademas: { type: 'string', enum: literalReplies(packageData).map(item => item.id), description: 'Si en el mismo mensaje el cliente preguntó por DOS cosas que tienen respuesta oficial (ej. dónde queda y cuánto vale), el id de la segunda. Omítelo si preguntó una sola.' } }, required: ['id'] } } }] : []),
     // Dos herramientas distintas a propósito. La primera CALLA al agente en ese hilo, así que es
     // sólo para los casos en que seguir contestando sería peor; la segunda avisa al dueño sin
     // interrumpir la atención. Mientras existió una sola, descrita como "cuando hay un problema
     // real", el modelo la usaba con cualquier paciente con dolor —9 de 18 derivaciones reales de
     // la primera semana de franciskom eran pacientes comunes que había que llevar a una hora— y
     // dejaba el hilo mudo 12 h mientras el cliente seguía preguntando precio y horarios.
-    { type: 'function', function: { name: 'request_human_handoff', description: 'Traspasa la conversación a una persona; el agente deja de atender ese hilo. Llámala cuando el cliente pide hablar con una persona, cuando el mensaje es de un tema ajeno al negocio o de un tercero, y cuando lo pedido está fuera de lo que el negocio cumple. No es para la gravedad ni los antecedentes de salud del cliente: eso se atiende y se agenda. Ejecútala en el mismo turno en que anuncias el traspaso.', parameters: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] } } },
+    { type: 'function', function: { name: 'request_human_handoff', description: 'Traspasa la conversación a una persona; el agente deja de atender ese hilo. Llámala cuando el cliente pide hablar con una persona, cuando el mensaje es de un tema ajeno al negocio o de un tercero, y cuando lo pedido está fuera de lo que el negocio cumple. No se usa para consultas habituales que están dentro del alcance confirmado del negocio. Ejecútala en el mismo turno en que anuncias el traspaso.', parameters: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] } } },
     // Sólo se ofrece cuando el runtime lo permite (ver historyAllowsSilence): el dueño contesta
     // desde su propio WhatsApp y el canal no nos entrega esos mensajes, así que en un hilo que él
     // está llevando la respuesta correcta puede ser ninguna. Callarse en cualquier otro contexto
@@ -192,13 +192,15 @@ function ownerAppointment(dashboard, reference, callerPhone) {
 // resultado de las herramientas. Camilo (franciskom, 14-09-2026) pidió cambiar su hora, el primer
 // intento sí tenía la referencia y el segundo, un turno después, ya no: "No encontré esa reserva"
 // con su hora intacta. Si la referencia falta o no calza, se resuelve por el teléfono verificado.
-async function resolveOwnedAppointment(packageData, dashboard, reference, callerPhone) {
+async function resolveOwnedAppointment(packageData, dashboard, reference, callerPhone, context = {}) {
   if (!callerPhone) return { error: 'identity_required', message: 'No hay teléfono verificado para consultar o modificar la reserva.' };
   if (String(reference || '').trim()) {
     const owned = ownerAppointment(dashboard, reference, callerPhone);
     if (!owned.error || owned.error === 'ownership_not_verified') return owned;
   }
-  const upcoming = await listUpcomingAppointmentsForPhone(packageData, callerPhone, { graceMinutes: 0 });
+  const upcoming = context.dryRun === true && context.agendaSnapshot
+    ? dashboard.appointments.filter(item => samePhone(item.customer_phone, callerPhone) && isActiveAgendaAppointment(item, context.now ? new Date(context.now).getTime() : Date.now()))
+    : await listUpcomingAppointmentsForPhone(packageData, callerPhone, { graceMinutes: 0 });
   if (!upcoming.length) return { error: 'not_found', message: 'Este número no tiene reservas próximas activas.' };
   if (upcoming.length > 1) return { error: 'which_appointment', message: 'El cliente tiene más de una reserva próxima: pregúntale cuál quiere cambiar, nombrando día y hora.', appointments: upcoming.map(item => ({ reference: item.reference, starts_at: item.starts_at })) };
   const match = (dashboard.appointments || []).find(item => item.id === upcoming[0].id || item.reference === upcoming[0].reference);
@@ -215,7 +217,7 @@ function appointmentOutsideSystem(owned, action, args = {}) {
   return {
     error: 'not_in_system', action: 'owner_notified',
     owner_alert: `Un cliente quiere ${wanted}, pero esa hora no está en el sistema (seguramente la agendaste por fuera). Revísalo con él.`,
-    message: 'Esa hora no está registrada acá, probablemente se agendó directo con Francisco. Ya se le avisó a Francisco para que la revise: díselo al cliente en una frase (que Francisco le confirma el cambio). No le digas que no tiene reserva ni le ofrezcas avisar: el aviso ya salió.'
+    message: 'Esa hora no está registrada acá, probablemente se agendó directo con el equipo. Ya se le avisó a el equipo para que la revise: díselo al cliente en una frase (que el equipo le confirma el cambio). No le digas que no tiene reserva ni le ofrezcas avisar: el aviso ya salió.'
   };
 }
 
@@ -263,6 +265,9 @@ function confirmationData(packageData, locationName, service) {
 
 export async function executeAgendaTool(packageData, name, args = {}, context = {}) {
   try {
+    const readSlots = context.dryRun === true && context.readModel?.getAvailableSlots
+      ? context.readModel.getAvailableSlots
+      : getAvailableSlots;
     const nowMs = context.now ? new Date(context.now).getTime() : Date.now();
     const config = agendaConfig(packageData);
     if (!config) return { error: 'agenda_disabled' };
@@ -285,7 +290,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
         // pidiendo — la diferencia entre servicios de una misma sede es de minutos, no cambia si
         // hay o no bloque libre). Confirmado con Daniel: lo único que realmente cambia la
         // viabilidad del horario es la sede (el traslado a domicilio necesita más bloque).
-        const query = normName(args.location);
+        const query = normName(args.location).replace(/\s*\([^)]*\)/g, '').trim();
         const candidates = (dashboard.catalog.services || [])
           .filter(item => item.bookable !== false)
           .filter(item => normName(item.name).includes(query))
@@ -302,10 +307,10 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
         const inLocation = (dashboard.catalog.services || []).filter(item => normName(item.name).includes(query));
         if (inLocation.length && inLocation.every(item => item.bookable === false)) {
           const note = inLocation.find(item => item.redirect_note)?.redirect_note;
-          return { ok: true, action: 'not_bookable_here', message: `${note || 'Esa sede no se agenda por este canal.'} Dile al cliente que esa hora la tiene que coordinar directamente con ese centro, y ofrécele agendar en las sedes que sí maneja Francisco.` };
+          return { ok: true, action: 'not_bookable_here', message: `${note || 'Esa sede no se agenda por este canal.'} Dile al cliente que esa hora la tiene que coordinar directamente con ese centro, y ofrécele agendar en las sedes que sí maneja el equipo.` };
         }
       }
-      if (!service) return { error: 'catalog_not_found', message: 'Indica la sede (Box Buin o domicilio) para poder buscar hora, o el nombre exacto del servicio si el cliente ya lo dijo.', available_services: dashboard.catalog.services.map(item => item.name) };
+      if (!service) return { error: 'catalog_not_found', message: 'Indica la sede o el servicio elegido con su nombre de catálogo; si falta esa elección, pregunta antes de buscar.', available_services: dashboard.catalog.services.map(item => item.name) };
       // Servicio marcado `bookable:false`: no lo maneja este negocio (ej. atención en un centro
       // de terceros) — no tiene sentido mostrar "disponibilidad" propia para algo que no se agenda acá.
       if (service.bookable === false) return { ok: true, action: 'not_bookable_here', message: service.redirect_note || `"${service.name}" no se agenda por este canal — indícale al cliente que coordine directamente con ese lugar.` };
@@ -319,7 +324,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
       }
       const zoneBlock = homeZoneBlock(config, service, args.location, args.comuna, context.clientTexts);
       if (zoneBlock) return zoneBlock;
-      const slots = await getAvailableSlots(packageData, { service: service.name, resource: resource.name, date: args.date });
+      const slots = await readSlots(packageData, { service: service.name, resource: resource.name, date: args.date });
       const tz = config.timezone || 'America/Santiago';
       const hourFmt = new Intl.DateTimeFormat('es-CL', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
       // Lo que el cliente dijo que no puede se filtra acá y no en el criterio del modelo: con la regla
@@ -356,7 +361,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
       const busy = [];
       if (shortlistSource.length > MAX_SLOTS_TO_OFFER) {
         for (const item of dashboard.appointments || []) {
-          if (!isActiveAgendaAppointment(item) || item.resource !== resource.name || !item.starts_at) continue;
+          if (!isActiveAgendaAppointment(item, nowMs) || item.resource !== resource.name || !item.starts_at) continue;
           const start = new Date(item.starts_at).getTime();
           const end = item.ends_at ? new Date(item.ends_at).getTime() : start + sessionMinutes * 60_000;
           if (Number.isFinite(start) && Number.isFinite(end)) busy.push({ start, end });
@@ -364,7 +369,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
         try {
           const first = new Date(shortlistSource[0].at).getTime() - 6 * 3_600_000;
           const last = new Date(shortlistSource[shortlistSource.length - 1].at).getTime() + 6 * 3_600_000;
-          for (const item of await getGoogleCalendarBusyIntervals(new Date(first).toISOString(), new Date(last).toISOString())) {
+          for (const item of await (context.dryRun === true && context.readModel?.getBusyIntervals ? context.readModel.getBusyIntervals : getGoogleCalendarBusyIntervals)(new Date(first).toISOString(), new Date(last).toISOString())) {
             busy.push({ start: new Date(item.start).getTime(), end: new Date(item.end).getTime() });
           }
         } catch { /* sin Calendar legible: se arma con las citas del bot */ }
@@ -390,12 +395,12 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
     }
     if (name === 'get_my_appointment') {
       if (!context.callerPhone) return { error: 'identity_required', message: 'No hay teléfono verificado para esta conversación.' };
-      const appointments = dashboard.appointments.filter(item => isActiveAgendaAppointment(item) && samePhone(item.customer_phone, context.callerPhone));
+      const appointments = dashboard.appointments.filter(item => isActiveAgendaAppointment(item, nowMs) && samePhone(item.customer_phone, context.callerPhone));
       const tz = config.timezone || 'America/Santiago';
       const whenFmt = new Intl.DateTimeFormat('es-CL', { timeZone: tz, dateStyle: 'short', timeStyle: 'short' });
       // Vacío no significa "no tiene hora": el dueño agenda también por fuera. Si el cliente dice
       // tenerla, cambiar/cancelar igual es el camino, porque esas herramientas avisan al dueño.
-      const outside = appointments.length ? {} : { nota: 'Acá no hay horas registradas para este número, pero el dueño también agenda por fuera. Si el cliente dice que tiene una hora, créele: NO le digas que no tiene reserva. Si quiere cambiarla o cancelarla, llama reschedule_appointment (con el día y la hora nuevos que pidió) o cancel_appointment de todas formas: eso le avisa a Francisco para que lo confirme.' };
+      const outside = appointments.length ? {} : { nota: 'Acá no hay horas registradas para este número, pero el dueño también agenda por fuera. Si el cliente dice que tiene una hora, créele: NO le digas que no tiene reserva. Si quiere cambiarla o cancelarla, llama reschedule_appointment (con el día y la hora nuevos que pidió) o cancel_appointment de todas formas: eso le avisa a el equipo para que lo confirme.' };
       return { ok: true, timezone: tz, appointments: appointments.map(item => ({ reference: item.reference, status: item.status, starts_at: item.starts_at, cuando_local: whenFmt.format(new Date(item.starts_at)), service: item.service, resource: item.resource, location: item.location })), ...outside };
     }
     if (name === 'update_customer_profile') {
@@ -451,7 +456,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
       if (requestedTime - nowMs < minimumNoticeMs) return { error: 'minimum_notice_not_met', message: `Esa hora está demasiado próxima — se necesitan al menos ${config.rules?.minimum_notice_hours || 0} horas de aviso. Ofrece un horario más adelante.` };
       const maximumAdvanceMs = Number(config.rules?.maximum_advance_days || 730) * 86_400_000;
       if (requestedTime - nowMs > maximumAdvanceMs) return { error: 'maximum_advance_exceeded', message: `Esa hora supera la anticipación máxima de ${config.rules?.maximum_advance_days || 730} días. Ofrece una fecha más cercana.` };
-      const existing = (dashboard.appointments || []).find(item => isActiveAgendaAppointment(item)
+      const existing = (dashboard.appointments || []).find(item => isActiveAgendaAppointment(item, nowMs)
         && samePhone(item.customer_phone, context.callerPhone)
         && normName(item.service) === normName(service.name)
         && normName(item.resource) === normName(resource.name)
@@ -477,7 +482,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
           // Nunca ofrecer como "alternativa segura" un servicio que tampoco se agenda por este canal.
           const altService = findByName(dashboard.catalog.services, altServiceName);
           if (altService?.bookable === false) continue;
-          const slots = await getAvailableSlots(packageData, { service: altServiceName, resource: resource.name, date: sameDay }).catch(() => []);
+          const slots = await readSlots(packageData, { service: altServiceName, resource: resource.name, date: sameDay }).catch(() => []);
           const safeSlot = slots.find(iso => !findRiskWindow(packageData, resource.name, iso));
           if (safeSlot) { alternative = { service: altServiceName, starts_at: safeSlot }; break; }
         }
@@ -489,7 +494,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
       }
       if (context.dryRun === true) {
         const day = String(args.date || requestedIso.slice(0, 10));
-        const slots = context.availableSlots || await getAvailableSlots(packageData, { service: service.name, resource: resource.name, date: day });
+        const slots = context.availableSlots || await readSlots(packageData, { service: service.name, resource: resource.name, date: day });
         if (!slots.some(iso => new Date(iso).getTime() === requestedTime)) return { error: 'slot_taken', nothing_created: true, dia_pedido: day, message: 'La hora pedida no está disponible. No se creó ninguna reserva.' };
         return { ok: true, action: 'created', dry_run: true, para_la_confirmacion: confirmationData(packageData, location?.name || '', service), received: args,
           appointment: { status: 'confirmed', reference: 'ZA-ENSAYO', starts_at: requestedIso, cuando_local: `${args.date} ${args.time}` } };
@@ -514,7 +519,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
         const failTz = config.timezone || 'America/Santiago';
         const requestedDay = new Intl.DateTimeFormat('en-CA', { timeZone: failTz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(requestedIso));
         const hourOf = iso => new Intl.DateTimeFormat('es-CL', { timeZone: failTz, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(iso));
-        const sameDay = await getAvailableSlots(packageData, { service: service.name, resource: resource.name, date: requestedDay }).catch(() => []);
+        const sameDay = await readSlots(packageData, { service: service.name, resource: resource.name, date: requestedDay }).catch(() => []);
         const alternatives = sameDay.filter(iso => new Date(iso).getTime() !== requestedTime)
           .sort((a, b) => Math.abs(new Date(a).getTime() - requestedTime) - Math.abs(new Date(b).getTime() - requestedTime))
           .slice(0, 3).sort().map(hourOf);
@@ -555,11 +560,11 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
       // agendó en el Box sin que nadie le dijera cuánto cuesta ESA sede: lo preguntó después y la
       // respuesta mezclaba ambos montos. La confirmación lleva sede y valor de la hora tomada.
       const forConfirmation = confirmationData(packageData, location?.name || '', service);
-      return { ok: true, action: 'created', para_la_confirmacion: forConfirmation, appointment: { reference: appointment.reference, starts_at: appointment.starts_at, cuando_local: createdWhen, status: appointment.status }, ...(missingIntake.length ? { ask_intake_details: true, intake_prompt: `La reserva ya quedó creada. En este mismo mensaje, al confirmar la hora, pide una sola vez lo que falta: ${missingIntake.join(' y ')}. Nada más: ni edad, ni ocupación, ni antecedentes, ni síntomas — eso lo conversa Francisco en la consulta. Si no lo manda, no insistas. Cuando lo mande, guárdalo con update_customer_profile.` } : {}) };
+      return { ok: true, action: 'created', para_la_confirmacion: forConfirmation, appointment: { reference: appointment.reference, starts_at: appointment.starts_at, cuando_local: createdWhen, status: appointment.status }, ...(missingIntake.length ? { ask_intake_details: true, intake_prompt: `La reserva ya quedó creada. En este mismo mensaje, al confirmar la hora, pide una sola vez lo que falta: ${missingIntake.join(' y ')}. Nada más: ni edad, ni ocupación, ni antecedentes, ni síntomas — eso lo conversa el equipo en la consulta. Si no lo manda, no insistas. Cuando lo mande, guárdalo con update_customer_profile.` } : {}) };
     }
     if (name === 'cancel_appointment') {
-      const owned = await resolveOwnedAppointment(packageData, dashboard, args.reference, context.callerPhone); if (owned.error) return appointmentOutsideSystem(owned, 'cancel', args);
-      if (!isActiveAgendaAppointment(owned.appointment)) return { error: 'invalid_status', message: 'Esa reserva ya no se puede cancelar.' };
+      const owned = await resolveOwnedAppointment(packageData, dashboard, args.reference, context.callerPhone, context); if (owned.error) return appointmentOutsideSystem(owned, 'cancel', args);
+      if (!isActiveAgendaAppointment(owned.appointment, nowMs)) return { error: 'invalid_status', message: 'Esa reserva ya no se puede cancelar.' };
       if (context.dryRun !== true) await updateAgendaAppointment(packageData, owned.appointment.id, 'cancelled');
       // El dueño se entera de toda hora que se libera: la de Claudia (09-10-2026) se anuló y él no
       // supo nada hasta revisar el Calendar.
@@ -567,8 +572,8 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
       return { ok: true, action: 'cancelled', reference: owned.appointment.reference, cuando_local: cancelledWhen, owner_alert: `El cliente anuló su hora ${owned.appointment.reference} (${cancelledWhen}). El horario quedó libre.` };
     }
     if (name === 'reschedule_appointment') {
-      const owned = await resolveOwnedAppointment(packageData, dashboard, args.reference, context.callerPhone); if (owned.error) return appointmentOutsideSystem(owned, 'reschedule', args);
-      if (!isActiveAgendaAppointment(owned.appointment)) return { error: 'invalid_status', message: 'Esa reserva ya no se puede reagendar.' };
+      const owned = await resolveOwnedAppointment(packageData, dashboard, args.reference, context.callerPhone, context); if (owned.error) return appointmentOutsideSystem(owned, 'reschedule', args);
+      if (!isActiveAgendaAppointment(owned.appointment, nowMs)) return { error: 'invalid_status', message: 'Esa reserva ya no se puede reagendar.' };
       const current = owned.appointment;
       const tz = config.timezone || 'America/Santiago';
       const whenFmt = new Intl.DateTimeFormat('es-CL', { timeZone: tz, dateStyle: 'short', timeStyle: 'short' });
@@ -582,7 +587,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
       // Alternativas reales del mismo día, con la misma disponibilidad que usa get_availability:
       // lo que se ofrece después de un rechazo tiene que poder tomarse.
       const alternativesSameDay = async () => {
-        const slots = await getAvailableSlots(packageData, { service: current.service, resource: current.resource, date: newDay }).catch(() => []);
+        const slots = await readSlots(packageData, { service: current.service, resource: current.resource, date: newDay }).catch(() => []);
         return slots.filter(iso => new Date(iso).getTime() !== newTime)
           .sort((a, b) => Math.abs(new Date(a).getTime() - newTime) - Math.abs(new Date(b).getTime() - newTime))
           .slice(0, 3).sort().map(iso => hourFmt.format(new Date(iso)));
@@ -603,7 +608,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
       const duration = Number((dashboard.catalog.services || []).find(item => normName(item.name) === normName(current.service))?.duration_minutes) || 60;
       const overlapsItself = Math.abs(newTime - new Date(current.starts_at).getTime()) < duration * 60_000;
       if (!overlapsItself) {
-        const slots = await getAvailableSlots(packageData, { service: current.service, resource: current.resource, date: newDay }).catch(() => null);
+        const slots = await readSlots(packageData, { service: current.service, resource: current.resource, date: newDay }).catch(() => null);
         if (Array.isArray(slots) && !slots.some(iso => new Date(iso).getTime() === newTime)) {
           return unchanged(`Las ${hourFmt.format(new Date(newIso))} de ese día no están disponibles.`);
         }
@@ -619,7 +624,7 @@ export async function executeAgendaTool(packageData, name, args = {}, context = 
         const availabilityProblem = /ocupad|disponib|bloquead|aviso m[ií]nimo|anticipaci|pasado|conflict|overlap|solap/i.test(message);
         return unchanged(message, availabilityProblem ? {} : {
           owner_alert: `No pude cambiar la hora de ${current.reference} (${original.cuando_local}) a ${whenFmt.format(new Date(newIso))}: ${message.slice(0, 160)}. La reserva original sigue igual.`,
-          guidance: 'Hubo un problema técnico al cambiarla. Dile que su hora original sigue igual y que Francisco ya quedó avisado para dejarle el cambio; no le ofrezcas otras horas.'
+          guidance: 'Hubo un problema técnico al cambiarla. Dile que su hora original sigue igual y que el equipo ya quedó avisado para dejarle el cambio; no le ofrezcas otras horas.'
         });
       }
       const riskHandoff = appointment.risk_window

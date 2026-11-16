@@ -18,7 +18,7 @@ test('el pipeline reintenta un vacío y mantiene respuesta cálida intacta', asy
   let drafts = 0;
   globalThis.fetch = async (_url, options) => {
     const body = JSON.parse(options.body);
-    const audit = body.messages[0].content.startsWith('Eres el auditor');
+    const audit = body.messages[0].content.includes('"sin_respaldo"');
     assert.equal(body.reasoning_effort, 'none');
     return Response.json({ choices: [{ message: { content: audit ? '{"sin_respaldo":false,"detalle":"","promete_aviso":false}' : (++drafts === 1 ? '' : 'Pucha, qué lata. ¿Hace cuánto empezó?') } }], usage: { prompt_tokens: 10, completion_tokens: 5 } });
   };
@@ -34,7 +34,7 @@ test('un segundo borrador sin respaldo se bloquea en vez de saltarse el auditor'
   const previous = globalThis.fetch;
   globalThis.fetch = async (_url, options) => {
     const body = JSON.parse(options.body);
-    const audit = body.messages[0].content.startsWith('Eres el auditor');
+    const audit = body.messages[0].content.includes('"sin_respaldo"');
     return Response.json({ choices: [{ message: { content: audit ? '{"sin_respaldo":true,"detalle":"paradero desconocido","promete_aviso":false}' : 'Francisco ya va en camino.' } }], usage: { prompt_tokens: 10, completion_tokens: 5 } });
   };
   try {

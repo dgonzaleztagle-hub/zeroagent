@@ -194,12 +194,12 @@ export async function runDraftChecks(ctx) {
               if (groundingRetried || round >= 6) {
                 rejectDraft('ungrounded_claim_blocked', rawText, audit.detail);
                 ownerAlert ||= `No se pudo verificar lo que iba a afirmar el bot: ${audit.detail}`;
-                return { text: bookingChangeNotice(toolTrace) || 'Necesito que Francisco confirme ese dato. Le dejo tu consulta para que la revise.', confidence: 'safety_blocked', source: [], handoff: false, ownerAlert, provider: llm.provider, model: llm.model, usage: usage(), toolTrace };
+                return { text: bookingChangeNotice(toolTrace) || 'Necesito que el equipo confirme ese dato. Le dejo tu consulta para que la revise.', confidence: 'safety_blocked', source: [], handoff: false, ownerAlert, provider: llm.provider, model: llm.model, usage: usage(), toolTrace };
               }
               groundingRetried = true;
               rejectDraft('ungrounded_claim', rawText, audit.detail);
               messages.push({ role: 'assistant', content: rawText });
-              messages.push({ role: 'system', content: 'Ese mensaje NO se envió: afirma algo que no consultaste con una herramienta en este turno ni está en el conocimiento confirmado (' + audit.detail + '). Lo que se dijo antes en la conversación no vale como dato de hoy. Consulta la herramienta que corresponda y usa sólo lo que devuelve; si no puedes verificarlo, no lo afirmes: reformula sin esa parte y, sólo si es algo que únicamente Francisco puede confirmar, dile que le avisas y llama avisar_al_dueno.' });
+              messages.push({ role: 'system', content: 'Ese mensaje NO se envió: afirma algo que no consultaste con una herramienta en este turno ni está en el conocimiento confirmado (' + audit.detail + '). Lo que se dijo antes en la conversación no vale como dato de hoy. Consulta la herramienta que corresponda y usa sólo lo que devuelve; si no puedes verificarlo, no lo afirmes: reformula sin esa parte y, sólo si es algo que únicamente el equipo puede confirmar, dile que le avisas y llama avisar_al_dueno.' });
               return DRAFT_RETRY;
             }
           }
@@ -234,7 +234,7 @@ export async function runDraftChecks(ctx) {
           mutationRetried = true;
           rejectDraft('unsupported_mutation_claim', rawText, validation.blockedTool);
           messages.push({ role: 'assistant', content: rawText });
-          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: afirma que hiciste o dejaste hecha una operación (' + validation.blockedTool + ') y la herramienta no lo confirmó en este turno. No afirmes lo que no hiciste: si la persona pidió algo que no pudiste hacer o verificar, dile en una frase que le avisas a Francisco para que él le confirme, y llama avisar_al_dueno.' });
+          messages.push({ role: 'system', content: 'Ese mensaje NO se envió: afirma que hiciste o dejaste hecha una operación (' + validation.blockedTool + ') y la herramienta no lo confirmó en este turno. No afirmes lo que no hiciste: si la persona pidió algo que no pudiste hacer o verificar, dile en una frase que le avisas a el equipo para que él le confirme, y llama avisar_al_dueno.' });
           return DRAFT_RETRY;
         }
         const text = validation.text || bookingChangeNotice(toolTrace);

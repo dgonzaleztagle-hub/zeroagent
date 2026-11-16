@@ -1,3 +1,4 @@
+import { resolveConversationPolicy } from './conversation-policy.js';
 import { labelThread } from './thread.js';
 
 /**
@@ -19,10 +20,7 @@ const WEEKDAYS = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes
 const MONTHS = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
 const norm = value => String(value || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
 
-export const FIXED_REPLIES = {
-  consulta_clinica: 'Esa es una consulta que Francisco evalúa en persona, así que yo no puedo recomendarte qué especialista ver ni qué tratamiento seguir. Ya le avisé para que te oriente.',
-  cita_no_verificada: 'No me aparece esa hora en la agenda, aunque puede que Francisco la haya coordinado directamente contigo. Ya le avisé para que te la confirme.'
-};
+export const FIXED_REPLIES = resolveConversationPolicy().fixed_replies;
 
 /** Separa el hilo por autor: la nota de sistema que antecede a un mensaje de Francisco lo marca. */
 export function labelHistory(history = []) {
@@ -85,20 +83,7 @@ export function resolveDayReferences(events, { timeZone = 'America/Santiago', no
   return lines.slice(-max);
 }
 
-const ROUTER_SYSTEM = `Clasificas el último mensaje de un cliente en el WhatsApp de una consulta de kinesiología/quiropráctica (el dueño es Francisco; el ASISTENTE es un bot). Lees el hilo con quién habló cada uno: CLIENTE, ASISTENTE (bot) y FRANCISCO (el dueño, escribiendo él mismo).
-
-Rutas (elige UNA):
-- consulta_clinica: el cliente HACE UNA PREGUNTA o PIDE UNA OPINIÓN explícita sobre algo clínico: qué especialista ver o en qué orden, si debe operarse o ir a otro médico, qué tiene, si es grave, qué tratamiento conviene, qué opina de un examen o informe, si la sesión sirve para su caso concreto. Debe haber un pedido de opinión/recomendación/interpretación dirigido al bot o a Francisco.
-  También es consulta_clinica pedir que interprete el efecto de un ejercicio o explique por qué un movimiento empeora o cambia al hacerlo: eso pide juicio sobre el caso aunque esté formulado informalmente. Evalúa la pregunta pendiente de la ráfaga, aunque el último mensaje sólo agregue cómo se siente.
-  NO es clínica (es "reserva" u "otro"): contar o describir síntomas, dolor, antecedentes, diagnósticos que ya le dieron, tratamientos que probó o medicamentos que toma; responder lo que el ASISTENTE le preguntó (desde cuándo, si se golpeó, si tiene diagnóstico: "nada", "no puedo mover el cuello", "tenía el manguito rotador inflamado", "hace un mes"); mencionar un diagnóstico solo como dato; preguntar precio, horarios, ubicación, medios de pago ni pedir hora. Ante la duda entre clínica y no clínica, elige NO clínica.
-- respuesta_a_dueno: el último mensaje que NO es del cliente en el hilo lo escribió FRANCISCO (una pregunta, un saludo con pregunta, una propuesta de hora o de día) y el mensaje del cliente le responde a él de forma coherente, aunque sea breve o informal ("mucho mejor gracias", "sii perfecto", "a las 20", "ya po"). Mira SIEMPRE quién habló último entre FRANCISCO y ASISTENTE: si fue FRANCISCO y el cliente le contesta, es esta ruta, aunque no sea una pregunta de reserva. Si lo pendiente lo planteó el ASISTENTE, o el cliente hace una consulta nueva e independiente (precio, ubicación, pedir hora), NO es esta ruta.
-- cita_no_verificada: el cliente da por hecha o confirma una cita ("nos vemos el martes", "¿nos vemos hoy?", "voy llegando", "confirmo mi hora") y esa hora NO fue ofrecida por el ASISTENTE en este hilo ni propuesta por FRANCISCO en este hilo. Si el cliente acepta una hora que ofreció el ASISTENTE, es reserva.
-- reserva: conversa para agendar, elige o pregunta por horas, modalidad, datos para la reserva, o contesta algo que el ASISTENTE preguntó.
-- otro: todo lo demás (saludo, precio, ubicación, tema personal, broma, pedido de material, pagos).
-
-El cliente suele mandar varios mensajes seguidos sin que nadie conteste en medio (los verás marcados como "mensajes sin responder"). Clasifica el CONJUNTO: si cualquiera de ellos es un pedido explícito de opinión clínica, la ruta es consulta_clinica aunque el último solo sea un comentario o un síntoma; lo mismo vale para dar por hecha una cita (cita_no_verificada). Un mensaje suelto como "gracias" o "ok" no cancela lo que preguntó antes.
-
-Responde SOLO un JSON: {"ruta":"consulta_clinica"|"respuesta_a_dueno"|"cita_no_verificada"|"reserva"|"otro","motivo":"una frase corta"}`;
+const ROUTER_SYSTEM = resolveConversationPolicy().router_system;
 
 /** Mensajes seguidos del cliente al final del hilo, sin respuesta de nadie entre ellos. */
 export function trailingClientBurst(events, max = 5) {
@@ -126,15 +111,15 @@ export function parseRouterVerdict(text) {
   } catch { return null; }
 }
 
-export async function routeTurn(llm, { history, message, nowLabel }, { isGpt5Family = false, fetchImpl = fetch } = {}) {
+export async function routeTurn(llm, { history, message, nowLabel, policy }, { isGpt5Family = false, fetchImpl = fetch } = {}) {
   try {
-    const events = labelHistory(history);
+    const events = labelThread(history, { ownerLabel: policy?.owner_label || 'DUEÑO' }).filter(event => event.who !== 'NOTA');
     const response = await fetchImpl(`${llm.baseUrl}/chat/completions`, {
       method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${llm.apiKey}` },
       body: JSON.stringify({
         model: llm.model, max_completion_tokens: 120,
         ...(isGpt5Family ? { reasoning_effort: 'none' } : { temperature: 0 }),
-        messages: [{ role: 'system', content: ROUTER_SYSTEM }, { role: 'user', content: formatRouterInput({ events, message, nowLabel }) }]
+        messages: [{ role: 'system', content: policy?.router_system || ROUTER_SYSTEM }, { role: 'user', content: formatRouterInput({ events, message, nowLabel }) }]
       })
     });
     if (!response.ok) return null;
@@ -150,17 +135,18 @@ export async function routeTurn(llm, { history, message, nowLabel }, { isGpt5Fam
  * Qué hace el código con la ruta. null = sigue el modelo conversacional.
  * @returns {{text:string, silent:boolean, silentReason?:string, ownerAlert:string|null, guard:string}|null}
  */
-export function actionForRoute(verdict, { message, hasBooking }) {
+export function actionForRoute(verdict, { message, hasBooking, policy }) {
   if (!verdict) return null;
   const quoted = `"${clip(verdict.burstText || message, 300)}"`;
+  const fixed = policy?.fixed_replies || FIXED_REPLIES;
   if (verdict.route === 'consulta_clinica') {
-    return { text: FIXED_REPLIES.consulta_clinica, silent: false, ownerAlert: `Consulta clínica del cliente (el asistente no opinó): ${quoted}`, guard: 'route_consulta_clinica' };
+    return { text: fixed.consulta_clinica, silent: false, ownerAlert: `Consulta profesional del cliente (el asistente no opinó): ${quoted}`, guard: 'route_consulta_clinica' };
   }
   if (verdict.route === 'cita_no_verificada' && !hasBooking) {
-    return { text: FIXED_REPLIES.cita_no_verificada, silent: false, ownerAlert: `El cliente da por hecha una cita que no figura en la agenda: ${quoted}. Confírmale tú.`, guard: 'route_cita_no_verificada' };
+    return { text: fixed.cita_no_verificada, silent: false, ownerAlert: `El cliente da por hecha una cita que no figura en la agenda: ${quoted}. Confírmale tú.`, guard: 'route_cita_no_verificada' };
   }
   if (verdict.route === 'respuesta_a_dueno') {
-    return { text: '', silent: true, silentReason: 'el cliente responde a lo que planteó Francisco', ownerAlert: null, guard: 'route_respuesta_a_dueno' };
+    return { text: '', silent: true, silentReason: 'el cliente responde al dueño', ownerAlert: null, guard: 'route_respuesta_a_dueno' };
   }
   return null;
 }

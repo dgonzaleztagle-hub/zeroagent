@@ -14,6 +14,7 @@ import { answer as answerDeterministically, answerWithGroq as answerWithRuntimeE
 import { getAgendaToolDefinitions } from './runtime-template/src/agenda-tools.js';
 import { matchExpectedBehavior } from './runtime-template/src/regression-match.js';
 import { getVerticalPack, listVerticalPacks, verticalAgendaDefaults } from './vertical-packs.js';
+import { normalizeConversationPolicy } from './runtime-template/src/conversation-policy.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -370,6 +371,7 @@ function normalizeAgendaConfig(input = {}) {
   const rules = input.rules && typeof input.rules === 'object' ? input.rules : {};
   return {
     enabled: Boolean(input.enabled),
+    conversation_policy: normalizeConversationPolicy(input.conversation_policy),
     pack_version: /^\d+\.\d+\.\d+$/.test(String(input.pack_version || '')) ? String(input.pack_version) : agendaV1Defaults.pack_version,
     booking_mode: ['appointment', 'reservation'].includes(input.booking_mode) ? input.booking_mode : 'appointment',
     timezone: typeof input.timezone === 'string' && input.timezone.trim() ? input.timezone.trim() : 'America/Santiago',
@@ -2349,7 +2351,11 @@ app.get('/api/clients/:id/agenda', async (req, res) => {
 app.put('/api/clients/:id/agenda', async (req, res) => {
   try {
     if (!(await clientExists(req.params.id))) return res.status(404).json({ error: 'Cliente no encontrado.' });
-    const config = normalizeAgendaConfig(req.body || {});
+    const previousRecord = studioDbBackend === 'postgres'
+      ? (await studioSupabaseRequest(`/rest/v1/agenda_configs?client_id=eq.${encodeURIComponent(req.params.id)}&select=config_json`))?.[0]
+      : await db.get('SELECT config_json FROM agenda_configs WHERE client_id = ?', [req.params.id]);
+    const previousConfig = typeof previousRecord?.config_json === 'string' ? JSON.parse(previousRecord.config_json) : previousRecord?.config_json || {};
+    const config = normalizeAgendaConfig({ ...req.body, conversation_policy: Object.hasOwn(req.body || {}, 'conversation_policy') ? req.body.conversation_policy : previousConfig.conversation_policy });
     const now = new Date().toISOString();
     if (studioDbBackend === 'postgres') {
       await studioSupabaseRequest('/rest/v1/agenda_configs?on_conflict=client_id', {
@@ -2443,6 +2449,12 @@ async function buildClientPackage(clientId, version = 'preview') {
   }
   const verticalPack = getVerticalPack(client.vertical_key);
   const { agenda_defaults: _agendaDefaults, ...verticalContract } = verticalPack;
+  let packagePolicy = agenda.conversation_policy;
+  if (!packagePolicy) {
+    try {
+      packagePolicy = normalizeConversationPolicy(JSON.parse(await fs.readFile(path.join(__dirname, 'client-policies', `${encodeURIComponent(clientId)}.json`), 'utf8')));
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
   return {
     standard_version: 1,
     package_type: 'zeroagent-agent',
@@ -2457,6 +2469,7 @@ async function buildClientPackage(clientId, version = 'preview') {
     vertical: verticalContract,
     agent: {
       name: client.agent_name,
+      conversation_policy: packagePolicy,
       tone: client.agent_tone,
       tone_policy: getToneProfile(client.agent_tone),
       role: client.agent_role,

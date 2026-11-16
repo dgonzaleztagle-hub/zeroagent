@@ -1,8 +1,13 @@
+import { candidateMatchesLatestSelection } from './booking-selection.js';
 // Autoriza mutaciones antes de llegar al adaptador de agenda. No hace red ni escribe datos.
 export function authorizeToolCall(ctx) {
   let { name, args, hourChosenByClient, dayDiscussedGuard, message, history, businessTimeZone, nowDate, dayLabel, modalityEstablished, onsiteNames, offersBothModes, bookableCatalog, normalizeText, HOME_VISIT, mentionsOnsite, cancelRequestedByClient, ownerAlert } = ctx;
   let denial;
   const answerTool = result => { denial = result; };
+  if (name === 'create_appointment' || name === 'reschedule_appointment') {
+    const selection = candidateMatchesLatestSelection({ history, message, date: args.date, time: args.time, now: nowDate, timeZone: businessTimeZone });
+    if (!selection.ok) return { allowed: false, ownerAlert, result: { ok: false, action: 'selection_not_current', message: 'No se hizo ningún cambio: esa fecha u hora no corresponde a la última elección inequívoca del cliente. Conserva su elección más reciente; si la rechazó, preguntó por alternativas o no queda clara, pide confirmación del día y la hora juntos antes de reservar.' } };
+  }
         // Una hora se toma o se cambia sólo si el cliente la eligió: tiene que estar en su mensaje o en
         // el último mensaje del agente que él está respondiendo. Rodolfo (14-09-2026) mandó su
         // dirección ("Eduardo Ríos Mackenna 1544, Buin") y el modelo agendó a "Eduardo" a las 19:00,
@@ -40,7 +45,7 @@ export function authorizeToolCall(ctx) {
         }
         if (name === 'cancel_appointment' && !cancelRequestedByClient()) {
           ownerAlert = ownerAlert || `Tiene hora tomada y escribió: "${String(message || '').slice(0, 200)}". El bot no la anuló porque no lo pidió con esas palabras; revisa si la mantiene.`;
-          answerTool({ ok: false, action: 'kept_booking', message: (HOME_VISIT.test(String(message || '')) ? 'Si lo que dice es que la sesión es en su casa: no le ofrezcas anular; dile que le avisas a Francisco para dejarla a domicilio y pídele la dirección (calle, número y comuna). ' : '') + 'No se anuló nada: el cliente no pidió anular su hora. Si pide tiempo para confirmar o tiene un inconveniente ("te confirmo mañana", "tengo turno"), dile en una frase que se la dejas guardada y que te avise; Francisco ya quedó avisado. Si de verdad parece que ya no le sirve o que se equivocó de sede o de lugar, nómbrale su hora, dale en el mismo mensaje lo que sí buscaba (por ejemplo, cómo se agenda en la otra sede) y pregúntale "¿te la anulo?"; espera su respuesta. No le preguntes por su dolor.' });
+          answerTool({ ok: false, action: 'kept_booking', message: (HOME_VISIT.test(String(message || '')) ? 'Si lo que dice es que la sesión es en su casa: no le ofrezcas anular; dile que le avisas a el equipo para dejarla a domicilio y pídele la dirección (calle, número y comuna). ' : '') + 'No se anuló nada: el cliente no pidió anular su hora. Si pide tiempo para confirmar o tiene un inconveniente ("te confirmo mañana", "tengo turno"), dile en una frase que se la dejas guardada y que te avise; el equipo ya quedó avisado. Si de verdad parece que ya no le sirve o que se equivocó de sede o de lugar, nómbrale su hora, dale en el mismo mensaje lo que sí buscaba (por ejemplo, cómo se agenda en la otra sede) y pregúntale "¿te la anulo?"; espera su respuesta. No le preguntes por su dolor.' });
           return { allowed: false, result: denial, ownerAlert };
         }
 
